@@ -22,6 +22,7 @@ DOMAIN=""
 EMAIL=""
 LOCAL=0
 FORCE=0
+BEHIND_PROXY=""
 
 die() { printf '\033[31merror\033[0m %s\n' "$*" >&2; exit 1; }
 
@@ -30,11 +31,17 @@ usage() {
 Usage:
   bootstrap.sh --domain <domain> --email <email>   public deployment, auto-TLS
   bootstrap.sh --local                             *.localhost, plain HTTP
+  bootstrap.sh --domain <d> --behind-proxy <cidr>  external proxy terminates TLS
 
 Options:
   --domain <d>   base domain; yields armada.<d>, av.<d>, relay.<d>, blossom.<d>
   --email <e>    ACME registration contact, also the push VAPID subject
   --local        local mode: no DNS, no certs, no email needed
+  --behind-proxy <cidr>
+                 an external reverse proxy terminates TLS and forwards here.
+                 The stack binds plain HTTP; clients still see https/wss, so
+                 the two sets of URLs diverge. <cidr> is that proxy's address
+                 (e.g. 192.168.1.121/32) — it is trusted to report client IPs.
   --force        overwrite an existing .env (destroys the current identities)
   -h, --help     this
 USAGE
@@ -45,6 +52,7 @@ while [ $# -gt 0 ]; do
     --domain) DOMAIN="${2:-}"; shift 2 ;;
     --email)  EMAIL="${2:-}";  shift 2 ;;
     --local)  LOCAL=1;         shift ;;
+    --behind-proxy) BEHIND_PROXY="${2:-}"; shift 2 ;;
     --force)  FORCE=1;         shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1" ;;
@@ -57,7 +65,8 @@ done
 # ── Addressing ───────────────────────────────────────────────────────────────
 if [ "$LOCAL" -eq 1 ]; then
   [ -n "$DOMAIN" ] && die "--local and --domain are mutually exclusive"
-  SCHEME="http"; WS_SCHEME="ws"
+  [ -n "$BEHIND_PROXY" ] && die "--local and --behind-proxy are mutually exclusive"
+  BIND_SCHEME="http"; PUB_SCHEME="http"; WS_SCHEME="ws"
   DOMAIN="localhost"
   # nostr-push rejects an empty VAPID_SUBJECT at boot, so local mode still
   # needs some contact URI even though nothing will ever read it.
@@ -67,11 +76,22 @@ else
     printf 'Base domain (e.g. example.com): '; read -r DOMAIN
   fi
   [ -n "$DOMAIN" ] || die "--domain is required (or use --local)"
-  if [ -z "$EMAIL" ] && [ -t 0 ]; then
-    printf "Contact email for Let's Encrypt: "; read -r EMAIL
+
+  if [ -n "$BEHIND_PROXY" ]; then
+    # The external proxy owns TLS. This stack binds plain HTTP on the LAN,
+    # but every URL baked into the client — and the origin the broker checks
+    # signed grants against — must still be the PUBLIC https one the browser
+    # actually used. That divergence is the whole reason for this mode.
+    BIND_SCHEME="http"; PUB_SCHEME="https"; WS_SCHEME="wss"
+    # No ACME here, so an email is optional; it is still the VAPID subject.
+    [ -n "$EMAIL" ] || EMAIL="admin@${DOMAIN}"
+  else
+    if [ -z "$EMAIL" ] && [ -t 0 ]; then
+      printf "Contact email for Let's Encrypt: "; read -r EMAIL
+    fi
+    [ -n "$EMAIL" ] || die "--email is required for auto-TLS (or use --local)"
+    BIND_SCHEME="https"; PUB_SCHEME="https"; WS_SCHEME="wss"
   fi
-  [ -n "$EMAIL" ] || die "--email is required for auto-TLS (or use --local)"
-  SCHEME="https"; WS_SCHEME="wss"
 fi
 
 ARMADA_HOST="armada.${DOMAIN}"
@@ -133,15 +153,29 @@ cat > "$ENV_FILE" <<EOF
 BASE_DOMAIN=${DOMAIN}
 ACME_EMAIL=${EMAIL}
 
-ARMADA_SITE=${SCHEME}://${ARMADA_HOST}
-AV_SITE=${SCHEME}://${AV_HOST}
-RELAY_SITE=${SCHEME}://${RELAY_HOST}
-BLOSSOM_SITE=${SCHEME}://${BLOSSOM_HOST}
+# What THIS stack's Caddy binds. http:// here means an external proxy is
+# terminating TLS in front of us.
+ARMADA_SITE=${BIND_SCHEME}://${ARMADA_HOST}
+AV_SITE=${BIND_SCHEME}://${AV_HOST}
+RELAY_SITE=${BIND_SCHEME}://${RELAY_HOST}
+BLOSSOM_SITE=${BIND_SCHEME}://${BLOSSOM_HOST}
 
-# WebSocket forms of the same two origins. Bare origins — the LiveKit SDK
-# appends /rtc itself, so never write it here.
+# What CLIENTS see. Baked into the client bundle, signed over by voice grants,
+# and published in the relay's NIP-11 document — so these are the browser's
+# view, which behind a TLS-terminating proxy is not what we bind above.
+ARMADA_PUBLIC_URL=${PUB_SCHEME}://${ARMADA_HOST}
+AV_PUBLIC_ORIGIN=${PUB_SCHEME}://${AV_HOST}
+RELAY_PUBLIC_URL=${PUB_SCHEME}://${RELAY_HOST}
+BLOSSOM_PUBLIC_URL=${PUB_SCHEME}://${BLOSSOM_HOST}
+
+# WebSocket forms. Bare origins — the LiveKit SDK appends /rtc itself, so
+# never write it here.
 RELAY_WS_URL=${WS_SCHEME}://${RELAY_HOST}
 LIVEKIT_WS_URL=${WS_SCHEME}://${AV_HOST}
+
+# Whose X-Forwarded-For we believe. Loopback (i.e. nobody) unless an external
+# proxy is in front; see config/caddy/Caddyfile.
+TRUSTED_PROXIES=${BEHIND_PROXY:-127.0.0.1/32}
 
 # ── Identities ───────────────────────────────────────────────────────────────
 # The relay's own key: it signs trend and NIP-85 assertion events with this.
@@ -166,7 +200,7 @@ LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
 LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
 
 # ── Media ────────────────────────────────────────────────────────────────────
-# Blossom's admin dashboard, at ${SCHEME}://${BLOSSOM_HOST}/admin (user: admin).
+# Blossom's admin dashboard, at ${PUB_SCHEME}://${BLOSSOM_HOST}/admin (user: admin).
 BLOSSOM_ADMIN_PASSWORD=${BLOSSOM_ADMIN_PASSWORD}
 
 # ── Push ─────────────────────────────────────────────────────────────────────
@@ -206,10 +240,10 @@ cat <<EOF
 
 Wrote $ENV_FILE (mode 600)
 
-  client   ${SCHEME}://${ARMADA_HOST}
-  voice    ${SCHEME}://${AV_HOST}
+  client   ${PUB_SCHEME}://${ARMADA_HOST}
+  voice    ${PUB_SCHEME}://${AV_HOST}
   relay    ${WS_SCHEME}://${RELAY_HOST}
-  media    ${SCHEME}://${BLOSSOM_HOST}
+  media    ${PUB_SCHEME}://${BLOSSOM_HOST}
   push     ${PUSH_NPUB}
            (no hostname — it only makes outbound connections)
 
@@ -220,9 +254,30 @@ if [ "$LOCAL" -eq 1 ]; then
   cat <<EOF
   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
 
-  Then open ${SCHEME}://${ARMADA_HOST}. If the name does not resolve, add to
+  Then open ${PUB_SCHEME}://${ARMADA_HOST}. If the name does not resolve, add to
   /etc/hosts:
     127.0.0.1 ${ARMADA_HOST} ${AV_HOST} ${RELAY_HOST} ${BLOSSOM_HOST}
+EOF
+elif [ -n "$BEHIND_PROXY" ]; then
+  cat <<EOF
+  1. Point DNS for these four names at your EXISTING public entry point (the
+     one that fronts ${BEHIND_PROXY%%/*}) — not at this host directly:
+       ${ARMADA_HOST}
+       ${AV_HOST}
+       ${RELAY_HOST}
+       ${BLOSSOM_HOST}
+
+  2. Add a site to that proxy for all four names, forwarding to this host on
+     port 80 and PRESERVING THE HOST HEADER — this stack dispatches by Host,
+     so one upstream serves all four.
+
+  3. docker compose up -d --build
+     (add -f docker-compose.lxc.yml if this is an unprivileged container)
+
+  Voice needs more than HTTP. The SFU's media path is UDP 7882 (and TCP 7881)
+  straight to this host; an HTTP reverse proxy cannot carry it, and neither
+  can an HTTP-only CDN. Unless those ports are reachable from the internet,
+  voice will connect and then carry no audio.
 EOF
 else
   cat <<EOF

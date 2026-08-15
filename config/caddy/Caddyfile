@@ -1,10 +1,26 @@
-# One Caddyfile for both modes. The site addresses arrive as full URLs from
-# .env, so `https://armada.example.com` gets an automatic Let's Encrypt cert
-# and `http://armada.localhost` serves plaintext with no ACME at all — the
-# scheme in the address is the entire switch. Nothing below is mode-aware.
+# One Caddyfile for all three modes. The site addresses arrive as full URLs
+# from .env, and the SCHEME IN THE ADDRESS is the entire TLS switch:
+#
+#   https://armada.example.com   direct: automatic Let's Encrypt
+#   http://armada.example.com    behind an external TLS-terminating proxy
+#   http://armada.localhost      local testing
+#
+# Nothing below is mode-aware except trusted_proxies.
+
 {
-	# Unused in local mode, where no site address is https.
+	# Unused unless a site address is https.
 	email {$ACME_EMAIL}
+
+	servers {
+		# Who is allowed to tell us the real client IP. Behind an external
+		# proxy this is that proxy's address; otherwise it stays loopback,
+		# which no real client can ever connect from, so nothing is trusted.
+		#
+		# This is what makes {client_ip} below mean the CLIENT rather than the
+		# nearest hop, in both modes, without either service having to know
+		# whether it is double-proxied.
+		trusted_proxies static {$TRUSTED_PROXIES:127.0.0.1/32}
+	}
 }
 
 # ── The client ───────────────────────────────────────────────────────────────
@@ -33,7 +49,15 @@
 	}
 
 	handle /.well-known/concord/av* {
-		reverse_proxy broker:8080
+		reverse_proxy broker:8080 {
+			# The broker takes the RIGHTMOST X-Forwarded-For entry, which is
+			# correct when exactly one proxy appends to it — but behind a
+			# second proxy the rightmost entry is THIS server, and every
+			# client would collapse into one rate-limit bucket. Replacing the
+			# header with the single resolved client IP keeps rightmost
+			# meaning the client no matter how deep the chain is.
+			header_up X-Forwarded-For {client_ip}
+		}
 	}
 
 	handle {
@@ -49,13 +73,13 @@
 		# LEFTMOST entry of the header named by IP_HEADER; pointing it at
 		# X-Forwarded-For would trust a value the client sent, because Caddy
 		# appends to XFF rather than overwriting it.
-		header_up X-Real-IP {remote_host}
+		header_up X-Real-IP {client_ip}
 	}
 }
 
 # ── Media ────────────────────────────────────────────────────────────────────
 {$BLOSSOM_SITE} {
 	reverse_proxy blossom:3000 {
-		header_up X-Real-IP {remote_host}
+		header_up X-Real-IP {client_ip}
 	}
 }

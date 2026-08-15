@@ -43,6 +43,8 @@ services:
       RELAY_SITE: ${RELAY_SITE:?}
       BLOSSOM_SITE: ${BLOSSOM_SITE:?}
       ACME_EMAIL: ${ACME_EMAIL:-}
+      # Set only in behind-proxy mode, to the external proxy's address.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-127.0.0.1/32}
     volumes:
       - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       # caddy-data holds the ACME account key and the issued certificates. It
@@ -69,11 +71,11 @@ services:
         VITE_APP_RELAYS: ${RELAY_WS_URL:?}
         VITE_SEARCH_RELAYS: ${RELAY_WS_URL:?}
         VITE_BROADCAST_RELAYS: ${BROADCAST_RELAYS-${RELAY_WS_URL}}
-        VITE_APP_BLOSSOM_SERVERS: ${BLOSSOM_SITE:?}
+        VITE_APP_BLOSSOM_SERVERS: ${BLOSSOM_PUBLIC_URL:?}
         # Must equal the broker's PUBLIC_ORIGIN byte-for-byte. The client signs
         # a grant over this string and the broker compares it to its own; a
         # mismatch is a 401 on every voice join with nothing naming the cause.
-        VITE_CONCORD_AV_SERVERS: ${AV_SITE:?}
+        VITE_CONCORD_AV_SERVERS: ${AV_PUBLIC_ORIGIN:?}
         # Derived from PUSH_NSEC by bootstrap.sh. The gateway only ever prints
         # its pubkey to its own logs, so this is the one place the two are tied
         # together.
@@ -92,7 +94,7 @@ services:
       PORT: "8080"
       HOST: "0.0.0.0"
       # Bare origin. The broker refuses to boot on a path/query/userinfo.
-      PUBLIC_ORIGIN: ${AV_SITE:?}
+      PUBLIC_ORIGIN: ${AV_PUBLIC_ORIGIN:?}
       # Bare origin too — the LiveKit SDK appends `/rtc` itself, which Caddy
       # routes back to the livekit service. Never write `.../rtc` here.
       LIVEKIT_URL: ${LIVEKIT_WS_URL:?}
@@ -142,7 +144,7 @@ services:
     environment:
       PORT: "13131"
       RELAY_URL: ${RELAY_WS_URL:?}
-      PUBLIC_URL: ${RELAY_SITE:?}
+      PUBLIC_URL: ${RELAY_PUBLIC_URL:?}
       NOSTR_NSEC: ${RELAY_NSEC:?}
       OPENSEARCH_NODE: http://opensearch:9200
       OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-nostr-events}
@@ -226,7 +228,7 @@ services:
     restart: unless-stopped
     networks: [armada]
     environment:
-      BLOSSOM_PUBLIC_DOMAIN: ${BLOSSOM_SITE:?}
+      BLOSSOM_PUBLIC_DOMAIN: ${BLOSSOM_PUBLIC_URL:?}
       BLOSSOM_ADMIN_PASSWORD: ${BLOSSOM_ADMIN_PASSWORD:?}
     volumes:
       - ./config/blossom/config.yml:/app/config.yml:ro

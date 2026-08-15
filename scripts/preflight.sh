@@ -36,8 +36,10 @@ fi
 
 # ── Sibling checkouts ────────────────────────────────────────────────────────
 # This repo is glue and contains no application source.
+# Checked by their manifest rather than by .git: a deployed copy is often an
+# rsync or a tarball with no history, and that is a perfectly good build source.
 for repo in armada armada-av ditto-relay nostr-push; do
-  if [ -d "$STACK_DIR/../$repo/.git" ]; then
+  if [ -f "$STACK_DIR/../$repo/package.json" ]; then
     ok "../$repo"
   else
     bad "../$repo is missing — the stack builds every image from sibling checkouts"
@@ -60,6 +62,21 @@ else
   warn "cannot read vm.max_map_count (not Linux?) — OpenSearch needs it >= 262144"
 fi
 
+# LiveKit warns at boot if this is small and drops packets under real load. It
+# is only a ceiling — raising it allocates nothing — so it is safe to set on a
+# shared host. Inside an unprivileged LXC it is NOT settable: it belongs to the
+# host kernel, so set it on the hypervisor, not in the container.
+if [ -r /proc/sys/net/core/rmem_max ]; then
+  rmem="$(cat /proc/sys/net/core/rmem_max)"
+  if [ "$rmem" -ge 5000000 ]; then
+    ok "net.core.rmem_max = $rmem"
+  else
+    warn "net.core.rmem_max = $rmem, LiveKit wants >= 5000000 for production voice
+        sudo sysctl -w net.core.rmem_max=5000000
+        echo 'net.core.rmem_max=5000000' | sudo tee /etc/sysctl.d/99-livekit.conf"
+  fi
+fi
+
 # ── LiveKit's UDP receive buffer ─────────────────────────────────────────────
 # A host-level sysctl, not a namespaced one, so it CANNOT be set from compose —
 # the container inherits whatever the host has. Too small and LiveKit drops
@@ -74,6 +91,17 @@ if [ -r /proc/sys/net/core/rmem_max ]; then
         sudo sysctl -w net.core.rmem_max=5000000
         echo 'net.core.rmem_max=5000000' | sudo tee /etc/sysctl.d/99-livekit.conf"
   fi
+fi
+
+# ── Are we inside a container ourselves? ─────────────────────────────────────
+# An unprivileged LXC cannot raise RLIMIT_MEMLOCK, and the failure names
+# neither memlock nor OpenSearch — it is a bare "error setting rlimit type 8".
+# Worth naming before it happens.
+VIRT=""
+command -v systemd-detect-virt >/dev/null 2>&1 && VIRT="$(systemd-detect-virt -c 2>/dev/null || true)"
+if [ -n "$VIRT" ] && [ "$VIRT" != "none" ]; then
+  warn "running inside '$VIRT' — add the LXC override or OpenSearch will not start:
+        docker compose -f docker-compose.yml -f docker-compose.lxc.yml up -d"
 fi
 
 # ── Memory ───────────────────────────────────────────────────────────────────

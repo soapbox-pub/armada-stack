@@ -1,0 +1,28 @@
+# Running inside an unprivileged container (LXC, some VPS types).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.lxc.yml up -d
+#
+# The base stack asks OpenSearch to lock its heap into RAM, which is the right
+# default on bare metal: it stops the JVM heap being swapped out, which is the
+# classic cause of a search node that is up but pathologically slow.
+#
+# An unprivileged container cannot raise RLIMIT_MEMLOCK, so that request is not
+# merely ignored — the container fails to start at all, with
+#
+#   error setting rlimit type 8: operation not permitted
+#
+# which names neither memlock nor OpenSearch. This override drops the request
+# and tells OpenSearch not to expect it.
+#
+# The trade is real but modest: give the host enough RAM that it is not
+# swapping, and disable swap for the container if you can.
+
+services:
+  opensearch:
+    ulimits: !reset null
+    environment:
+      - discovery.type=single-node
+      - DISABLE_SECURITY_PLUGIN=true
+      - DISABLE_INSTALL_DEMO_CONFIG=true
+      - bootstrap.memory_lock=false
+      - OPENSEARCH_JAVA_OPTS=${OPENSEARCH_JAVA_OPTS:--Xms1g -Xmx1g}
