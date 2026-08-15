@@ -55,12 +55,16 @@ derived, which is the point: they are not three settings, they are one.
   compares it to its own. A trailing slash, a `www.`, or http-vs-https is a 401
   on every voice join with nothing naming the origin.
 
-A fourth is structural rather than a value: **the broker and the SFU must share
-one origin.** The broker returns a bare `wss://` URL and the LiveKit SDK
-appends `/rtc` itself, so the signal socket lands back on the broker's own
-hostname. That is why `config/caddy/Caddyfile` routes `/rtc` and
-`/.well-known/concord/av*` on the same site block. Splitting them onto two
-hostnames cannot be made to work by configuration.
+A fourth is a deployment choice often mistaken for a requirement: **the broker
+and the SFU are co-located, but need not be.** The broker returns the SFU's URL
+(`LIVEKIT_WS_URL`) to the client, and that may point at any SFU — it is
+independent of the broker's own `PUBLIC_ORIGIN`, which only has to match what
+the client signed its grant over. Co-locating them is why
+`config/caddy/Caddyfile` routes `/rtc` and `/.well-known/concord/av*` on one
+site block, and it is the right default; but when the host has no public UDP
+path for media, pointing `LIVEKIT_WS_URL` at an SFU that does is a supported
+configuration, not a hack. What is genuinely fixed is that the URL must be a
+BARE ORIGIN, since the SDK appends `/rtc` to it.
 
 ## Proxy headers: the two components disagree, on purpose
 

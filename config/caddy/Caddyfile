@@ -32,9 +32,15 @@
 }
 
 # ── Voice ────────────────────────────────────────────────────────────────────
-# The broker and the SFU MUST share one origin: the broker hands the client a
-# bare `wss://` URL and the LiveKit SDK appends `/rtc` to it, so the signal
-# socket lands back on this same host.
+# The broker and the SFU are CO-LOCATED here, which is a deployment choice
+# rather than a requirement. The broker returns the SFU's URL to the client
+# (LIVEKIT_WS_URL), and that may point anywhere — which is the escape hatch
+# when this host has no public UDP path for media: leave the broker here and
+# point LIVEKIT_WS_URL at an SFU that does. If you do that, the /rtc route
+# below becomes dead weight rather than wrong.
+#
+# What IS fixed: the URL must be a bare origin, because the LiveKit SDK
+# appends `/rtc` to whatever it is given.
 #
 # `handle` blocks are mutually exclusive and evaluated in order. /twirp — the
 # LiveKit server API, which can create and destroy any room — is deliberately
