@@ -1,0 +1,233 @@
+# Armada stack — client, voice, relay, push, media.
+#
+# Eight services, one `docker compose up`. Everything a community needs is in
+# here; nothing in this file names a host but the ones in `.env`.
+#
+# Run `./scripts/bootstrap.sh --domain example.com --email you@example.com`
+# once to generate `.env` before the first `up`. Nothing here has a default
+# secret: the `${VAR:?}` forms below fail the command rather than boot a
+# deployment with a predictable key.
+#
+# BUILD CONTEXTS ARE SIBLING CHECKOUTS. This repo is glue — it holds no
+# application source. `../armada`, `../armada-av`, `../ditto-relay` and
+# `../nostr-push` must exist beside it (scripts/preflight.sh checks).
+
+name: armada
+
+networks:
+  armada:
+
+volumes:
+  caddy-data:
+  caddy-config:
+  opensearch-data:
+  push-storage:
+  blossom-data:
+
+services:
+  # ── Edge ───────────────────────────────────────────────────────────────────
+  # The only service with published TCP 80/443. Everything else is reachable
+  # only from the `armada` network, which is what lets the broker and the relay
+  # trust a forwarded client IP at all.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    networks: [armada]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    environment:
+      ARMADA_SITE: ${ARMADA_SITE:?run scripts/bootstrap.sh first}
+      AV_SITE: ${AV_SITE:?}
+      RELAY_SITE: ${RELAY_SITE:?}
+      BLOSSOM_SITE: ${BLOSSOM_SITE:?}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # caddy-data holds the ACME account key and the issued certificates. It
+      # MUST persist: a volume wiped between deploys re-issues every cert and
+      # walks straight into Let's Encrypt's duplicate-certificate rate limit.
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [armada, broker, livekit, relay, blossom]
+
+  # ── The client ─────────────────────────────────────────────────────────────
+  # A static SPA behind nginx. Every VITE_* below is a BUILD ARG, baked into the
+  # bundle — so changing a domain, the push pubkey, or the relay means
+  # `docker compose up -d --build armada`, not a restart. That is a property of
+  # the client, not a choice made here.
+  armada:
+    build:
+      context: ../armada
+      args:
+        VITE_APP_NAME: ${APP_NAME:-Armada}
+        # This stack's own relay is the whole default relay set: read, search
+        # and broadcast. A self-hosted deployment that still broadcast to
+        # relay.primal.net (the client's default) would leak its members'
+        # public notes off the box by default.
+        VITE_APP_RELAYS: ${RELAY_WS_URL:?}
+        VITE_SEARCH_RELAYS: ${RELAY_WS_URL:?}
+        VITE_BROADCAST_RELAYS: ${BROADCAST_RELAYS-${RELAY_WS_URL}}
+        VITE_APP_BLOSSOM_SERVERS: ${BLOSSOM_SITE:?}
+        # Must equal the broker's PUBLIC_ORIGIN byte-for-byte. The client signs
+        # a grant over this string and the broker compares it to its own; a
+        # mismatch is a 401 on every voice join with nothing naming the cause.
+        VITE_CONCORD_AV_SERVERS: ${AV_SITE:?}
+        # Derived from PUSH_NSEC by bootstrap.sh. The gateway only ever prints
+        # its pubkey to its own logs, so this is the one place the two are tied
+        # together.
+        VITE_NOSTR_PUSH_PUBKEY: ${PUSH_PUBKEY_HEX:?}
+        VITE_NOSTR_PUSH_RELAYS: ${RELAY_WS_URL:?}
+    restart: unless-stopped
+    networks: [armada]
+
+  # ── Voice: blind AV broker (CORD-07 §2) ────────────────────────────────────
+  broker:
+    build:
+      context: ../armada-av
+    restart: unless-stopped
+    networks: [armada]
+    environment:
+      PORT: "8080"
+      HOST: "0.0.0.0"
+      # Bare origin. The broker refuses to boot on a path/query/userinfo.
+      PUBLIC_ORIGIN: ${AV_SITE:?}
+      # Bare origin too — the LiveKit SDK appends `/rtc` itself, which Caddy
+      # routes back to the livekit service. Never write `.../rtc` here.
+      LIVEKIT_URL: ${LIVEKIT_WS_URL:?}
+      # Server API, in-network and never proxied publicly (Caddy exposes only
+      # /rtc, so /twirp stays unreachable from outside).
+      LIVEKIT_API_URL: http://livekit:7880
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:?}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:?}
+      # Safe because 8080 is unpublished: only the `armada` network reaches it,
+      # so X-Forwarded-For cannot be forged by a client. The broker reads the
+      # RIGHTMOST XFF entry, which is exactly what Caddy's append produces.
+      # It still logs a boot warning about HOST=0.0.0.0; that is expected here.
+      TRUST_PROXY: "1"
+      TOKEN_TTL_SECONDS: ${TOKEN_TTL_SECONDS:-21600}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-60}
+    depends_on: [livekit]
+
+  # ── Voice: the SFU ─────────────────────────────────────────────────────────
+  # 7881/tcp (ICE/TCP fallback) and 7882/udp (media mux) are published; 7880
+  # (signal + server API) is not, and reaches the world only through Caddy's
+  # /rtc route. Bridge networking costs some per-packet overhead on the UDP mux
+  # versus armada-av's own host-network deploy; that is the trade for one
+  # coherent stack. See docker-compose.hostnet.yml if you need it back.
+  livekit:
+    image: livekit/livekit-server:v1.8
+    restart: unless-stopped
+    networks: [armada]
+    command: --config /etc/livekit.yaml
+    ports:
+      - "7881:7881"
+      - "7882:7882/udp"
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:?}: ${LIVEKIT_API_SECRET:?}"
+    volumes:
+      - ./config/livekit/livekit.yaml:/etc/livekit.yaml:ro
+
+  # ── Relay ──────────────────────────────────────────────────────────────────
+  # ditto-relay ships no Dockerfile; images/ditto-relay.Dockerfile is ours.
+  relay:
+    build:
+      context: .
+      dockerfile: images/ditto-relay.Dockerfile
+      additional_contexts:
+        relay-src: ../ditto-relay
+    restart: unless-stopped
+    networks: [armada]
+    environment:
+      PORT: "13131"
+      RELAY_URL: ${RELAY_WS_URL:?}
+      PUBLIC_URL: ${RELAY_SITE:?}
+      NOSTR_NSEC: ${RELAY_NSEC:?}
+      OPENSEARCH_NODE: http://opensearch:9200
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-nostr-events}
+      # The relay takes the LEFTMOST entry of whatever header this names, so it
+      # must be one the proxy OVERWRITES. Caddy APPENDS to X-Forwarded-For,
+      # whose leftmost entry is client-supplied and therefore spoofable — the
+      # Caddyfile sets X-Real-IP with header_up instead, which replaces.
+      IP_HEADER: X-Real-IP
+      # THE PUSH GATEWAY'S WHITELIST. AUTH_KINDS gates kind-4 and kind-1059
+      # reads behind NIP-42, and the gateway authenticates as itself — so
+      # without this it can see only its OWN gift wraps and DM push silently
+      # never fires for anyone. bootstrap.sh derives this from PUSH_NSEC.
+      MASTER_PUBKEYS: ${PUSH_PUBKEY_HEX:?}
+      AUTH_KINDS: ${AUTH_KINDS:-4,1059}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      opensearch:
+        condition: service_healthy
+
+  # ── Relay storage ──────────────────────────────────────────────────────────
+  # Every event lives here. Unpublished, so running with the security plugin
+  # off is a network decision rather than an open database.
+  opensearch:
+    image: opensearchproject/opensearch:2.19.1
+    restart: unless-stopped
+    networks: [armada]
+    environment:
+      - discovery.type=single-node
+      - DISABLE_SECURITY_PLUGIN=true
+      - DISABLE_INSTALL_DEMO_CONFIG=true
+      - bootstrap.memory_lock=true
+      - OPENSEARCH_JAVA_OPTS=${OPENSEARCH_JAVA_OPTS:--Xms1g -Xmx1g}
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    # The relay calls process.exit(1) if OpenSearch is unreachable at boot, and
+    # runs its index migration before spawning workers — so the gate below is
+    # what keeps the first `up` from crash-looping for a minute.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  # ── Push gateway ───────────────────────────────────────────────────────────
+  # Listens on no port and needs no hostname: all traffic is outbound (relay
+  # WebSockets in, Web Push HTTPS out). Deliberately absent from the Caddyfile.
+  push:
+    build:
+      context: ../nostr-push
+    restart: unless-stopped
+    networks: [armada]
+    environment:
+      NSEC: ${PUSH_NSEC:?}
+      VAPID_SUBJECT: ${VAPID_SUBJECT:?}
+      # The rendezvous where kind-25742 registration RPCs are exchanged. It has
+      # to be the SAME RELAY the client's VITE_NOSTR_PUSH_RELAYS names, but it
+      # does not have to be the same URL — and deliberately isn't. Dialling the
+      # public wss:// name from inside the stack would resolve to this host and
+      # need working NAT hairpinning, and in local mode `relay.localhost`
+      # resolves to the push container itself, so the gateway never connects
+      # at all. The internal address is correct in both modes.
+      RELAYS: ${PUSH_RELAYS:-ws://relay:13131}
+      NOTIFICATION_TTL: ${NOTIFICATION_TTL:-86400}
+      NOTIFICATION_URGENCY: ${NOTIFICATION_URGENCY:-high}
+      MAX_SUBSCRIPTIONS_PER_USER_PER_APP: ${MAX_SUBSCRIPTIONS_PER_USER_PER_APP:-10}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      # Holds storage/vapid-keys.json. Losing this volume invalidates every
+      # existing browser subscription, because applicationServerKey was bound
+      # to the old per-domain key.
+      - push-storage:/app/storage
+    depends_on: [relay]
+
+  # ── Media ──────────────────────────────────────────────────────────────────
+  blossom:
+    image: ghcr.io/hzrd149/blossom-server:master
+    restart: unless-stopped
+    networks: [armada]
+    environment:
+      BLOSSOM_PUBLIC_DOMAIN: ${BLOSSOM_SITE:?}
+      BLOSSOM_ADMIN_PASSWORD: ${BLOSSOM_ADMIN_PASSWORD:?}
+    volumes:
+      - ./config/blossom/config.yml:/app/config.yml:ro
+      - blossom-data:/app/data

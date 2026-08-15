@@ -1,0 +1,36 @@
+# LiveKit SFU, bridge-networked.
+#
+# armada-av's own single-box deploy runs LiveKit with `network_mode: host` and
+# binds 127.0.0.1, because Docker's userland proxy adds per-packet cost on a
+# media path doing thousands of packets/second. This stack trades that for one
+# coherent network the broker, Caddy and the relay can all name each other on.
+# If you are running enough concurrent voice to feel it, use
+# docker-compose.hostnet.yml.
+#
+# No `bind_addresses` here, unlike that deploy: inside a bridge network the
+# container binds every interface and Docker decides what is reachable. 7880
+# is simply not published, so only Caddy and the broker can reach signal and
+# the server API.
+
+port: 7880
+
+rtc:
+  # Published in docker-compose.yml. 7882 is a single UDP mux port rather than
+  # a range — a range would mean thousands of published ports.
+  tcp_port: 7881
+  udp_port: 7882
+  # STUN-discovers the host's public address and advertises it in ICE
+  # candidates, which is correct when 7882/udp is published to the internet.
+  # Wrong on a laptop with no inbound reachability — see livekit.local.yaml.
+  use_external_ip: true
+
+room:
+  # The broker mints a token naming a room it never creates; the room's name is
+  # the Channel's voice pubkey. Without auto_create the first participant joins
+  # nothing.
+  auto_create: true
+  empty_timeout: 300
+  max_participants: 0
+
+logging:
+  level: info

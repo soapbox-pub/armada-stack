@@ -1,0 +1,87 @@
+# Blossom media server (hzrd149/blossom-server).
+#
+# `${VAR}` is interpolated from the container environment by the server itself,
+# not by Docker — docker-compose.yml passes BLOSSOM_PUBLIC_DOMAIN and
+# BLOSSOM_ADMIN_PASSWORD through.
+
+# Without this the blob "url" field is built from the incoming Host header,
+# which behind a proxy is the internal service name — so every uploaded image
+# would be handed to clients as an unreachable URL.
+publicDomain: "${BLOSSOM_PUBLIC_DOMAIN}"
+
+databasePath: data/sqlite.db
+
+dashboard:
+  enabled: true
+  username: admin
+  # Left blank, the server generates a new password on every start and prints
+  # it to the log. bootstrap.sh writes a stable one into .env instead.
+  password: "${BLOSSOM_ADMIN_PASSWORD}"
+
+discovery:
+  # Off deliberately: on, the server queries relays and upstream CDNs for blobs
+  # it does not hold, which turns every 404 into outbound traffic.
+  nostr:
+    enabled: false
+    relays: []
+  upstream:
+    enabled: false
+    domains: []
+
+storage:
+  backend: local
+  removeWhenNoOwners: false
+  local:
+    dir: ./data/blobs
+
+  # RETENTION IS DELETION. Rules are checked in order; a blob matching none is
+  # REMOVED, and the upstream example ships expirations of 2 days to 1 month —
+  # which on a chat deployment means images silently vanishing from history
+  # while the messages referencing them remain. These are set long instead.
+  # Lower them only if you would rather lose old media than buy disk.
+  rules:
+    - type: "*"
+      expiration: 10 years
+
+upload:
+  enabled: true
+  # A valid Blossom auth event is required, but ANY Nostr pubkey can produce
+  # one — so on a public hostname this is an open upload endpoint. To restrict
+  # it to your own members, set requirePubkeyInRule below to true and give the
+  # rule above a `pubkeys:` list of hex pubkeys allowed to upload.
+  requireAuth: true
+  requirePubkeyInRule: false
+
+media:
+  enabled: true
+  requireAuth: true
+  requirePubkeyInRule: false
+  image:
+    quality: 90
+    progressive: true
+    maxWidth: 1920
+    maxHeight: 1080
+    outputFormat: "webp"
+    maintainAspectRatio: true
+    keepExif: false
+    fps: 30
+  video:
+    quality: 90
+    maxHeight: 1080
+    maxFps: 30
+    # These three are validated against each other and the server REFUSES TO
+    # BOOT on a mismatch. Upstream's config.example.yml ships an inconsistent
+    # combination (format webm with libx264/aac), so don't copy it across.
+    # Valid pairings: mp4 + libx264/libx265 + aac/mp3, or webm + vp8/vp9 +
+    # vorbis/opus. mp4/h264/aac has the widest browser support.
+    format: "mp4"
+    videoCodec: "libx264"
+    audioCodec: "aac"
+
+list:
+  requireAuth: false
+  allowListOthers: true
+
+tor:
+  enabled: false
+  proxy: ""

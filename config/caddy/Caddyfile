@@ -1,0 +1,61 @@
+# One Caddyfile for both modes. The site addresses arrive as full URLs from
+# .env, so `https://armada.example.com` gets an automatic Let's Encrypt cert
+# and `http://armada.localhost` serves plaintext with no ACME at all — the
+# scheme in the address is the entire switch. Nothing below is mode-aware.
+{
+	# Unused in local mode, where no site address is https.
+	email {$ACME_EMAIL}
+}
+
+# ── The client ───────────────────────────────────────────────────────────────
+# Cache-Control, CSP and the SPA fallback all come from the client image's own
+# nginx.conf. Re-stating any of them here would be a second copy that drifts.
+{$ARMADA_SITE} {
+	encode zstd gzip
+	reverse_proxy armada:80
+}
+
+# ── Voice ────────────────────────────────────────────────────────────────────
+# The broker and the SFU MUST share one origin: the broker hands the client a
+# bare `wss://` URL and the LiveKit SDK appends `/rtc` to it, so the signal
+# socket lands back on this same host.
+#
+# `handle` blocks are mutually exclusive and evaluated in order. /twirp — the
+# LiveKit server API, which can create and destroy any room — is deliberately
+# absent, so it exists only on the internal network.
+{$AV_SITE} {
+	@livekit path /rtc /rtc/*
+	handle @livekit {
+		# Parameterised for one reason: docker-compose.hostnet.yml moves the SFU
+		# into the host network namespace, where it has no service DNS and this
+		# has to become the host gateway instead.
+		reverse_proxy {$LIVEKIT_UPSTREAM:livekit:7880}
+	}
+
+	handle /.well-known/concord/av* {
+		reverse_proxy broker:8080
+	}
+
+	handle {
+		respond "armada-av" 200
+	}
+}
+
+# ── Relay ────────────────────────────────────────────────────────────────────
+# WebSocket upgrades need no special directive in Caddy v2.
+{$RELAY_SITE} {
+	reverse_proxy relay:13131 {
+		# header_up REPLACES, which is the point. The relay trusts the
+		# LEFTMOST entry of the header named by IP_HEADER; pointing it at
+		# X-Forwarded-For would trust a value the client sent, because Caddy
+		# appends to XFF rather than overwriting it.
+		header_up X-Real-IP {remote_host}
+	}
+}
+
+# ── Media ────────────────────────────────────────────────────────────────────
+{$BLOSSOM_SITE} {
+	reverse_proxy blossom:3000 {
+		header_up X-Real-IP {remote_host}
+	}
+}

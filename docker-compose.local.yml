@@ -1,0 +1,34 @@
+# Local mode: the whole stack on *.localhost over plain HTTP, no DNS, no certs.
+#
+#   ./scripts/bootstrap.sh --local
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+#
+# Caddy needs no changes — bootstrap writes `http://armada.localhost` style
+# site addresses, and the scheme alone disables ACME.
+#
+# Why *.localhost rather than ports on 127.0.0.1: the AV broker refuses a
+# PUBLIC_ORIGIN with a path, so the broker and the client need distinct
+# origins. Browsers treat `localhost` and any `*.localhost` name as a SECURE
+# CONTEXT even over http, so getUserMedia still works and voice is testable.
+# Most resolvers answer *.localhost with 127.0.0.1 already; if yours does not,
+# add the four names to /etc/hosts.
+
+services:
+  livekit:
+    volumes:
+      # use_external_ip: false — see the file for why this matters locally.
+      - ./config/livekit/livekit.local.yaml:/etc/livekit.yaml:ro
+
+  caddy:
+    ports: !override
+      - "80:80"
+
+  # A single-node OpenSearch with a 1 GB heap is the stack's floor; shrink it
+  # for a laptop that is also running an IDE.
+  opensearch:
+    environment:
+      - discovery.type=single-node
+      - DISABLE_SECURITY_PLUGIN=true
+      - DISABLE_INSTALL_DEMO_CONFIG=true
+      - bootstrap.memory_lock=true
+      - OPENSEARCH_JAVA_OPTS=${OPENSEARCH_JAVA_OPTS:--Xms512m -Xmx512m}

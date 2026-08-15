@@ -1,0 +1,23 @@
+# LiveKit for local mode. Identical to livekit.yaml but for use_external_ip.
+#
+# Mounted over the default by docker-compose.local.yml.
+
+port: 7880
+
+rtc:
+  tcp_port: 7881
+  udp_port: 7882
+  # OFF, and this is the whole reason the file exists. With it on, LiveKit
+  # STUN-discovers the machine's PUBLIC address and advertises that in its ICE
+  # candidates — which a browser on the same laptop cannot reach, so voice
+  # negotiates and then carries no media. Off, it advertises the container's
+  # bridge address, which the host routes directly.
+  use_external_ip: false
+
+room:
+  auto_create: true
+  empty_timeout: 300
+  max_participants: 0
+
+logging:
+  level: info

@@ -1,0 +1,34 @@
+# Optional: put the SFU back on the host network namespace.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.hostnet.yml up -d
+#
+# Media is latency-sensitive UDP at thousands of packets per second, and
+# Docker's userland proxy adds per-packet cost on the published mux port. This
+# is the configuration LiveKit itself recommends, and it is what armada-av's
+# own single-box deploy uses. Reach for it if you are running enough concurrent
+# voice to feel the difference; the default bridge setup is simpler and keeps
+# every service on one network.
+#
+# The cost is that a host-network container has no service DNS: it is not on
+# the `armada` network, so Caddy and the broker can no longer say `livekit`.
+# Both are pointed at the host gateway instead.
+
+services:
+  livekit:
+    network_mode: host
+    # Meaningless in the host namespace — the container binds the host's ports
+    # directly, and a `ports:` entry alongside network_mode is an error.
+    ports: !reset []
+    networks: !reset null
+
+  broker:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      LIVEKIT_API_URL: http://host.docker.internal:7880
+
+  caddy:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      LIVEKIT_UPSTREAM: host.docker.internal:7880
