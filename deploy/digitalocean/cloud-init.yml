@@ -1,0 +1,139 @@
+#cloud-config
+# Armada 1-Click droplet — DigitalOcean user-data (cloud-init).
+#
+# Paste this whole file into the "User data" field when creating a droplet
+# (Create Droplet -> Advanced options -> Add Initialization scripts). On a
+# fresh Ubuntu 24.04 droplet it installs Docker, sets the two host sysctls the
+# stack needs, opens the firewall, fetches the stack, and brings it up in PULL
+# MODE: the relay, broker and push images are pulled pre-built from
+# ncontainer.io, and only the client is built on the box (its endpoint URLs are
+# baked into the bundle at build time from THIS deployment's own hostnames, so
+# it cannot be a pre-published image — see docker-compose.pull.yml).
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# YOU EDIT TWO LINES — DOMAIN and EMAIL, in the deploy.env block just below.
+# ─────────────────────────────────────────────────────────────────────────────
+# Everything else has a working default. After the droplet boots you still have
+# to point four DNS records at its IP (armada. av. relay. blossom.) — Caddy
+# cannot get TLS certificates until they resolve here, so the stack comes up but
+# serves nothing until you do. See deploy/digitalocean/README.md.
+#
+# STACK_REPO IS A DEPENDENCY, NOT A DEFAULT. armada-stack is not yet published
+# to any git host, so there is no URL baked in here that would fetch it. Publish
+# it first (the README shows the one ngit command) and put its clone URL in
+# STACK_REPO below, OR use the Packer image path in the README, which bakes the
+# files into the droplet and clones nothing at boot.
+
+write_files:
+  # The two-or-three values that make this droplet yours. Read by firstboot.sh.
+  - path: /opt/armada/deploy.env
+    permissions: '0600'
+    content: |
+      # EDIT THESE. DOMAIN yields armada.<d> av.<d> relay.<d> blossom.<d>.
+      DOMAIN=example.com
+      EMAIL=you@example.com
+
+      # Where firstboot.sh fetches the stack glue and the client source.
+      #
+      # STACK_REPO has no default because the stack is unpublished — set it to
+      # your published clone URL (https://… or nostr://…). If it is a nostr://
+      # URL, firstboot installs ngit to clone it.
+      STACK_REPO=
+      # The client is the one image still built locally. Its public mirror:
+      ARMADA_REPO=https://github.com/soapbox-pub/armada.git
+
+  # Host sysctls the stack cannot set from inside a container (they belong to
+  # the host kernel). OpenSearch refuses to start below max_map_count=262144;
+  # LiveKit drops inbound media under load below rmem_max=5MB. preflight.sh
+  # checks both, but on a droplet we set them before the first `up` so it never
+  # trips. Persisted here so they survive a reboot.
+  - path: /etc/sysctl.d/99-armada.conf
+    content: |
+      vm.max_map_count=262144
+      net.core.rmem_max=5000000
+
+  - path: /opt/armada/firstboot.sh
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      # First-boot provisioner. Idempotent: guarded by a done-marker so a
+      # re-run (cloud-init re-execution, manual invocation) picks up where it
+      # left off rather than rotating keys or double-cloning.
+      set -euo pipefail
+
+      MARK=/opt/armada/.provisioned
+      LOG=/var/log/armada-firstboot.log
+      exec > >(tee -a "$LOG") 2>&1
+      echo "armada firstboot $(date -u +%FT%TZ)"
+
+      # shellcheck disable=SC1091
+      . /opt/armada/deploy.env
+
+      [ -n "${DOMAIN:-}" ] && [ "$DOMAIN" != "example.com" ] || {
+        echo "deploy.env: set DOMAIN to your real domain, then re-run: bash /opt/armada/firstboot.sh"
+        exit 1
+      }
+      [ -n "${STACK_REPO:-}" ] || {
+        echo "deploy.env: STACK_REPO is empty. armada-stack is unpublished — set it"
+        echo "to your clone URL (see deploy/digitalocean/README.md), then re-run."
+        exit 1
+      }
+
+      # ── Docker ───────────────────────────────────────────────────────────
+      if ! command -v docker >/dev/null 2>&1; then
+        echo "installing docker"
+        curl -fsSL https://get.docker.com | sh
+        systemctl enable --now docker
+      fi
+
+      # ── git, and ngit only if the stack is a nostr:// repo ───────────────
+      command -v git >/dev/null 2>&1 || { apt-get update -y && apt-get install -y git; }
+      case "$STACK_REPO" in
+        nostr://*)
+          command -v ngit >/dev/null 2>&1 || curl -Ls https://ngit.dev/install.sh | bash
+          ;;
+      esac
+
+      # ── Fetch the stack glue and the client source ───────────────────────
+      # Siblings, exactly as a local checkout lays them out: the stack builds
+      # the client from ../armada. In pull mode nothing else is needed beside
+      # the stack — the other three images come from ncontainer.io.
+      cd /opt/armada
+      [ -d stack/.git ]  || git clone "$STACK_REPO"  stack
+      [ -d armada/.git ] || git clone "$ARMADA_REPO" armada
+
+      # ── Bring it up ──────────────────────────────────────────────────────
+      # --pull relaxes the preflight sibling check to require only ../armada.
+      cd /opt/armada/stack
+      if [ ! -f .env ]; then
+        ./scripts/bootstrap.sh --domain "$DOMAIN" --email "$EMAIL" --pull
+      fi
+
+      # Pull the three, build the one. The client build runs entirely inside
+      # its own node:22-alpine stage, so the host needs only Docker.
+      docker compose -f docker-compose.yml -f docker-compose.pull.yml up -d --build armada
+
+      touch "$MARK"
+      echo "armada firstboot done — now point DNS at this host:"
+      echo "  armada.$DOMAIN  av.$DOMAIN  relay.$DOMAIN  blossom.$DOMAIN"
+
+runcmd:
+  # Apply sysctls now (the write_files above only persisted them for reboots).
+  - sysctl --system
+
+  # On-host firewall. DO also offers a separate Cloud Firewall in the panel;
+  # this makes the droplet correct on its own. 7882/udp is the voice media
+  # path — with it closed voice connects and then carries no audio. 443/udp is
+  # HTTP/3. 22 keeps you able to SSH in.
+  - |
+    if command -v ufw >/dev/null 2>&1; then
+      ufw allow 22/tcp
+      ufw allow 80/tcp
+      ufw allow 443/tcp
+      ufw allow 443/udp
+      ufw allow 7881/tcp
+      ufw allow 7882/udp
+      ufw --force enable
+    fi
+
+  - bash /opt/armada/firstboot.sh

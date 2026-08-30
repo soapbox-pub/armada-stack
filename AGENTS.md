@@ -4,11 +4,13 @@ Guidance for agents working on **armada-stack** — the turnkey Docker deploymen
 of the Armada client, the Concord AV broker, a Nostr relay, a push gateway and
 a media server.
 
-**This repo is glue and holds no application source.** Every image is built
-from a sibling checkout: `../armada`, `../armada-av`, `../ditto-relay`,
+**This repo is glue and holds no application source.** By default every image is
+built from a sibling checkout: `../armada`, `../armada-av`, `../ditto-relay`,
 `../nostr-push`. When something is broken, decide first whether the bug is in
 the wiring here or in the component — and if it is in the component, **fix it
-there**, in that repo, rather than papering over it with stack config.
+there**, in that repo, rather than papering over it with stack config. (Pull
+mode swaps three of those source builds for pre-built images off ncontainer.io;
+see *Pull mode* below. The client is always a local build.)
 
 **Never write into the sibling repos from here.** `ditto-relay` ships no
 Dockerfile, and the fix was `images/ditto-relay.Dockerfile` in THIS repo fed by
@@ -34,6 +36,57 @@ Verify a change to `docker-compose.hostnet.yml` or `docker-compose.local.yml`
 with `docker compose -f docker-compose.yml -f <override> config` — an override
 that silently fails to merge produces a working-looking stack in the wrong
 configuration.
+
+## Pull mode, publishing images, and the droplet
+
+`docker-compose.pull.yml` overrides `relay`, `broker` and `push` to a
+`docker pull` from **ncontainer.io** — an OCI registry backed by Nostr (a signed
+kind-30624 event holds the tag→digest map) + Blossom (the layer blobs), where
+the image NAME is the publisher's signing identity (`../ncontainer`). It exists
+so a self-hoster needs neither those three source trees nor a Bun toolchain: the
+stack pulls them. The point is to make self-hosting easier, so keep it that way.
+
+- **The client is NEVER pulled.** Every `VITE_*` is baked into the bundle at
+  build time (see *Client config is build-time*), and those values include this
+  deployment's own hostnames — which a pre-published image cannot know. So
+  `armada` stays the base file's local build, and `up` in pull mode is
+  `... -f docker-compose.pull.yml up -d --build armada`: pull the three, build
+  the one. It builds inside its own `node:22-alpine` stage, so the host needs
+  only Docker + `../armada`.
+- **The `!reset null` on `build:` is load-bearing.** Compose MERGES override
+  maps into the base, so adding `image:` beside the inherited `build:` leaves
+  both set and Compose builds-and-tags instead of pulling. `!reset null` drops
+  the build block. Verify with `docker compose -f docker-compose.yml -f
+  docker-compose.pull.yml config` and check the three show `image:` and NO
+  `build:`.
+- **The images identity is permanent-ish.** The npub hardcoded in
+  `docker-compose.pull.yml` (and the deploy docs) IS the namespace — a new key
+  is a new set of names and a stack-wide reference change. The nsec lives in
+  `.images.env` (gitignored, like `.env`); losing it means the three names can
+  never be republished. amd64-only by decision.
+- **`scripts/publish-images.sh` is a MAINTAINER tool, not part of any deploy.**
+  Without `--dry-run` it uploads layer blobs to public Blossom servers and signs
+  public events under the images identity. It builds each image to an OCI layout
+  via an ephemeral `docker-container` buildx builder (the default `docker`
+  driver can't use the OCI exporter), then runs ncontainer's own `upload.ts` /
+  `publish.ts` in an `oven/bun:1` container — no host toolchain, same principle
+  as `bootstrap.sh`. `--provenance=false --sbom=false` is required: an
+  attestation manifest turns the export into a list with an `unknown/unknown`
+  entry that `publish.ts` would mint a bogus tag for. `BLOSSOM_SERVERS` has no
+  default — a container layer is a large octet-stream blob and media-oriented
+  Blossom servers answer 415.
+- **`--pull` on `bootstrap.sh`/`preflight.sh`** relaxes the sibling check to
+  require only `../armada` (the one still built locally). `bootstrap.sh`
+  forwards it to preflight.
+- **The droplet** (`deploy/digitalocean/`) is a cloud-init template that
+  provisions the whole stack in pull mode: installs Docker, sets the two host
+  sysctls (`vm.max_map_count`, `net.core.rmem_max` — host-kernel, not settable
+  from compose), opens the firewall, clones the stack + `../armada`, and runs
+  bootstrap+up. It is guarded by a done-marker so a re-run is idempotent.
+  `STACK_REPO` has NO default because armada-stack is not yet published to any
+  git host — that is a real dependency, not an oversight. DNS is still manual:
+  four records must point at the IP before Caddy can get certs, and no provider
+  button creates records in a domain registered elsewhere.
 
 ## The couplings — do not break these
 

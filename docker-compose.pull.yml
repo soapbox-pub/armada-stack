@@ -1,0 +1,47 @@
+# Pull mode — pull the relay, broker and push images instead of building them.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.pull.yml up -d --build armada
+#
+# The base docker-compose.yml builds all four service images from sibling
+# checkouts (../armada, ../armada-av, ../ditto-relay, ../nostr-push). This
+# override replaces three of those builds with a `docker pull` of images we
+# publish to ncontainer.io — an OCI registry backed by Nostr + Blossom, where
+# the image NAME is the publisher's signing identity (see ../ncontainer). So a
+# self-hoster needs neither those three source trees nor a Bun toolchain: the
+# stack simply pulls them.
+#
+# WHY THE CLIENT IS STILL A BUILD. Every VITE_* the client reads is baked into
+# its bundle at build time (armada/Dockerfile), and those values include this
+# deployment's own hostnames — which are not known until `bootstrap.sh` has run
+# with a domain. A pre-published client image would carry someone else's URLs,
+# so `armada` is deliberately left as the base file's local build. It builds
+# entirely inside its own node:22-alpine stage, so the host needs only Docker
+# and the ../armada checkout — no Node, no toolchain. That is the `--build
+# armada` above: pull the three, build the one.
+#
+# THE `!reset null` ON build IS LOAD-BEARING. Compose MERGES override maps into
+# the base rather than replacing them, so an `image:` added beside the base's
+# `build:` would leave both set and Compose would BUILD and tag as that image
+# instead of pulling it. `!reset null` removes the inherited build block so only
+# `image:` remains. Verify with:
+#   docker compose -f docker-compose.yml -f docker-compose.pull.yml config
+# and check that relay/broker/push show `image:` and NO `build:`.
+#
+# PINNING. These reference the mutable `:latest` tag, which resolves through a
+# signed kind-30624 event — provenance is verified on every pull regardless,
+# since a pull cannot resolve without checking the publisher's signature. To pin
+# a build byte-for-byte, replace `:latest` with the `@sha256:<manifest-digest>`
+# that scripts/publish-images.sh prints, which is verifiable end to end.
+
+services:
+  relay:
+    build: !reset null
+    image: ncontainer.io/npub1ceq9atrz4md20phexutsvhwujw8qjftudgud4qgp7vg8ymxvtmsq2us5k5/armada-relay:latest
+
+  broker:
+    build: !reset null
+    image: ncontainer.io/npub1ceq9atrz4md20phexutsvhwujw8qjftudgud4qgp7vg8ymxvtmsq2us5k5/armada-broker:latest
+
+  push:
+    build: !reset null
+    image: ncontainer.io/npub1ceq9atrz4md20phexutsvhwujw8qjftudgud4qgp7vg8ymxvtmsq2us5k5/armada-push:latest

@@ -23,6 +23,7 @@ EMAIL=""
 LOCAL=0
 FORCE=0
 BEHIND_PROXY=""
+PULL=0
 
 die() { printf '\033[31merror\033[0m %s\n' "$*" >&2; exit 1; }
 
@@ -42,6 +43,9 @@ Options:
                  The stack binds plain HTTP; clients still see https/wss, so
                  the two sets of URLs diverge. <cidr> is that proxy's address
                  (e.g. 192.168.1.121/32) — it is trusted to report client IPs.
+  --pull         pull the relay, broker and push images from ncontainer.io
+                 instead of building them; only ../armada must be present.
+                 Relaxes the preflight sibling check to match.
   --force        overwrite an existing .env (destroys the current identities)
   -h, --help     this
 USAGE
@@ -53,6 +57,7 @@ while [ $# -gt 0 ]; do
     --email)  EMAIL="${2:-}";  shift 2 ;;
     --local)  LOCAL=1;         shift ;;
     --behind-proxy) BEHIND_PROXY="${2:-}"; shift 2 ;;
+    --pull)   PULL=1;          shift ;;
     --force)  FORCE=1;         shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1" ;;
@@ -99,7 +104,13 @@ AV_HOST="av.${DOMAIN}"
 RELAY_HOST="relay.${DOMAIN}"
 BLOSSOM_HOST="blossom.${DOMAIN}"
 
-"$STACK_DIR/scripts/preflight.sh"
+# In --pull mode only ../armada must be present; the other three come from
+# ncontainer.io. Forward the flag so preflight relaxes its sibling check to match.
+if [ "$PULL" -eq 1 ]; then
+  "$STACK_DIR/scripts/preflight.sh" --pull
+else
+  "$STACK_DIR/scripts/preflight.sh"
+fi
 echo
 
 # ── Secrets ──────────────────────────────────────────────────────────────────
