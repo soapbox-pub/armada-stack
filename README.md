@@ -63,29 +63,38 @@ as a secure context, so microphone access and voice still work.
 
 The Quick start builds all four images from sibling checkouts (`../armada`,
 `../armada-av`, `../ditto-relay`, `../nostr-push`) plus a Bun toolchain. Pull
-mode replaces three of those with a `docker pull` of images published to
-[ncontainer.io](https://ncontainer.io) — an OCI registry backed by Nostr +
-Blossom, where the image name *is* the publisher's signing identity — leaving
-only the client built locally:
+mode removes every local-path dependency: the relay, broker and push images
+become a `docker pull` from [ncontainer.io](https://ncontainer.io) — an OCI
+registry backed by Nostr + Blossom, where the image name *is* the publisher's
+signing identity — and the client is built from a **git-URL context** (BuildKit
+clones the client repo at build time) rather than from `../armada` on disk:
 
 ```sh
 ./scripts/bootstrap.sh --domain example.com --email you@example.com --pull
 docker compose -f docker-compose.yml -f docker-compose.pull.yml up -d --build armada
 ```
 
-`--pull` relaxes the preflight sibling check to require only `../armada`. The
-client stays a local build because its endpoint URLs are baked into the bundle
+`--pull` relaxes the preflight check so **no sibling checkout is required** — a
+fresh box satisfies the whole deploy from URLs alone. The client is still a
+build rather than an image because its endpoint URLs are baked into the bundle
 at build time from *your* hostnames, so it can't be a pre-published image (see
 `docker-compose.pull.yml`); it builds entirely inside its own `node:22-alpine`
-stage, so the host needs only Docker and the `../armada` checkout — no Node, no
-Bun. Maintainers republish the pulled images with `scripts/publish-images.sh`.
+stage from the git URL, so the host needs only Docker — no Node, no Bun, no
+source trees. Pin the client with
+`ARMADA_BUILD_CONTEXT=https://github.com/soapbox-pub/armada.git#v1.4.2` in
+`.env` (BuildKit accepts `#<tag|branch|sha>`). Maintainers republish the pulled
+images with `scripts/publish-images.sh`.
 
 ### One-click droplet
 
-`deploy/digitalocean/` has a cloud-init template that provisions the whole
-stack in pull mode on a fresh DigitalOcean droplet — you edit two lines
-(domain, email), paste it into the droplet's user-data field, and point four
-DNS records at the IP. See `deploy/digitalocean/README.md`.
+`deploy/digitalocean/` provisions the whole stack in pull mode on a fresh
+DigitalOcean droplet, two ways: a **cloud-init** template you set `DOMAIN`,
+`EMAIL` and `STACK_REPO` in and paste into the droplet's user-data field, or a
+**Packer image** (`deploy/digitalocean/packer/`) that bakes Docker, the stack
+and the pulled images into a Marketplace-style snapshot so first boot only needs
+your domain. Both run one shared `firstboot.sh`, and both still need four DNS
+records pointed at the IP before Caddy can issue TLS. See
+`deploy/digitalocean/README.md`.
 
 ## The three couplings that matter
 

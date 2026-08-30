@@ -8,9 +8,9 @@ set -euo pipefail
 STACK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FAIL=0
 
-# --pull: the relay, broker and push images are PULLED from ncontainer.io
-# (docker-compose.pull.yml) rather than built, so only ../armada — the one image
-# still built locally — has to be present. Without it, all four siblings are
+# --pull: the relay, broker and push images are PULLED from ncontainer.io and
+# the client is built from a git-URL context (docker-compose.pull.yml), so NO
+# sibling checkout has to be present at all. Without it, all four siblings are
 # required, which is the source-build default.
 PULL=0
 for arg in "$@"; do
@@ -50,25 +50,22 @@ fi
 # Checked by their manifest rather than by .git: a deployed copy is often an
 # rsync or a tarball with no history, and that is a perfectly good build source.
 #
-# In --pull mode the relay, broker and push images come from ncontainer.io, so
-# only ../armada (still built locally, because its VITE_* config is baked at
-# build time from this deployment's own hostnames) has to be here.
+# In --pull mode there are NO local-path dependencies at all: the relay, broker
+# and push images come from ncontainer.io, and the client is built from a
+# git-URL context (docker-compose.pull.yml), so nothing here has to be a sibling
+# on disk. That is the whole point of pull mode — a fresh droplet satisfies it
+# from URLs alone.
 if [ "$PULL" -eq 1 ]; then
-  SIBLINGS="armada"
+  ok "pull mode — no sibling checkouts required (images pulled, client built from git URL)"
 else
-  SIBLINGS="armada armada-av ditto-relay nostr-push"
-fi
-for repo in $SIBLINGS; do
-  if [ -f "$STACK_DIR/../$repo/package.json" ]; then
-    ok "../$repo"
-  else
-    if [ "$PULL" -eq 1 ]; then
-      bad "../$repo is missing — pull mode still builds the client from it"
+  for repo in armada armada-av ditto-relay nostr-push; do
+    if [ -f "$STACK_DIR/../$repo/package.json" ]; then
+      ok "../$repo"
     else
       bad "../$repo is missing — the stack builds every image from sibling checkouts"
     fi
-  fi
-done
+  done
+fi
 
 # ── OpenSearch's one host requirement ────────────────────────────────────────
 # Too low and OpenSearch refuses to start with a bootstrap check failure, which

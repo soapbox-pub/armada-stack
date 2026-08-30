@@ -1,39 +1,63 @@
-# Pull mode — pull the relay, broker and push images instead of building them.
+# Pull mode — nothing on the deploy path lives on local disk.
 #
 #   docker compose -f docker-compose.yml -f docker-compose.pull.yml up -d --build armada
 #
 # The base docker-compose.yml builds all four service images from sibling
-# checkouts (../armada, ../armada-av, ../ditto-relay, ../nostr-push). This
-# override replaces three of those builds with a `docker pull` of images we
-# publish to ncontainer.io — an OCI registry backed by Nostr + Blossom, where
-# the image NAME is the publisher's signing identity (see ../ncontainer). So a
-# self-hoster needs neither those three source trees nor a Bun toolchain: the
-# stack simply pulls them.
+# checkouts (../armada, ../armada-av, ../ditto-relay, ../nostr-push). That is
+# fine for local development but toxic for a deployment: a `../` path is a
+# machine-specific assumption a fresh droplet cannot satisfy. This override
+# removes every local-path dependency, so the deploy is reproducible from URLs
+# alone —
 #
-# WHY THE CLIENT IS STILL A BUILD. Every VITE_* the client reads is baked into
-# its bundle at build time (armada/Dockerfile), and those values include this
-# deployment's own hostnames — which are not known until `bootstrap.sh` has run
-# with a domain. A pre-published client image would carry someone else's URLs,
-# so `armada` is deliberately left as the base file's local build. It builds
-# entirely inside its own node:22-alpine stage, so the host needs only Docker
-# and the ../armada checkout — no Node, no toolchain. That is the `--build
-# armada` above: pull the three, build the one.
+#   - relay, broker and push become a `docker pull` from ncontainer.io, an OCI
+#     registry backed by Nostr (a signed kind-30624 event holds the tag->digest
+#     map) + Blossom (the layer blobs), where the image NAME is the publisher's
+#     signing identity (see ../ncontainer);
+#   - the client is built from a GIT-URL BUILD CONTEXT — BuildKit clones the
+#     client repo at build time — rather than from `../armada` on disk.
 #
-# THE `!reset null` ON build IS LOAD-BEARING. Compose MERGES override maps into
-# the base rather than replacing them, so an `image:` added beside the base's
-# `build:` would leave both set and Compose would BUILD and tag as that image
-# instead of pulling it. `!reset null` removes the inherited build block so only
-# `image:` remains. Verify with:
+# So a self-hoster needs Docker and no source trees at all: two images and a git
+# URL. The point is to make self-hosting easier and reproducible; keep it that
+# way — do not reintroduce a `../` context here.
+#
+# WHY THE CLIENT IS STILL A BUILD, NOT AN IMAGE. Every VITE_* the client reads
+# is baked into its bundle at build time (armada/Dockerfile), and those values
+# include THIS deployment's own hostnames — not known until `bootstrap.sh` has
+# run with a domain. A pre-published client image would carry someone else's
+# URLs. So the client is built here, but from a URL, not a path: it compiles
+# entirely inside its own node:22-alpine stage, so the host still needs only
+# Docker. That is the `--build armada` above: pull the three, build the one.
+#
+# PINNING / OVERRIDING THE CLIENT SOURCE. `ARMADA_BUILD_CONTEXT` selects the
+# repo and ref. The default is the public mirror's default branch; for a
+# reproducible build, set it in .env to a URL with a ref fragment, e.g.
+#   ARMADA_BUILD_CONTEXT=https://github.com/soapbox-pub/armada.git#v1.4.2
+# BuildKit accepts #<branch>, #<tag> or #<commit-sha>.
+#
+# THE `!reset null` ON build (relay/broker/push) IS LOAD-BEARING. Compose MERGES
+# override maps into the base rather than replacing them, so an `image:` added
+# beside the base's `build:` would leave both set and Compose would BUILD and
+# tag as that image instead of pulling it. `!reset null` removes the inherited
+# build block so only `image:` remains. The client keeps its `build:` (context
+# replaced by the git URL, args merged from the base) — a scalar, so no reset is
+# needed there. Verify the whole merge with:
 #   docker compose -f docker-compose.yml -f docker-compose.pull.yml config
-# and check that relay/broker/push show `image:` and NO `build:`.
+# relay/broker/push must show `image:` and NO `build:`; armada must show a git
+# URL context and NO `../armada`.
 #
-# PINNING. These reference the mutable `:latest` tag, which resolves through a
-# signed kind-30624 event — provenance is verified on every pull regardless,
-# since a pull cannot resolve without checking the publisher's signature. To pin
-# a build byte-for-byte, replace `:latest` with the `@sha256:<manifest-digest>`
-# that scripts/publish-images.sh prints, which is verifiable end to end.
+# PINNING THE IMAGES. The three refs below use the mutable `:latest` tag, which
+# resolves through a signed kind-30624 event — provenance is verified on every
+# pull regardless, since a pull cannot resolve without checking the publisher's
+# signature. To pin a build byte-for-byte, replace `:latest` with the
+# `@sha256:<manifest-digest>` that scripts/publish-images.sh prints.
 
 services:
+  armada:
+    build:
+      # No !reset: context is a scalar, so this replaces ../armada while the
+      # base's build args merge through unchanged.
+      context: ${ARMADA_BUILD_CONTEXT:-https://github.com/soapbox-pub/armada.git}
+
   relay:
     build: !reset null
     image: ncontainer.io/npub1ceq9atrz4md20phexutsvhwujw8qjftudgud4qgp7vg8ymxvtmsq2us5k5/armada-relay:latest

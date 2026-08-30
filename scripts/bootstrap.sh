@@ -43,9 +43,10 @@ Options:
                  The stack binds plain HTTP; clients still see https/wss, so
                  the two sets of URLs diverge. <cidr> is that proxy's address
                  (e.g. 192.168.1.121/32) — it is trusted to report client IPs.
-  --pull         pull the relay, broker and push images from ncontainer.io
-                 instead of building them; only ../armada must be present.
-                 Relaxes the preflight sibling check to match.
+  --pull         pull the relay, broker and push images from ncontainer.io and
+                 build the client from a git-URL context instead of local
+                 checkouts; no sibling repo has to be present. Relaxes the
+                 preflight sibling check to match.
   --force        overwrite an existing .env (destroys the current identities)
   -h, --help     this
 USAGE
@@ -104,8 +105,9 @@ AV_HOST="av.${DOMAIN}"
 RELAY_HOST="relay.${DOMAIN}"
 BLOSSOM_HOST="blossom.${DOMAIN}"
 
-# In --pull mode only ../armada must be present; the other three come from
-# ncontainer.io. Forward the flag so preflight relaxes its sibling check to match.
+# In --pull mode no sibling checkout has to be present: the three images come
+# from ncontainer.io and the client builds from a git-URL context. Forward the
+# flag so preflight relaxes its sibling check to match.
 if [ "$PULL" -eq 1 ]; then
   "$STACK_DIR/scripts/preflight.sh" --pull
 else

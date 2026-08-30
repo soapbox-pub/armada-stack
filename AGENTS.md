@@ -39,20 +39,27 @@ configuration.
 
 ## Pull mode, publishing images, and the droplet
 
-`docker-compose.pull.yml` overrides `relay`, `broker` and `push` to a
-`docker pull` from **ncontainer.io** — an OCI registry backed by Nostr (a signed
-kind-30624 event holds the tag→digest map) + Blossom (the layer blobs), where
-the image NAME is the publisher's signing identity (`../ncontainer`). It exists
-so a self-hoster needs neither those three source trees nor a Bun toolchain: the
-stack pulls them. The point is to make self-hosting easier, so keep it that way.
+`docker-compose.pull.yml` removes EVERY local-path dependency from the deploy —
+that is its whole job, and reintroducing a `../` context anywhere in it is a
+regression. It overrides `relay`, `broker` and `push` to a `docker pull` from
+**ncontainer.io** — an OCI registry backed by Nostr (a signed kind-30624 event
+holds the tag→digest map) + Blossom (the layer blobs), where the image NAME is
+the publisher's signing identity (`../ncontainer`) — and it replaces the
+client's `../armada` build context with a **git-URL context** so BuildKit clones
+the client repo at build time. So a fresh box needs Docker and no source trees
+at all: two images and a git URL, reproducible from URLs alone.
 
-- **The client is NEVER pulled.** Every `VITE_*` is baked into the bundle at
-  build time (see *Client config is build-time*), and those values include this
-  deployment's own hostnames — which a pre-published image cannot know. So
-  `armada` stays the base file's local build, and `up` in pull mode is
-  `... -f docker-compose.pull.yml up -d --build armada`: pull the three, build
-  the one. It builds inside its own `node:22-alpine` stage, so the host needs
-  only Docker + `../armada`.
+- **The client is NEVER pulled, but it is also never built from a path.** Every
+  `VITE_*` is baked into the bundle at build time (see *Client config is
+  build-time*), and those values include this deployment's own hostnames — which
+  a pre-published image cannot know. So `armada` stays a `build:`, and `up` in
+  pull mode is `... -f docker-compose.pull.yml up -d --build armada`: pull the
+  three, build the one. Its `context:` is `${ARMADA_BUILD_CONTEXT:-<public
+  mirror>}` — a git URL, not `../armada` — so it builds inside its own
+  `node:22-alpine` stage with only Docker present, no checkout on disk. `context`
+  is a scalar so the override REPLACES it with no `!reset`, while the base's
+  build args merge through. Pin with `ARMADA_BUILD_CONTEXT=<url>#<tag|branch|sha>`
+  in `.env`.
 - **The `!reset null` on `build:` is load-bearing.** Compose MERGES override
   maps into the base, so adding `image:` beside the inherited `build:` leaves
   both set and Compose builds-and-tags instead of pulling. `!reset null` drops
@@ -75,18 +82,33 @@ stack pulls them. The point is to make self-hosting easier, so keep it that way.
   entry that `publish.ts` would mint a bogus tag for. `BLOSSOM_SERVERS` has no
   default — a container layer is a large octet-stream blob and media-oriented
   Blossom servers answer 415.
-- **`--pull` on `bootstrap.sh`/`preflight.sh`** relaxes the sibling check to
-  require only `../armada` (the one still built locally). `bootstrap.sh`
-  forwards it to preflight.
-- **The droplet** (`deploy/digitalocean/`) is a cloud-init template that
-  provisions the whole stack in pull mode: installs Docker, sets the two host
-  sysctls (`vm.max_map_count`, `net.core.rmem_max` — host-kernel, not settable
-  from compose), opens the firewall, clones the stack + `../armada`, and runs
-  bootstrap+up. It is guarded by a done-marker so a re-run is idempotent.
-  `STACK_REPO` has NO default because armada-stack is not yet published to any
-  git host — that is a real dependency, not an oversight. DNS is still manual:
-  four records must point at the IP before Caddy can get certs, and no provider
-  button creates records in a domain registered elsewhere.
+- **`--pull` on `bootstrap.sh`/`preflight.sh`** relaxes the check so NO sibling
+  checkout is required at all — the three images are pulled and the client
+  builds from a git URL, so a fresh box satisfies the whole deploy from URLs.
+  `bootstrap.sh` forwards the flag to preflight.
+- **The droplet** (`deploy/digitalocean/`) provisions the whole stack in pull
+  mode two ways, both running ONE shared `firstboot.sh` (the single place the
+  boot sequence lives, self-locating via `STACK_DIR` two levels up from its own
+  path — nothing hardcodes `/opt/armada`):
+  - **Path A, `cloud-init.yml`:** opens the firewall, sets the two host sysctls
+    (`vm.max_map_count`, `net.core.rmem_max` — host-kernel, not settable from
+    compose), clones `STACK_REPO`, and execs its `firstboot.sh`. `STACK_REPO`
+    has NO default because armada-stack is not yet published to any git host —
+    a real dependency, not an oversight.
+  - **Path B, `packer/`:** bakes Docker, the stack checkout, the sysctls and the
+    pre-pulled images into a DO snapshot, with `armada-firstboot.service` running
+    `firstboot.sh` on boot. `provision.sh` strips `.env`, `.images.env` AND
+    `.git` (this repo keeps the ngit `nostr.nsec` in `.git/config`, which the
+    file provisioner copies verbatim) from the bake and deletes the staging
+    upload — no secret reaches the snapshot, which is the hard Marketplace
+    requirement. Path B needs no published stack: it uploads the checkout.
+  - `firstboot.sh` is idempotent (done-marker at `/var/lib/armada/.provisioned`)
+    and an UNCONFIGURED box (`example.com` placeholders unedited) exits 0 without
+    writing the marker, so the oneshot succeeds and the next boot retries rather
+    than the unit going `failed`.
+  - DNS is manual either way: four records must point at the IP before Caddy can
+    get certs, and no provider button creates records in a domain registered
+    elsewhere.
 
 ## The couplings — do not break these
 
