@@ -1,17 +1,23 @@
 #!/usr/bin/env bash
-# Build the three pull-able stack images and publish them to ncontainer.io.
+# Build the centrally-published stack images and publish them to ncontainer.io.
 #
-#   ./scripts/publish-images.sh            build + upload + sign all three
+#   ./scripts/publish-images.sh            build + upload + sign all
 #   ./scripts/publish-images.sh --dry-run  build + export + tag-map only; no writes
-#   ./scripts/publish-images.sh relay      just one (relay | broker | push)
+#   ./scripts/publish-images.sh relay      just one (relay | push)
+#
+# This covers the components that are NOT their own nostr repo: the relay (from
+# ../ditto-relay, gitlab-only) and push (from ../nostr-push, gitlab-only). The
+# broker is armada-av, which is a nostr repo and self-publishes its own image
+# from its own CI — see docker-compose.pull.yml's broker note. Add each of the
+# other two here only until they too carry the drop-in.
 #
 # ncontainer has no `docker push` and no account: an OCI image is already a
 # content-addressed blob graph, so "publishing" is (see ../ncontainer/README):
 #   1. export each image as an OCI layout (a directory of blobs named by sha256),
 #   2. upload those blobs to Blossom (BUD-02, a signed kind-24242 auth), and
 #   3. sign one kind-30624 event per repo mapping `latest` -> the manifest digest.
-# The image NAME is the signing key's npub, so the same three names always
-# resolve to this identity's builds and nobody else's.
+# The image NAME is the signing key's npub, so each name always resolves to this
+# identity's builds and nobody else's.
 #
 # SIGNING IS THROUGH nak, so the signer can be a raw key OR a NIP-46 bunker.
 # That is the whole point: CI signs as the soapbox account through its bunker,
@@ -50,9 +56,9 @@ say() { printf '\033[36m==>\033[0m %s\n' "$*"; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
-    relay|broker|push) ONLY="$1"; shift ;;
+    relay|push) ONLY="$1"; shift ;;
     -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
-    *) die "unknown argument: $1 (expected --dry-run or one of relay|broker|push)" ;;
+    *) die "unknown argument: $1 (expected --dry-run or one of relay|push)" ;;
   esac
 done
 
@@ -99,16 +105,19 @@ nak_signer() {
   [ -n "${IMAGES_CONNECT_AS:-}" ] && printf '%s\0' --connect-as "$IMAGES_CONNECT_AS"
 }
 
-# Each image: <repo-name> then the buildx context arguments. The relay has no
-# Dockerfile of its own, so it reuses images/ditto-relay.Dockerfile with the
-# relay source as a named build context — exactly as docker-compose.yml builds
-# it. broker and push each carry their own Dockerfile.
+# Each image: <repo-name> then the buildx context arguments. The relay reuses
+# images/ditto-relay.Dockerfile with the relay source as a named build context —
+# exactly as docker-compose.yml builds it; push carries its own Dockerfile.
+#
+# The broker is deliberately NOT here. armada-av publishes its own image (name
+# `armada-av`, matching the compose ref) from its own ngit-repo CI
+# (its scripts/publish-container.sh), so building it here too would be a second
+# publisher minting a different name under the same identity.
 build_args_for() {
   case "$1" in
     relay)  printf '%s\n' "armada-relay" \
               "-f" "images/ditto-relay.Dockerfile" \
               "--build-context" "relay-src=../ditto-relay" "." ;;
-    broker) printf '%s\n' "armada-broker" "../armada-av" ;;
     push)   printf '%s\n' "armada-push" "../nostr-push" ;;
     *) die "unknown image key: $1" ;;
   esac
@@ -193,7 +202,7 @@ publish_one() {
 if [ -n "$ONLY" ]; then
   publish_one "$ONLY"
 else
-  for key in relay broker push; do publish_one "$key"; done
+  for key in relay push; do publish_one "$key"; done
 fi
 
 say "done"

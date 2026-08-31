@@ -64,7 +64,11 @@ services:
 
   broker:
     build: !reset null
-    image: ncontainer.io/npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/armada-broker:latest
+    # The broker IS armada-av, and armada-av publishes its own image under its
+    # own repo (its .ngit/act/workflows/publish-container.yml sets
+    # IMAGE_NAME=armada-av), so the name here is `armada-av`, not `armada-broker`
+    # — the ncontainer name matches the repo that signs it.
+    image: ncontainer.io/npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/armada-av:latest
 
   push:
     build: !reset null
