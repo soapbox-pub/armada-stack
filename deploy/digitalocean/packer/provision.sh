@@ -23,7 +23,7 @@ STACK_DIR=/opt/armada/stack
 
 # The published image namespace (see .images.env / docker-compose.pull.yml). The
 # three refs are pre-pulled so the first real boot doesn't wait on them.
-IMAGES_NPUB=npub1ceq9atrz4md20phexutsvhwujw8qjftudgud4qgp7vg8ymxvtmsq2us5k5
+IMAGES_NPUB=npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj
 IMAGES="armada-relay armada-broker armada-push"
 
 echo "==> provisioning armada image"

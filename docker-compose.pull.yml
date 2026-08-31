@@ -60,12 +60,12 @@ services:
 
   relay:
     build: !reset null
-    image: ncontainer.io/npub1ceq9atrz4md20phexutsvhwujw8qjftudgud4qgp7vg8ymxvtmsq2us5k5/armada-relay:latest
+    image: ncontainer.io/npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/armada-relay:latest
 
   broker:
     build: !reset null
-    image: ncontainer.io/npub1ceq9atrz4md20phexutsvhwujw8qjftudgud4qgp7vg8ymxvtmsq2us5k5/armada-broker:latest
+    image: ncontainer.io/npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/armada-broker:latest
 
   push:
     build: !reset null
-    image: ncontainer.io/npub1ceq9atrz4md20phexutsvhwujw8qjftudgud4qgp7vg8ymxvtmsq2us5k5/armada-push:latest
+    image: ncontainer.io/npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/armada-push:latest
