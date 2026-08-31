@@ -65,10 +65,10 @@ build {
   sources = ["source.digitalocean.armada"]
 
   # 1. Upload the stack checkout to a staging path. The file provisioner copies
-  #    the tree as-is; provision.sh then strips `.env` and `.images.env` from the
-  #    staging copy BEFORE baking, so no secret reaches the snapshot. Build from a
-  #    clean checkout (secrets are gitignored and absent from a fresh clone) if
-  #    you want them off the throwaway build droplet's disk entirely too.
+  #    the tree as-is; provision.sh then strips `.env` and `.git` from the baked
+  #    copy and deletes the staging tree BEFORE the snapshot, so no secret reaches
+  #    it. Build from a clean checkout (secrets are gitignored and absent from a
+  #    fresh clone) if you want them off the throwaway build droplet's disk too.
   provisioner "file" {
     source      = "${path.root}/../../../"
     destination = "/tmp/armada-stack"

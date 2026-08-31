@@ -49,7 +49,9 @@
 # resolves through a signed kind-30624 event — provenance is verified on every
 # pull regardless, since a pull cannot resolve without checking the publisher's
 # signature. To pin a build byte-for-byte, replace `:latest` with the
-# `@sha256:<manifest-digest>` that scripts/publish-images.sh prints.
+# `@sha256:<manifest-digest>` each component's publish CI prints (the images are
+# built and signed from their own repos now — see ../ditto-relay, ../armada-av
+# and ../nostr-push, each carrying `.ngit/act/workflows/publish-container.yml`).
 
 services:
   armada:

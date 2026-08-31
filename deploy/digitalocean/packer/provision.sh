@@ -21,10 +21,11 @@ set -euo pipefail
 STAGING="${1:-/tmp/armada-stack}"
 STACK_DIR=/opt/armada/stack
 
-# The published image namespace (see .images.env / docker-compose.pull.yml). The
-# three refs are pre-pulled so the first real boot doesn't wait on them.
+# The published image namespace (see docker-compose.pull.yml). The three refs
+# are pre-pulled so the first real boot doesn't wait on them. The broker's image
+# is armada-av (armada-av self-publishes it), not armada-broker.
 IMAGES_NPUB=npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj
-IMAGES="armada-relay armada-broker armada-push"
+IMAGES="armada-relay armada-av armada-push"
 
 echo "==> provisioning armada image"
 export DEBIAN_FRONTEND=noninteractive
@@ -56,15 +57,14 @@ SYSCTL
 mkdir -p /opt/armada
 rm -rf "$STACK_DIR"
 cp -a "$STAGING" "$STACK_DIR"
-# Never bake a secret into a public image. Three sources, all stripped here:
+# Never bake a secret into a public image. Two sources, both stripped here:
 #   .env          the generated stack secrets (RELAY_NSEC, PUSH_NSEC, LiveKit)
-#   .images.env   the ncontainer publisher nsec
 #   .git          the maintainer's clone carries repo-local git config, and this
 #                 repo sets `nostr.nsec` there (the ngit signing key) — a working
 #                 tree's .git/config is a secret the file provisioner copies
 #                 verbatim. The baked image needs no history: firstboot builds
 #                 from URLs, not from this checkout's git objects.
-rm -rf "$STACK_DIR/.env" "$STACK_DIR/.images.env" "$STACK_DIR/.git"
+rm -rf "$STACK_DIR/.env" "$STACK_DIR/.git"
 
 # ── deploy.env skeleton ──────────────────────────────────────────────────────
 # The operator's user-data (or a Marketplace form, or hand editing) overwrites

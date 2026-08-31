@@ -132,13 +132,12 @@ services:
       - ./config/livekit/livekit.yaml:/etc/livekit.yaml:ro
 
   # ── Relay ──────────────────────────────────────────────────────────────────
-  # ditto-relay ships no Dockerfile; images/ditto-relay.Dockerfile is ours.
+  # ditto-relay ships its own Dockerfile now, so the build context is that
+  # sibling checkout directly (it used to be images/ditto-relay.Dockerfile fed
+  # by a named context, back when the upstream shipped none).
   relay:
     build:
-      context: .
-      dockerfile: images/ditto-relay.Dockerfile
-      additional_contexts:
-        relay-src: ../ditto-relay
+      context: ../ditto-relay
     restart: unless-stopped
     networks: [armada]
     environment:

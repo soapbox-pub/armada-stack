@@ -7,8 +7,3 @@
 
 # Local compose scratch
 docker-compose.override.yml
-
-# The Armada images publisher nsec (scripts/publish-images.sh). Signs the
-# kind-30624 events that name the pulled images on ncontainer; the image name
-# IS this key, so it can never be rotated without a stack-wide reference change.
-.images.env

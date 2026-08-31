@@ -98,7 +98,7 @@ Ubuntu 24.04 droplet, uploads this checkout, runs
 runs DigitalOcean's own `90-cleanup.sh` / `99-img_check.sh` and snapshots. The
 snapshot name is printed at the end (`armada-stack-<timestamp>`).
 
-`provision.sh` strips `.env`, `.images.env` and `.git` from the baked copy and
+`provision.sh` strips `.env` and `.git` from the baked copy and
 deletes the staging upload, so **no secret rides into the snapshot** — which is
 the hard requirement for passing Marketplace review. Every stack secret is
 generated on the operator's first boot by `bootstrap.sh`.

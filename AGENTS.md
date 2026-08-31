@@ -12,11 +12,13 @@ there**, in that repo, rather than papering over it with stack config. (Pull
 mode swaps three of those source builds for pre-built images off ncontainer.io;
 see *Pull mode* below. The client is always a local build.)
 
-**Never write into the sibling repos from here.** `ditto-relay` ships no
-Dockerfile, and the fix was `images/ditto-relay.Dockerfile` in THIS repo fed by
-a named BuildKit context, not a Dockerfile committed upstream. `ditto-relay` is
+**Never write into the sibling repos from here.** The wiring belongs in this
+repo, not in projects with their own release lifecycle: `ditto-relay` is
 someone else's project (`gitlab.com/soapbox-pub/ditto-relay`); `armada-av` and
-`armada` are ours but have their own release lifecycle.
+`armada` are ours but release on their own cadence. (`ditto-relay` once shipped
+no Dockerfile, so the relay built from `images/ditto-relay.Dockerfile` in THIS
+repo fed by a named BuildKit context; it ships its own now, so the base compose
+builds `../ditto-relay` directly and that file is gone.)
 
 ## Build / test
 
@@ -66,22 +68,21 @@ at all: two images and a git URL, reproducible from URLs alone.
   the build block. Verify with `docker compose -f docker-compose.yml -f
   docker-compose.pull.yml config` and check the three show `image:` and NO
   `build:`.
-- **The images identity is permanent-ish.** The npub hardcoded in
-  `docker-compose.pull.yml` (and the deploy docs) IS the namespace — a new key
-  is a new set of names and a stack-wide reference change. The nsec lives in
-  `.images.env` (gitignored, like `.env`); losing it means the three names can
-  never be republished. amd64-only by decision.
-- **`scripts/publish-images.sh` is a MAINTAINER tool, not part of any deploy.**
-  Without `--dry-run` it uploads layer blobs to public Blossom servers and signs
-  public events under the images identity. It builds each image to an OCI layout
-  via an ephemeral `docker-container` buildx builder (the default `docker`
-  driver can't use the OCI exporter), then runs ncontainer's own `upload.ts` /
-  `publish.ts` in an `oven/bun:1` container — no host toolchain, same principle
-  as `bootstrap.sh`. `--provenance=false --sbom=false` is required: an
-  attestation manifest turns the export into a list with an `unknown/unknown`
-  entry that `publish.ts` would mint a bogus tag for. `BLOSSOM_SERVERS` has no
-  default — a container layer is a large octet-stream blob and media-oriented
-  Blossom servers answer 415.
+- **The images identity is permanent-ish, and this repo does not hold it.** The
+  npub hardcoded in `docker-compose.pull.yml` (and the deploy docs) IS the
+  namespace — a new key is a new set of names and a stack-wide reference change.
+  It is the SOAPBOX account, and the three names each resolve to it because each
+  image is signed by its bunker. amd64-only by decision.
+- **Each component self-publishes its own image; this repo only PULLS them.**
+  The stack no longer builds or signs the pulled images — `armada-av`,
+  `ditto-relay` (→ `armada-relay`) and `nostr-push` (→ `armada-push`) each carry
+  their own `scripts/publish-container.sh` + `.ngit/act/workflows/`
+  `publish-container.yml` drop-in and publish to ncontainer.io from their own
+  ngit-ci job on a push to `main`, signing the kind-24242 Blossom auth and the
+  kind-30624 repo event through the soapbox NIP-46 bunker (no raw key on the
+  runner). So there is no publisher script, no `.images.env`, and no
+  `oci-tags.mjs` here anymore — those lived in the drop-in and moved to the
+  component repos. To rebuild an image, push its repo.
 - **`--pull` on `bootstrap.sh`/`preflight.sh`** relaxes the check so NO sibling
   checkout is required at all — the three images are pulled and the client
   builds from a git URL, so a fresh box satisfies the whole deploy from URLs.
@@ -97,11 +98,11 @@ at all: two images and a git URL, reproducible from URLs alone.
     a real dependency, not an oversight.
   - **Path B, `packer/`:** bakes Docker, the stack checkout, the sysctls and the
     pre-pulled images into a DO snapshot, with `armada-firstboot.service` running
-    `firstboot.sh` on boot. `provision.sh` strips `.env`, `.images.env` AND
-    `.git` (this repo keeps the ngit `nostr.nsec` in `.git/config`, which the
-    file provisioner copies verbatim) from the bake and deletes the staging
-    upload — no secret reaches the snapshot, which is the hard Marketplace
-    requirement. Path B needs no published stack: it uploads the checkout.
+    `firstboot.sh` on boot. `provision.sh` strips `.env` AND `.git` (this repo
+    keeps the ngit `nostr.nsec` in `.git/config`, which the file provisioner
+    copies verbatim) from the bake and deletes the staging upload — no secret
+    reaches the snapshot, which is the hard Marketplace requirement. Path B
+    needs no published stack: it uploads the checkout.
   - `firstboot.sh` is idempotent (done-marker at `/var/lib/armada/.provisioned`)
     and an UNCONFIGURED box (`example.com` placeholders unedited) exits 0 without
     writing the marker, so the oneshot succeeds and the next boot retries rather
@@ -210,10 +211,6 @@ vanishing out of history while the messages referencing them remain. Don't
   `../armada/package.json`.** Signaling protocol skew makes clients
   full-reconnect roughly every 16 seconds. Bumping the client's SDK means
   bumping the image here.
-- **`oven/bun:1`** in `images/ditto-relay.Dockerfile` matches what ditto-relay's
-  own CI runs. It cannot be Node: `src/server.ts` imports `serve` from `"bun"`,
-  uses `server.requestIP()`, and spawns Workers with the Bun-only `smol`
-  option.
 - **`nostr-tools` in `scripts/lib/keygen.ts` is pinned**, not floating. It mints
   the stack's long-lived identities from a package fetched at bootstrap time.
 

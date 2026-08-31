@@ -82,8 +82,9 @@ at build time from *your* hostnames, so it can't be a pre-published image (see
 stage from the git URL, so the host needs only Docker — no Node, no Bun, no
 source trees. Pin the client with
 `ARMADA_BUILD_CONTEXT=https://github.com/soapbox-pub/armada.git#v1.4.2` in
-`.env` (BuildKit accepts `#<tag|branch|sha>`). Maintainers republish the pulled
-images with `scripts/publish-images.sh`.
+`.env` (BuildKit accepts `#<tag|branch|sha>`). The three pulled images are
+published to ncontainer.io by each component's own repo CI
+(`armada-av`/`ditto-relay`/`nostr-push`), not from this repo.
 
 ### One-click droplet
 
@@ -193,7 +194,6 @@ docker-compose.hostnet.yml   SFU on the host network namespace
 config/caddy/Caddyfile       routing and TLS for all four hostnames
 config/livekit/              SFU config (public and local variants)
 config/blossom/config.yml    media server config
-images/ditto-relay.Dockerfile  ditto-relay ships none of its own
 scripts/bootstrap.sh         writes .env
 scripts/preflight.sh         checks the host before you find out the hard way
 ```
