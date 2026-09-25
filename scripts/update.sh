@@ -61,6 +61,26 @@ docker compose pull --ignore-buildable
 echo "Recreating what changed"
 docker compose up -d --wait --wait-timeout 600 --remove-orphans
 
+# Compose recreates a container when its image or definition changes, but NOT
+# when a bind-mounted config file does — and since git replaces files rather
+# than rewriting them, a running container keeps the old inode. So force the
+# services whose config/ changed (all of them, when adopting a baked image and
+# there is no "before" to diff against).
+if [ -n "$before" ]; then
+  changed="$(git diff --name-only "$before" "$after" -- config/)"
+else
+  changed="config/caddy config/livekit config/blossom"
+fi
+stale=""
+case "$changed" in *config/caddy*)   stale="$stale caddy" ;; esac
+case "$changed" in *config/livekit*) stale="$stale livekit" ;; esac
+case "$changed" in *config/blossom*) stale="$stale blossom" ;; esac
+if [ -n "$stale" ]; then
+  echo "Config changed; recreating:$stale"
+  # shellcheck disable=SC2086
+  docker compose up -d --wait --wait-timeout 600 --force-recreate --no-deps $stale
+fi
+
 docker compose ps
 docker image prune -f >/dev/null
 echo "Updated to $(git rev-parse --short HEAD)."
