@@ -1,0 +1,62 @@
+#cloud-config
+# Armada — cloud-init user-data for any provider that takes it.
+#
+# DigitalOcean, Hetzner, Vultr, Linode/Akamai, AWS Lightsail and most others
+# accept this file as-is in the "user data" / "cloud-init" field when creating
+# an Ubuntu 24.04 server (4 GB RAM minimum). It clones the stack, runs
+# install-host.sh (sysctls, firewall, boot unit, `armada-setup`), then
+# firstboot.sh — which installs Docker, generates every secret, builds the
+# client and brings the stack up.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# YOU EDIT TWO LINES — DOMAIN and EMAIL, just below.
+# ─────────────────────────────────────────────────────────────────────────────
+# Leave them as the placeholders and the server boots, clones, and waits; then
+# SSH in and `armada-setup` asks for them instead.
+#
+# You still have to point four DNS records at the server's IP (armada. av.
+# relay. blossom.) — Caddy cannot issue certificates until they resolve here.
+# Run /opt/armada/stack/scripts/check-dns.sh to see where they stand.
+#
+# The boot logic itself is NOT duplicated here — it lives in firstboot.sh, which
+# is also what the DigitalOcean Packer image runs, so there is one boot
+# sequence, not two that drift.
+
+write_files:
+  # The values that make this server yours. Read by firstboot.sh. Every secret
+  # is generated on the server by bootstrap.sh; none belongs here.
+  - path: /etc/armada/deploy.env
+    permissions: '0600'
+    content: |
+      # EDIT THESE. DOMAIN yields armada.<d> av.<d> relay.<d> blossom.<d>.
+      DOMAIN=example.com
+      EMAIL=you@example.com
+
+      # Where the stack glue is cloned from, and at what ref. The default is
+      # the stack's canonical nostr repo, over its grasp server's plain HTTPS
+      # endpoint — so no ngit is needed to clone it. A nostr:// URL also works
+      # (ngit is installed for it).
+      STACK_REPO=https://relay.ngit.dev/npub1scvyzz02ayma34hesz62pdrd5nhsmxp74hjq8msmfs9khh3r3drsnw68d8/armada-stack.git
+      #STACK_REF=<tag or branch>
+
+      # Optional: build the client from a different repo/ref than the stack's
+      # pin in docker-compose.yml.
+      #ARMADA_BUILD_CONTEXT=https://relay.ngit.dev/<npub>/armada.git#<tag|branch|sha>
+
+runcmd:
+  - |
+    set -eu
+    . /etc/armada/deploy.env
+    command -v git >/dev/null 2>&1 || { apt-get update -y && apt-get install -y git; }
+    case "$STACK_REPO" in
+      nostr://*)
+        export HOME=/root
+        command -v git-remote-nostr >/dev/null 2>&1 || curl -Ls https://ngit.dev/install.sh | bash
+        export PATH="$HOME/.local/bin:$PATH" ;;
+    esac
+    mkdir -p /opt/armada
+    if [ ! -d /opt/armada/stack/.git ]; then
+      git clone ${STACK_REF:+--branch "$STACK_REF"} "$STACK_REPO" /opt/armada/stack
+    fi
+    bash /opt/armada/stack/deploy/cloud-init/install-host.sh
+    exec bash /opt/armada/stack/deploy/cloud-init/firstboot.sh

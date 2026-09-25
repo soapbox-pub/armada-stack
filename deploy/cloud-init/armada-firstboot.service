@@ -1,0 +1,27 @@
+# Runs the stack's firstboot provisioner at boot. Installed by install-host.sh,
+# which rewrites /opt/armada/stack below to wherever the checkout actually is.
+#
+# WHY IT RUNS ON EVERY BOOT, not just once. firstboot.sh is idempotent and cheap
+# when there is nothing to do: once provisioned it is a plain `docker compose
+# up -d` that reconciles anything down, and an UNCONFIGURED box exits 0 without
+# writing its marker. So the unit staying enabled means "retry until
+# configured" — the operator can boot the server, then run `armada-setup` (or
+# set the domain and reboot) and it just works.
+
+[Unit]
+Description=Armada stack first-boot provisioner
+# Needs the network for image pulls, the client's git context and ACME, and
+# Docker for `up`. docker.service may not exist yet on the cloud-init path
+# (firstboot installs it), which Wants= tolerates.
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/env bash /opt/armada/stack/deploy/cloud-init/firstboot.sh
+RemainAfterExit=yes
+# A slow first build (client compile + image pulls) must not be killed.
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

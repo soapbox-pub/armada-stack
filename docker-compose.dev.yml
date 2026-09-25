@@ -1,0 +1,39 @@
+# Dev mode — build every application image from a sibling checkout.
+#
+#   ./scripts/bootstrap.sh --local --dev      (writes COMPOSE_FILE into .env)
+#   docker compose up -d --build
+#
+# The base docker-compose.yml pulls the relay, broker and push images and builds
+# the client from a pinned git URL, so a server needs nothing on disk. This
+# override is for working ON a component: it swaps all four back to
+# `../armada`, `../armada-av`, `../ditto-relay` and `../nostr-push`, so a change
+# there shows up on the next `up --build`. preflight.sh --dev checks they exist.
+#
+# Never deploy with this. A `../` context is exactly the machine-specific
+# assumption the base file exists to remove.
+#
+# `image: !reset null` is load-bearing: Compose MERGES override maps, so a
+# `build:` added beside the base's pinned `image:` would build and then TAG the
+# result with the published ncontainer name — a local build masquerading as the
+# signed image. Resetting `image:` leaves the build under a local name.
+
+services:
+  armada:
+    build:
+      # A scalar, so this replaces the base's git URL while its args merge in.
+      context: ../armada
+
+  relay:
+    image: !reset null
+    build:
+      context: ../ditto-relay
+
+  broker:
+    image: !reset null
+    build:
+      context: ../armada-av
+
+  push:
+    image: !reset null
+    build:
+      context: ../nostr-push

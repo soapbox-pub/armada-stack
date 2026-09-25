@@ -8,14 +8,13 @@ set -euo pipefail
 STACK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FAIL=0
 
-# --pull: the relay, broker and push images are PULLED from ncontainer.io and
-# the client is built from a git-URL context (docker-compose.pull.yml), so NO
-# sibling checkout has to be present at all. Without it, all four siblings are
-# required, which is the source-build default.
-PULL=0
+# --dev: the stack will be built from sibling checkouts (docker-compose.dev.yml),
+# so all four must be present. Without it nothing on disk is required: the
+# default pulls three images and builds the client from a git URL.
+DEV=0
 for arg in "$@"; do
   case "$arg" in
-    --pull) PULL=1 ;;
+    --dev) DEV=1 ;;
   esac
 done
 
@@ -36,33 +35,29 @@ else
   ok "docker $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo '?')"
 fi
 
-# The relay image uses named build contexts (`additional_contexts`), which
-# needs Compose v2.17+ and BuildKit. Anything older fails at build time with a
-# confusing "COPY --from" error rather than a version complaint.
+# The compose files use `!reset`/`!override` (Compose v2.24+), and the client
+# builds from a git-URL context, which needs BuildKit. The v1 binary has neither.
 if docker compose version >/dev/null 2>&1; then
-  ok "docker compose $(docker compose version --short 2>/dev/null || echo '?')"
+  cv="$(docker compose version --short 2>/dev/null || echo 0)"
+  cv="${cv#v}"
+  if [ "$(printf '%s\n2.24.0\n' "$cv" | sort -V | head -1)" = "2.24.0" ]; then
+    ok "docker compose $cv"
+  else
+    bad "docker compose $cv is too old; the compose files need v2.24+ (for !reset)"
+  fi
 else
   bad "'docker compose' (v2+) not available; the v1 'docker-compose' binary will not work"
 fi
 
-# ── Sibling checkouts ────────────────────────────────────────────────────────
-# This repo is glue and contains no application source.
-# Checked by their manifest rather than by .git: a deployed copy is often an
-# rsync or a tarball with no history, and that is a perfectly good build source.
-#
-# In --pull mode there are NO local-path dependencies at all: the relay, broker
-# and push images come from ncontainer.io, and the client is built from a
-# git-URL context (docker-compose.pull.yml), so nothing here has to be a sibling
-# on disk. That is the whole point of pull mode — a fresh droplet satisfies it
-# from URLs alone.
-if [ "$PULL" -eq 1 ]; then
-  ok "pull mode — no sibling checkouts required (images pulled, client built from git URL)"
-else
+# ── Sibling checkouts (dev mode only) ────────────────────────────────────────
+# Checked by their manifest rather than by .git: a dev copy is often an rsync
+# or a tarball with no history, and that is a perfectly good build source.
+if [ "$DEV" -eq 1 ]; then
   for repo in armada armada-av ditto-relay nostr-push; do
     if [ -f "$STACK_DIR/../$repo/package.json" ]; then
       ok "../$repo"
     else
-      bad "../$repo is missing — the stack builds every image from sibling checkouts"
+      bad "../$repo is missing — dev mode builds every image from sibling checkouts"
     fi
   done
 fi
@@ -83,26 +78,13 @@ else
   warn "cannot read vm.max_map_count (not Linux?) — OpenSearch needs it >= 262144"
 fi
 
-# LiveKit warns at boot if this is small and drops packets under real load. It
-# is only a ceiling — raising it allocates nothing — so it is safe to set on a
-# shared host. Inside an unprivileged LXC it is NOT settable: it belongs to the
-# host kernel, so set it on the hypervisor, not in the container.
-if [ -r /proc/sys/net/core/rmem_max ]; then
-  rmem="$(cat /proc/sys/net/core/rmem_max)"
-  if [ "$rmem" -ge 5000000 ]; then
-    ok "net.core.rmem_max = $rmem"
-  else
-    warn "net.core.rmem_max = $rmem, LiveKit wants >= 5000000 for production voice
-        sudo sysctl -w net.core.rmem_max=5000000
-        echo 'net.core.rmem_max=5000000' | sudo tee /etc/sysctl.d/99-livekit.conf"
-  fi
-fi
-
 # ── LiveKit's UDP receive buffer ─────────────────────────────────────────────
 # A host-level sysctl, not a namespaced one, so it CANNOT be set from compose —
 # the container inherits whatever the host has. Too small and LiveKit drops
 # inbound media under load, which users experience as choppy audio rather than
-# as any kind of error. LiveKit warns about this at startup and suggests 5 MB.
+# as any kind of error. It is only a ceiling — raising it allocates nothing —
+# so it is safe on a shared host. Inside an unprivileged LXC it is NOT
+# settable: set it on the hypervisor, not in the container.
 if [ -r /proc/sys/net/core/rmem_max ]; then
   rmem="$(cat /proc/sys/net/core/rmem_max)"
   if [ "$rmem" -ge 5000000 ]; then
@@ -121,20 +103,20 @@ fi
 VIRT=""
 command -v systemd-detect-virt >/dev/null 2>&1 && VIRT="$(systemd-detect-virt -c 2>/dev/null || true)"
 if [ -n "$VIRT" ] && [ "$VIRT" != "none" ]; then
-  warn "running inside '$VIRT' — add the LXC override or OpenSearch will not start:
-        docker compose -f docker-compose.yml -f docker-compose.lxc.yml up -d"
+  warn "running inside '$VIRT' — OpenSearch needs the LXC override or it will not
+        start. bootstrap.sh adds docker-compose.lxc.yml to COMPOSE_FILE for you."
 fi
 
 # ── Memory ───────────────────────────────────────────────────────────────────
 # OpenSearch alone takes a 1 GB heap by default, and the client image is built
-# with a full npm install + vite build.
+# with a full npm install + vite build. Measured in MB against 3500 because a
+# "4 GB" VPS reports ~3.8 GiB of MemTotal after the kernel's reservation.
 if [ -r /proc/meminfo ]; then
-  kb="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
-  gb=$(( kb / 1024 / 1024 ))
-  if [ "$gb" -ge 4 ]; then
-    ok "${gb} GB RAM"
+  mb=$(( $(awk '/^MemTotal:/ {print $2}' /proc/meminfo) / 1024 ))
+  if [ "$mb" -ge 3500 ]; then
+    ok "${mb} MB RAM"
   else
-    warn "${gb} GB RAM — tight. Lower OPENSEARCH_JAVA_OPTS in .env, or expect OOM kills"
+    warn "${mb} MB RAM — tight. Lower OPENSEARCH_JAVA_OPTS in .env, or expect OOM kills"
   fi
 fi
 

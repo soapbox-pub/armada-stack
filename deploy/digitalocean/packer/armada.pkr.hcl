@@ -6,9 +6,10 @@
 #   packer init .
 #   packer build .
 #
-# The build spins up a throwaway droplet, uploads THIS repo's checkout, runs
-# provision.sh (Docker, the stack, sysctls, pre-pulled images, the first-boot
-# unit), runs DigitalOcean's own image validation + cleanup, then snapshots.
+# The build spins up a throwaway droplet, uploads THIS repo's committed HEAD,
+# runs provision.sh (Docker, the stack, sysctls, firewall, pre-pulled images,
+# the first-boot unit and setup prompt), runs DigitalOcean's own image
+# validation + cleanup, then snapshots.
 # The snapshot carries NO secret and NO operator value — provision.sh leaves the
 # domain and every generated key to firstboot.sh — which is the hard requirement
 # for passing Marketplace review.
@@ -64,23 +65,30 @@ source "digitalocean" "armada" {
 build {
   sources = ["source.digitalocean.armada"]
 
-  # 1. Upload the stack checkout to a staging path. The file provisioner copies
-  #    the tree as-is; provision.sh then strips `.env` and `.git` from the baked
-  #    copy and deletes the staging tree BEFORE the snapshot, so no secret reaches
-  #    it. Build from a clean checkout (secrets are gitignored and absent from a
-  #    fresh clone) if you want them off the throwaway build droplet's disk too.
-  provisioner "file" {
-    source      = "${path.root}/../../../"
-    destination = "/tmp/armada-stack"
+  # 1. Upload the stack as a `git archive` of HEAD — the COMMITTED tree only. So
+  #    `.env`, backups/ and .git (all untracked or not tree content) never leave
+  #    this machine, not even onto the throwaway build droplet, and the image is
+  #    exactly a commit: uncommitted edits are not baked. Commit first.
+  provisioner "shell-local" {
+    inline = ["git -C '${path.root}/../../..' archive --format=tar.gz -o '${path.root}/armada-stack.tgz' HEAD"]
   }
 
-  # 2. Bake: Docker, the stack, sysctls, pre-pulled images, first-boot unit.
+  provisioner "file" {
+    source      = "${path.root}/armada-stack.tgz"
+    destination = "/tmp/armada-stack.tgz"
+  }
+
+  provisioner "shell-local" {
+    inline = ["rm -f '${path.root}/armada-stack.tgz'"]
+  }
+
+  # 2. Bake: Docker, the stack, host pieces, pre-pulled images. provision.sh is
+  #    inside the uploaded tree; run it from there so the one copy is
+  #    authoritative.
   provisioner "shell" {
-    # provision.sh is inside the uploaded tree; run it from there so the one
-    # copy is authoritative.
     inline = [
-      "chmod +x /tmp/armada-stack/deploy/digitalocean/packer/provision.sh",
-      "/tmp/armada-stack/deploy/digitalocean/packer/provision.sh /tmp/armada-stack",
+      "mkdir -p /tmp/armada-stack && tar xzf /tmp/armada-stack.tgz -C /tmp/armada-stack && rm /tmp/armada-stack.tgz",
+      "bash /tmp/armada-stack/deploy/digitalocean/packer/provision.sh /tmp/armada-stack",
     ]
   }
 

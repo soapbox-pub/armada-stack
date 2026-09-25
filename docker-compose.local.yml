@@ -1,7 +1,7 @@
 # Local mode: the whole stack on *.localhost over plain HTTP, no DNS, no certs.
 #
 #   ./scripts/bootstrap.sh --local
-#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+#   docker compose up -d --build        (bootstrap put this file in COMPOSE_FILE)
 #
 # Caddy needs no changes — bootstrap writes `http://armada.localhost` style
 # site addresses, and the scheme alone disables ACME.

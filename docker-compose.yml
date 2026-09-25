@@ -4,13 +4,29 @@
 # here; nothing in this file names a host but the ones in `.env`.
 #
 # Run `./scripts/bootstrap.sh --domain example.com --email you@example.com`
-# once to generate `.env` before the first `up`. Nothing here has a default
-# secret: the `${VAR:?}` forms below fail the command rather than boot a
-# deployment with a predictable key.
+# once to generate `.env`, then `docker compose up -d --build`. Nothing here has
+# a default secret: the `${VAR:?}` forms below fail the command rather than boot
+# a deployment with a predictable key.
 #
-# BUILD CONTEXTS ARE SIBLING CHECKOUTS. This repo is glue — it holds no
-# application source. `../armada`, `../armada-av`, `../ditto-relay` and
-# `../nostr-push` must exist beside it (scripts/preflight.sh checks).
+# NOTHING ON THE DEPLOY PATH LIVES ON LOCAL DISK. This repo is glue — it holds
+# no application source — and a `../` path is a machine-specific assumption a
+# fresh server cannot satisfy. So by default:
+#
+#   - relay, broker and push are a `docker pull` from ncontainer.io, an OCI
+#     registry backed by Nostr (a signed kind-30624 event holds the tag->digest
+#     map) + Blossom (the layer blobs), where the image NAME is the publisher's
+#     signing identity. Each component publishes its own image from its own CI.
+#   - the client is BUILT, from a git-URL context BuildKit clones at build time.
+#     It cannot be a pulled image: every VITE_* is baked into its bundle, and
+#     those include THIS deployment's hostnames.
+#
+# So a server needs Docker and nothing else. Developing a component against the
+# stack is docker-compose.dev.yml, which swaps all four back to sibling builds.
+#
+# EVERY IMAGE AND THE CLIENT REF ARE PINNED, and a stack release is the set of
+# pins moving together. `:latest` / `:master` would let two servers set up a
+# week apart run different code, and one bad push to a component's main break
+# every new install. Bump the digests and ARMADA_BUILD_CONTEXT in one commit.
 
 name: armada
 
@@ -30,7 +46,7 @@ services:
   # only from the `armada` network, which is what lets the broker and the relay
   # trust a forwarded client IP at all.
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2.11.4-alpine
     restart: unless-stopped
     networks: [armada]
     ports:
@@ -52,6 +68,13 @@ services:
       # walks straight into Let's Encrypt's duplicate-certificate rate limit.
       - caddy-data:/data
       - caddy-config:/config
+    # The admin API answers once the config has loaded. It says nothing about
+    # certificates — those depend on DNS, which firstboot.sh checks separately.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     depends_on: [armada, broker, livekit, relay, blossom]
 
   # ── The client ─────────────────────────────────────────────────────────────
@@ -59,9 +82,16 @@ services:
   # bundle — so changing a domain, the push pubkey, or the relay means
   # `docker compose up -d --build armada`, not a restart. That is a property of
   # the client, not a choice made here.
+  #
+  # The context is the canonical nostr repo's HTTPS clone endpoint on its grasp
+  # server, pinned to a commit. NOT the github.com/soapbox-pub/armada mirror:
+  # that is a stale mirror whose Dockerfile predates VITE_CONCORD_AV_SERVERS and
+  # VITE_NOSTR_PUSH_*, so a build from it silently drops the voice origin and
+  # the push pubkey — two of the three couplings below — with no error.
+  # Override with ARMADA_BUILD_CONTEXT=<git url>#<tag|branch|sha> in .env.
   armada:
     build:
-      context: ../armada
+      context: ${ARMADA_BUILD_CONTEXT:-https://relay.ngit.dev/npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/armada.git#cec07198cf8dd858265ed7fe961fded753e011c3}
       args:
         VITE_APP_NAME: ${APP_NAME:-Armada}
         # This stack's own relay is the whole default relay set: read, search
@@ -83,11 +113,17 @@ services:
         VITE_NOSTR_PUSH_RELAYS: ${RELAY_WS_URL:?}
     restart: unless-stopped
     networks: [armada]
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   # ── Voice: blind AV broker (CORD-07 §2) ────────────────────────────────────
+  # armada-av self-publishes as `armada-av`, so that is the name here, not
+  # `armada-broker`. Its image carries its own HEALTHCHECK on /healthz.
   broker:
-    build:
-      context: ../armada-av
+    image: ncontainer.io/npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/armada-av@sha256:2f9eabb854af733aaaf5ef10954d8f88fc59e0617b07790ce29040c7e7536178
     restart: unless-stopped
     networks: [armada]
     environment:
@@ -118,8 +154,11 @@ services:
   # /rtc route. Bridge networking costs some per-packet overhead on the UDP mux
   # versus armada-av's own host-network deploy; that is the trade for one
   # coherent stack. See docker-compose.hostnet.yml if you need it back.
+  #
+  # Must be >= the livekit-client the pinned client ref depends on; protocol
+  # skew makes clients full-reconnect every ~16s. Bump the two together.
   livekit:
-    image: livekit/livekit-server:v1.8
+    image: livekit/livekit-server:v1.13.7
     restart: unless-stopped
     networks: [armada]
     command: --config /etc/livekit.yaml
@@ -130,14 +169,17 @@ services:
       LIVEKIT_KEYS: "${LIVEKIT_API_KEY:?}: ${LIVEKIT_API_SECRET:?}"
     volumes:
       - ./config/livekit/livekit.yaml:/etc/livekit.yaml:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:7880/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   # ── Relay ──────────────────────────────────────────────────────────────────
-  # ditto-relay ships its own Dockerfile now, so the build context is that
-  # sibling checkout directly (it used to be images/ditto-relay.Dockerfile fed
-  # by a named context, back when the upstream shipped none).
+  # ditto-relay, self-published from that repo's CI as `armada-relay`. Its image
+  # carries its own HEALTHCHECK on /.
   relay:
-    build:
-      context: ../ditto-relay
+    image: ncontainer.io/npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/armada-relay@sha256:141198d9ad7374779fda18415e35c2ef695cfe9a1b1d0082f642f200d64ac2d5
     restart: unless-stopped
     networks: [armada]
     environment:
@@ -194,9 +236,11 @@ services:
   # ── Push gateway ───────────────────────────────────────────────────────────
   # Listens on no port and needs no hostname: all traffic is outbound (relay
   # WebSockets in, Web Push HTTPS out). Deliberately absent from the Caddyfile.
+  #
+  # No healthcheck: with no port there is nothing to probe, and a relay
+  # connection it has lost is retried internally rather than fatal.
   push:
-    build:
-      context: ../nostr-push
+    image: ncontainer.io/npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/armada-push@sha256:a6fa504c07268cb16bc3c2ccd2ee305b75872a65176661e8296ed81b3f8a7af7
     restart: unless-stopped
     networks: [armada]
     environment:
@@ -219,11 +263,18 @@ services:
       # existing browser subscription, because applicationServerKey was bound
       # to the old per-domain key.
       - push-storage:/app/storage
-    depends_on: [relay]
+    # Healthy, not just started: the relay takes ~15s to migrate its index and
+    # spawn workers, and a gateway that dials it first logs a connection error
+    # and sits in reconnect backoff for the first minute.
+    depends_on:
+      relay:
+        condition: service_healthy
 
   # ── Media ──────────────────────────────────────────────────────────────────
+  # Upstream's last tag (v6.4) is behind `master`, which config/blossom/config.yml
+  # tracks — so this pins master's digest rather than falling back to the tag.
   blossom:
-    image: ghcr.io/hzrd149/blossom-server:master
+    image: ghcr.io/hzrd149/blossom-server:master@sha256:034c1eeffa1384ddc99f0be78fe029866bb4c31518984376b2066cbd9484d1d7
     restart: unless-stopped
     networks: [armada]
     environment:
@@ -232,3 +283,10 @@ services:
     volumes:
       - ./config/blossom/config.yml:/app/config.yml:ro
       - blossom-data:/app/data
+    # A distroless deno image: no shell, no wget, so the probe is deno itself.
+    healthcheck:
+      test: ["CMD", "deno", "eval", "const r = await fetch('http://127.0.0.1:3000/'); Deno.exit(r.status < 500 ? 0 : 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

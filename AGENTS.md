@@ -4,112 +4,102 @@ Guidance for agents working on **armada-stack** — the turnkey Docker deploymen
 of the Armada client, the Concord AV broker, a Nostr relay, a push gateway and
 a media server.
 
-**This repo is glue and holds no application source.** By default every image is
-built from a sibling checkout: `../armada`, `../armada-av`, `../ditto-relay`,
-`../nostr-push`. When something is broken, decide first whether the bug is in
-the wiring here or in the component — and if it is in the component, **fix it
-there**, in that repo, rather than papering over it with stack config. (Pull
-mode swaps three of those source builds for pre-built images off ncontainer.io;
-see *Pull mode* below. The client is always a local build.)
+**This repo is glue and holds no application source.** The base compose pulls
+the relay, broker and push as pinned images off ncontainer.io and builds the
+client from a pinned git URL; `docker-compose.dev.yml` swaps all four back to
+sibling checkouts (`../armada`, `../armada-av`, `../ditto-relay`,
+`../nostr-push`) for working on a component. When something is broken, decide
+first whether the bug is in the wiring here or in the component — and if it is
+in the component, **fix it there**, in that repo, rather than papering over it
+with stack config.
 
 **Never write into the sibling repos from here.** The wiring belongs in this
 repo, not in projects with their own release lifecycle: `ditto-relay` is
 someone else's project (`gitlab.com/soapbox-pub/ditto-relay`); `armada-av` and
-`armada` are ours but release on their own cadence. (`ditto-relay` once shipped
-no Dockerfile, so the relay built from `images/ditto-relay.Dockerfile` in THIS
-repo fed by a named BuildKit context; it ships its own now, so the base compose
-builds `../ditto-relay` directly and that file is gone.)
+`armada` are ours but release on their own cadence.
 
 ## Build / test
 
-There is no test suite. The check that matters is that the thing comes up:
+There is no test suite. The check that matters is that the thing comes up
+healthy:
 
 ```sh
-./scripts/preflight.sh
+./scripts/bootstrap.sh --local              # in a scratch copy; writes COMPOSE_FILE
 docker compose config -q                    # syntax + interpolation
-docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
-docker compose ps                           # every service should stay up
+docker compose up -d --build --wait         # every service healthy (push: running)
 ```
 
-`docker compose config -q` needs a `.env`; run `./scripts/bootstrap.sh --local`
-first, in a scratch copy if you don't want to touch a real one.
+`bootstrap.sh` writes `COMPOSE_FILE` into `.env`, so a bare `docker compose`
+already includes the right overrides. Verify a change to any override with
+`COMPOSE_FILE=docker-compose.yml:<override> docker compose config` — an
+override that silently fails to merge produces a working-looking stack in the
+wrong configuration. For `docker-compose.dev.yml`, check the four application
+services show a `context:` and NO `image:`.
 
-Verify a change to `docker-compose.hostnet.yml` or `docker-compose.local.yml`
-with `docker compose -f docker-compose.yml -f <override> config` — an override
-that silently fails to merge produces a working-looking stack in the wrong
-configuration.
+Shell scripts: `bash -n` and `shellcheck -S warning` (the `koalaman/shellcheck`
+image works if it is not installed).
 
-## Pull mode, publishing images, and the droplet
+## Pins, images, and deploying
 
-`docker-compose.pull.yml` removes EVERY local-path dependency from the deploy —
-that is its whole job, and reintroducing a `../` context anywhere in it is a
-regression. It overrides `relay`, `broker` and `push` to a `docker pull` from
-**ncontainer.io** — an OCI registry backed by Nostr (a signed kind-30624 event
-holds the tag→digest map) + Blossom (the layer blobs), where the image NAME is
-the publisher's signing identity (`../ncontainer`) — and it replaces the
-client's `../armada` build context with a **git-URL context** so BuildKit clones
-the client repo at build time. So a fresh box needs Docker and no source trees
-at all: two images and a git URL, reproducible from URLs alone.
+**The base `docker-compose.yml` has no local-path dependency — that is its
+whole job, and a `../` context in it is a regression.** A fresh server needs
+Docker and nothing else.
 
-- **The client is NEVER pulled, but it is also never built from a path.** Every
-  `VITE_*` is baked into the bundle at build time (see *Client config is
-  build-time*), and those values include this deployment's own hostnames — which
-  a pre-published image cannot know. So `armada` stays a `build:`, and `up` in
-  pull mode is `... -f docker-compose.pull.yml up -d --build armada`: pull the
-  three, build the one. Its `context:` is `${ARMADA_BUILD_CONTEXT:-<public
-  mirror>}` — a git URL, not `../armada` — so it builds inside its own
-  `node:22-alpine` stage with only Docker present, no checkout on disk. `context`
-  is a scalar so the override REPLACES it with no `!reset`, while the base's
-  build args merge through. Pin with `ARMADA_BUILD_CONTEXT=<url>#<tag|branch|sha>`
-  in `.env`.
-- **The `!reset null` on `build:` is load-bearing.** Compose MERGES override
-  maps into the base, so adding `image:` beside the inherited `build:` leaves
-  both set and Compose builds-and-tags instead of pulling. `!reset null` drops
-  the build block. Verify with `docker compose -f docker-compose.yml -f
-  docker-compose.pull.yml config` and check the three show `image:` and NO
-  `build:`.
+- **Everything is pinned.** Pulled images by digest (ncontainer images,
+  blossom) or exact version (caddy, livekit, opensearch); the client by commit
+  in the default of `${ARMADA_BUILD_CONTEXT:-…}`. A stack release is the pins
+  moving together in one commit — `update.sh` on a server just follows the
+  repo. Never go back to `:latest`/`:master`: servers set up a week apart would
+  run different code.
+- **The client is NEVER pulled.** Every `VITE_*` is baked into the bundle (see
+  *Client config is build-time*), including this deployment's own hostnames,
+  so `armada` stays a `build:` from a git-URL context — it compiles inside its
+  own `node:22-alpine` stage with only Docker on the host.
+- **The client context is the canonical nostr repo's grasp HTTPS endpoint**
+  (`https://relay.ngit.dev/<npub>/armada.git#<sha>`), NOT
+  `github.com/soapbox-pub/armada`. The GitHub mirror is ~1000 commits stale and
+  its Dockerfile predates `VITE_CONCORD_AV_SERVERS` and `VITE_NOSTR_PUSH_*` —
+  build args a Dockerfile does not declare are dropped without error, so a
+  build from it silently breaks two of the three couplings below.
+- **`image: !reset null` in `docker-compose.dev.yml` is load-bearing.** Compose
+  MERGES override maps, so a `build:` beside the base's `image:` would build
+  and then tag the result with the published ncontainer name.
 - **The images identity is permanent-ish, and this repo does not hold it.** The
-  npub hardcoded in `docker-compose.pull.yml` (and the deploy docs) IS the
-  namespace — a new key is a new set of names and a stack-wide reference change.
-  It is the SOAPBOX account, and the three names each resolve to it because each
-  image is signed by its bunker. amd64-only by decision.
+  npub in the ncontainer refs IS the namespace — a new key is a new set of
+  names. It is the SOAPBOX account; each image is signed by its bunker.
+  amd64-only by decision.
 - **Each component self-publishes its own image; this repo only PULLS them.**
-  The stack no longer builds or signs the pulled images — `armada-av`,
-  `ditto-relay` (→ `armada-relay`) and `nostr-push` (→ `armada-push`) each carry
-  their own `scripts/publish-container.sh` + `.ngit/act/workflows/`
-  `publish-container.yml` drop-in and publish to ncontainer.io from their own
-  ngit-ci job on a push to `main`, signing the kind-24242 Blossom auth and the
-  kind-30624 repo event through the soapbox NIP-46 bunker (no raw key on the
-  runner). So there is no publisher script, no `.images.env`, and no
-  `oci-tags.mjs` here anymore — those lived in the drop-in and moved to the
-  component repos. To rebuild an image, push its repo.
-- **`--pull` on `bootstrap.sh`/`preflight.sh`** relaxes the check so NO sibling
-  checkout is required at all — the three images are pulled and the client
-  builds from a git URL, so a fresh box satisfies the whole deploy from URLs.
-  `bootstrap.sh` forwards the flag to preflight.
-- **The droplet** (`deploy/digitalocean/`) provisions the whole stack in pull
-  mode two ways, both running ONE shared `firstboot.sh` (the single place the
-  boot sequence lives, self-locating via `STACK_DIR` two levels up from its own
-  path — nothing hardcodes `/opt/armada`):
-  - **Path A, `cloud-init.yml`:** opens the firewall, sets the two host sysctls
-    (`vm.max_map_count`, `net.core.rmem_max` — host-kernel, not settable from
-    compose), clones `STACK_REPO`, and execs its `firstboot.sh`. `STACK_REPO`
-    has NO default because armada-stack is not yet published to any git host —
-    a real dependency, not an oversight.
-  - **Path B, `packer/`:** bakes Docker, the stack checkout, the sysctls and the
-    pre-pulled images into a DO snapshot, with `armada-firstboot.service` running
-    `firstboot.sh` on boot. `provision.sh` strips `.env` AND `.git` (this repo
-    keeps the ngit `nostr.nsec` in `.git/config`, which the file provisioner
-    copies verbatim) from the bake and deletes the staging upload — no secret
-    reaches the snapshot, which is the hard Marketplace requirement. Path B
-    needs no published stack: it uploads the checkout.
-  - `firstboot.sh` is idempotent (done-marker at `/var/lib/armada/.provisioned`)
-    and an UNCONFIGURED box (`example.com` placeholders unedited) exits 0 without
-    writing the marker, so the oneshot succeeds and the next boot retries rather
-    than the unit going `failed`.
-  - DNS is manual either way: four records must point at the IP before Caddy can
-    get certs, and no provider button creates records in a domain registered
-    elsewhere.
+  `armada-av`, `ditto-relay` (→ `armada-relay`) and `nostr-push` (→
+  `armada-push`) publish to ncontainer.io from their own ngit-ci job on a push
+  to `main`. To ship a component change: push its repo, then bump its digest
+  here (`docker pull <ref>:latest` then `docker image inspect --format
+  '{{json .RepoDigests}}'`).
+- **The stack's own home** is the nostr repo
+  `nostr://npub1scvyzz02ayma34hesz62pdrd5nhsmxp74hjq8msmfs9khh3r3drsnw68d8/relay.ngit.dev/armada-stack`,
+  cloned by servers over its grasp HTTPS endpoint (no ngit needed). That URL is
+  the default `STACK_REPO` in `cloud-init.yml` and `update.sh`.
+
+### Server provisioning (`deploy/`)
+
+- **`deploy/cloud-init/` is provider-generic** and holds the one boot sequence:
+  - `cloud-init.yml` — user-data: writes `/etc/armada/deploy.env`, clones
+    `STACK_REPO`, runs `install-host.sh`, execs `firstboot.sh`.
+  - `install-host.sh` — the host pieces, shared by cloud-init and the Packer
+    bake: sysctls (`vm.max_map_count`, `net.core.rmem_max` — host-kernel, not
+    settable from compose), ufw, the `armada-firstboot` unit, `armada-setup` +
+    its first-login hook, the deploy.env skeleton, the MOTD.
+  - `firstboot.sh` — the ONE place the boot sequence lives (self-locating;
+    nothing hardcodes `/opt/armada`). Idempotent via
+    `/var/lib/armada/.provisioned`; an unconfigured box (placeholders
+    unedited) exits 0 without the marker, so the unit retries next boot rather
+    than going `failed`. Builds the client BEFORE starting anything (memory),
+    then `up --wait`, then reports DNS.
+- **`deploy/digitalocean/packer/`** bakes a Marketplace snapshot from a `git
+  archive` of HEAD, so `.env`, `backups/` and `.git` never leave the build
+  machine; `provision.sh` strips them again anyway. The image has no `.git`;
+  `update.sh` adopts the published repo in place on first update.
+- DNS is manual on every path: four records must point at the IP before Caddy
+  can get certs. `scripts/check-dns.sh` reports; nothing blocks on it.
 
 ## The couplings — do not break these
 
@@ -197,7 +187,8 @@ copy that drifts, and Caddy sits in front of nginx, not instead of it.
 
 `.env` is not a volume but belongs on this list: `RELAY_NSEC` is the relay's
 published identity and `PUSH_NSEC` is the address every client has already
-registered against.
+registered against. `scripts/backup.sh` covers all five (`--quick`: the three
+small ones, live); a new irreplaceable volume must be added there too.
 
 Blossom's upstream `config.example.yml` ships retention rules that **delete**
 blobs after 2 days to 1 month; `config/blossom/config.yml` sets 10 years
@@ -207,10 +198,11 @@ vanishing out of history while the messages referencing them remain. Don't
 
 ## Version pins that are not independent
 
-- **`livekit/livekit-server` must be >= the `livekit-client` in
-  `../armada/package.json`.** Signaling protocol skew makes clients
-  full-reconnect roughly every 16 seconds. Bumping the client's SDK means
-  bumping the image here.
+- **`livekit/livekit-server` must be >= the `livekit-client` at the pinned
+  client ref** (its `package.json`/lockfile, not necessarily `../armada`'s
+  working tree). Signaling protocol skew makes clients full-reconnect roughly
+  every 16 seconds. Bumping the client pin to a newer SDK means bumping the
+  image here in the same commit.
 - **`nostr-tools` in `scripts/lib/keygen.ts` is pinned**, not floating. It mints
   the stack's long-lived identities from a package fetched at bootstrap time.
 

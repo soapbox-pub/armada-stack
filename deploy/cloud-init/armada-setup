@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Interactive setup for a server that booted without a domain — the normal case
+# for a 1-Click marketplace image, which has no form to collect one.
+#
+#   armada-setup
+#
+# Installed to /usr/local/bin by install-host.sh, and run automatically on the
+# first root SSH login while the box is unconfigured (see armada-login.sh). It
+# asks for the two values firstboot.sh needs, writes them to deploy.env, and
+# runs firstboot in the foreground so the operator watches it come up.
+set -euo pipefail
+
+DEPLOY_ENV="${ARMADA_DEPLOY_ENV:-/etc/armada/deploy.env}"
+MARK="${ARMADA_MARK:-/var/lib/armada/.provisioned}"
+STACK_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../.." && pwd)"
+
+[ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
+
+if [ -f "$MARK" ]; then
+  echo "Armada is already set up. To check DNS: $STACK_DIR/scripts/check-dns.sh"
+  exit 0
+fi
+
+DOMAIN=""; EMAIL=""
+# shellcheck disable=SC1090
+[ -f "$DEPLOY_ENV" ] && . "$DEPLOY_ENV"
+[ "$DOMAIN" = "example.com" ] && DOMAIN=""
+[ "$EMAIL" = "you@example.com" ] && EMAIL=""
+
+# --if-unconfigured (the login hook): a box whose user-data already set the
+# domain is mid-provision, not unconfigured — point at the log, don't prompt.
+if [ "${1:-}" = "--if-unconfigured" ] && [ -n "$DOMAIN" ] && [ -n "$EMAIL" ]; then
+  echo "Armada is being set up for $DOMAIN — progress: tail -f /var/log/armada-firstboot.log"
+  exit 0
+fi
+
+cat <<'EOF'
+
+  Armada setup
+  ────────────
+  The stack serves four names under a domain you control:
+    armada.<domain>  av.<domain>  relay.<domain>  blossom.<domain>
+
+EOF
+
+while :; do
+  read -r -p "  Domain (e.g. example.com)${DOMAIN:+ [$DOMAIN]}: " in
+  DOMAIN="${in:-$DOMAIN}"
+  DOMAIN="${DOMAIN#http*://}"; DOMAIN="${DOMAIN%%/*}"
+  case "$DOMAIN" in
+    ""|*" "*|example.com) echo "  enter a domain you control" ;;
+    *.*) break ;;
+    *) echo "  that does not look like a domain" ;;
+  esac
+done
+
+while :; do
+  read -r -p "  Email for Let's Encrypt${EMAIL:+ [$EMAIL]}: " in
+  EMAIL="${in:-$EMAIL}"
+  case "$EMAIL" in
+    *@*.*) break ;;
+    *) echo "  enter a valid email address" ;;
+  esac
+done
+
+# Rewrite only the two keys, keeping anything else (an ARMADA_BUILD_CONTEXT pin)
+# the file already holds.
+mkdir -p "$(dirname "$DEPLOY_ENV")"
+touch "$DEPLOY_ENV"; chmod 600 "$DEPLOY_ENV"
+tmp="$(mktemp)"
+grep -vE '^(DOMAIN|EMAIL)=' "$DEPLOY_ENV" > "$tmp" || true
+{ echo "DOMAIN=$DOMAIN"; echo "EMAIL=$EMAIL"; cat "$tmp"; } > "$DEPLOY_ENV"
+rm -f "$tmp"
+
+IP="$(ip -4 -o addr show scope global 2>/dev/null | awk '{sub(/\/.*/, "", $4); print $4; exit}')"
+cat <<EOF
+
+  Point four DNS records at this server${IP:+ ($IP)} now, if you have not:
+    armada.$DOMAIN   av.$DOMAIN   relay.$DOMAIN   blossom.$DOMAIN
+  Setup does not wait for them; certificates are fetched once they resolve.
+
+EOF
+read -r -p "  Press Enter to start (takes several minutes)... " _
+
+exec bash "$STACK_DIR/deploy/cloud-init/firstboot.sh"

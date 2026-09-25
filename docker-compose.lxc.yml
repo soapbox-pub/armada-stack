@@ -1,6 +1,7 @@
 # Running inside an unprivileged container (LXC, some VPS types).
 #
-#   docker compose -f docker-compose.yml -f docker-compose.lxc.yml up -d
+#   bootstrap.sh adds this to COMPOSE_FILE when it detects a container;
+#   otherwise append :docker-compose.lxc.yml to COMPOSE_FILE in .env
 #
 # The base stack asks OpenSearch to lock its heap into RAM, which is the right
 # default on bare metal: it stops the JVM heap being swapped out, which is the

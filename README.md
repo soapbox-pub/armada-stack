@@ -4,34 +4,52 @@ A turnkey, self-hosted [Armada](https://gitworkshop.dev/chad@chadwick.site/relay
 deployment: the client, voice, a relay, push notifications and media, in one
 `docker compose up`.
 
-This repo is **glue**. It contains no application source — every image is built
-from a sibling checkout.
-
-```
-armada-stack/          ← you are here
-armada/                ← the client (React + Vite, served by nginx)
-armada-av/             ← the blind Concord AV broker (CORD-07 §2)
-ditto-relay/           ← the Nostr relay
-nostr-push/            ← the Web Push gateway
-```
+This repo is **glue**. It contains no application source: the relay, voice
+broker and push gateway are pulled as pinned, signed images from
+[ncontainer.io](https://ncontainer.io), and the client is built from a pinned
+git URL. A server needs Docker and nothing else.
 
 ## What you get
 
 | Service | Image | Public address | Notes |
 |---|---|---|---|
-| `caddy` | `caddy:2-alpine` | 80, 443 | The only published TCP ports. Automatic TLS. |
-| `armada` | built from `../armada` | `armada.<domain>` | Static SPA. All config is **baked in at build time**. |
-| `broker` | built from `../armada-av` | `av.<domain>` | Mints LiveKit tokens against a self-signed Concord grant. |
-| `livekit` | `livekit/livekit-server:v1.8` | `av.<domain>/rtc`, 7881/tcp, 7882/udp | The SFU. Shares an origin with the broker — required. |
-| `relay` | built from `../ditto-relay` | `relay.<domain>` | NIPs 1/9/11/13/40/42/45/50/62/70/77. |
+| `caddy` | `caddy:2.11.4-alpine` | 80, 443 | The only published TCP ports. Automatic TLS. |
+| `armada` | built from a pinned git ref | `armada.<domain>` | Static SPA. All config is **baked in at build time**. |
+| `broker` | `ncontainer.io/…/armada-av` | `av.<domain>` | Mints LiveKit tokens against a self-signed Concord grant. |
+| `livekit` | `livekit/livekit-server:v1.13.7` | `av.<domain>/rtc`, 7881/tcp, 7882/udp | The SFU. Shares an origin with the broker by default. |
+| `relay` | `ncontainer.io/…/armada-relay` | `relay.<domain>` | ditto-relay. NIPs 1/9/11/13/40/42/45/50/62/70/77. |
 | `opensearch` | `opensearchproject/opensearch:2.19.1` | — | Where every event actually lives. |
-| `push` | built from `../nostr-push` | — | **No port, no hostname.** Outbound only. |
-| `blossom` | `ghcr.io/hzrd149/blossom-server:master` | `blossom.<domain>` | Media uploads. |
+| `push` | `ncontainer.io/…/armada-push` | — | nostr-push. **No port, no hostname.** Outbound only. |
+| `blossom` | `ghcr.io/hzrd149/blossom-server` (pinned digest) | `blossom.<domain>` | Media uploads. |
 
-## Quick start
+Every image is pinned by digest or exact version, and so is the client's git
+ref. A stack release is those pins moving together in one commit.
+
+## Deploy on a server — one paste
+
+Any provider that takes cloud-init user-data (DigitalOcean, Hetzner, Vultr,
+Linode, Lightsail, …): create an **Ubuntu 24.04** server with **4 GB RAM**, and
+paste [`deploy/cloud-init/cloud-init.yml`](deploy/cloud-init/cloud-init.yml)
+into its user-data field with `DOMAIN` and `EMAIL` edited. Leave them as
+placeholders and the server waits instead; SSH in and `armada-setup` asks for
+them.
+
+Then **point four DNS records at the server's IP** — `armada.`, `av.`,
+`relay.` and `blossom.` under your domain. Caddy cannot issue certificates
+until they resolve. `/opt/armada/stack/scripts/check-dns.sh` shows where each
+one stands; progress is in `/var/log/armada-firstboot.log`.
+
+First boot installs Docker, sets the host sysctls and firewall, generates every
+secret, builds the client (the slow part: a few minutes) and waits for every
+service to report healthy.
+
+For a DigitalOcean Marketplace-style image with all of that pre-baked, see
+[`deploy/digitalocean/`](deploy/digitalocean/README.md).
+
+## Deploy by hand
 
 ```sh
-git clone <this repo> armada-stack
+git clone https://relay.ngit.dev/npub1scvyzz02ayma34hesz62pdrd5nhsmxp74hjq8msmfs9khh3r3drsnw68d8/armada-stack.git
 cd armada-stack
 
 ./scripts/bootstrap.sh --domain example.com --email you@example.com
@@ -39,63 +57,66 @@ docker compose up -d --build
 ```
 
 `bootstrap.sh` runs preflight, generates every secret, derives the values that
-must agree across services, and writes `.env`. It never needs a toolchain on
-the host — key generation happens in a throwaway container.
+must agree across services, and writes `.env` — including `COMPOSE_FILE`, so
+every later command in every mode is a bare `docker compose`. It never needs a
+toolchain on the host: key generation happens in a throwaway container.
 
 You must then:
 
 1. **Point four DNS records at the host** — `armada.`, `av.`, `relay.` and
    `blossom.` Caddy cannot issue certificates until they resolve here.
-2. **Open 80/tcp, 443/tcp, 7881/tcp and 7882/udp.** 7882/udp is the voice media
-   path; with it closed, voice connects and then carries no audio.
+   `./scripts/check-dns.sh` checks.
+2. **Open 80/tcp, 443/tcp, 443/udp, 7881/tcp and 7882/udp.** 7882/udp is the
+   voice media path; with it closed, voice connects and then carries no audio.
 
 ### Trying it without a domain
 
 ```sh
 ./scripts/bootstrap.sh --local
-docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+docker compose up -d --build
 ```
 
 Everything runs on `*.localhost` over plain HTTP. Browsers treat `*.localhost`
 as a secure context, so microphone access and voice still work.
 
-### Pull mode — no source build for the relay, broker or push
-
-The Quick start builds all four images from sibling checkouts (`../armada`,
-`../armada-av`, `../ditto-relay`, `../nostr-push`) plus a Bun toolchain. Pull
-mode removes every local-path dependency: the relay, broker and push images
-become a `docker pull` from [ncontainer.io](https://ncontainer.io) — an OCI
-registry backed by Nostr + Blossom, where the image name *is* the publisher's
-signing identity — and the client is built from a **git-URL context** (BuildKit
-clones the client repo at build time) rather than from `../armada` on disk:
+### Developing a component against the stack
 
 ```sh
-./scripts/bootstrap.sh --domain example.com --email you@example.com --pull
-docker compose -f docker-compose.yml -f docker-compose.pull.yml up -d --build armada
+./scripts/bootstrap.sh --local --dev
+docker compose up -d --build
 ```
 
-`--pull` relaxes the preflight check so **no sibling checkout is required** — a
-fresh box satisfies the whole deploy from URLs alone. The client is still a
-build rather than an image because its endpoint URLs are baked into the bundle
-at build time from *your* hostnames, so it can't be a pre-published image (see
-`docker-compose.pull.yml`); it builds entirely inside its own `node:22-alpine`
-stage from the git URL, so the host needs only Docker — no Node, no Bun, no
-source trees. Pin the client with
-`ARMADA_BUILD_CONTEXT=https://github.com/soapbox-pub/armada.git#v1.4.2` in
-`.env` (BuildKit accepts `#<tag|branch|sha>`). The three pulled images are
-published to ncontainer.io by each component's own repo CI
-(`armada-av`/`ditto-relay`/`nostr-push`), not from this repo.
+`--dev` adds `docker-compose.dev.yml`, which builds all four application images
+from sibling checkouts — `../armada`, `../armada-av`, `../ditto-relay`,
+`../nostr-push` — instead of pulling them. Never deploy with it.
 
-### One-click droplet
+### Pinning a different client
 
-`deploy/digitalocean/` provisions the whole stack in pull mode on a fresh
-DigitalOcean droplet, two ways: a **cloud-init** template you set `DOMAIN`,
-`EMAIL` and `STACK_REPO` in and paste into the droplet's user-data field, or a
-**Packer image** (`deploy/digitalocean/packer/`) that bakes Docker, the stack
-and the pulled images into a Marketplace-style snapshot so first boot only needs
-your domain. Both run one shared `firstboot.sh`, and both still need four DNS
-records pointed at the IP before Caddy can issue TLS. See
-`deploy/digitalocean/README.md`.
+The client ref is pinned in `docker-compose.yml`. To build something else, set
+in `.env`:
+
+```sh
+ARMADA_BUILD_CONTEXT=https://relay.ngit.dev/<npub>/armada.git#<tag|branch|sha>
+```
+
+then `docker compose up -d --build armada`.
+
+## Operating
+
+```sh
+./scripts/update.sh          # to the latest stack release; backs up first
+./scripts/backup.sh          # everything irreplaceable (brief relay downtime)
+./scripts/backup.sh --quick  # secrets, push keys, certs only — live-safe
+./scripts/check-dns.sh       # do the four names resolve here?
+
+docker compose ps
+docker compose logs -f relay
+docker compose up -d --build armada     # after changing a VITE_* value
+docker compose down                     # keeps volumes
+docker compose down -v                  # DESTROYS every event, blob and key
+```
+
+Copy backups **off** the server; `backup.sh` explains restore in its header.
 
 ## The three couplings that matter
 
@@ -153,14 +174,13 @@ contents. Use `docker compose up -d --force-recreate <service>`.
 `PUSH_NSEC` is the address every client has registered its push subscriptions
 against. Neither can be regenerated without consequences. Also back up the
 `push-storage` volume: it holds the per-domain VAPID keys, and losing it
-invalidates every browser subscription already issued.
+invalidates every browser subscription already issued. `scripts/backup.sh`
+takes both.
 
 **Voice media runs over a bridged UDP port.** That costs some per-packet
-overhead versus host networking. If you run enough concurrent voice to feel it:
-
-```sh
-docker compose -f docker-compose.yml -f docker-compose.hostnet.yml up -d
-```
+overhead versus host networking. If you run enough concurrent voice to feel it,
+append `:docker-compose.hostnet.yml` to `COMPOSE_FILE` in `.env`, then
+`docker compose up -d`.
 
 **Blossom accepts uploads from any Nostr key by default.** A valid Blossom auth
 event is required, but anyone can produce one — so on a public hostname it is
@@ -188,22 +208,19 @@ rule a `pubkeys:` list.
 ## Layout
 
 ```
-docker-compose.yml           the stack
+docker-compose.yml           the stack: pinned images + the client's git ref
 docker-compose.local.yml     *.localhost, no TLS
+docker-compose.dev.yml       build from sibling checkouts instead of pulling
 docker-compose.hostnet.yml   SFU on the host network namespace
+docker-compose.lxc.yml       unprivileged containers (added automatically)
 config/caddy/Caddyfile       routing and TLS for all four hostnames
 config/livekit/              SFU config (public and local variants)
 config/blossom/config.yml    media server config
 scripts/bootstrap.sh         writes .env
 scripts/preflight.sh         checks the host before you find out the hard way
-```
-
-## Operating
-
-```sh
-docker compose ps
-docker compose logs -f relay
-docker compose up -d --build armada     # after changing a VITE_* value
-docker compose down                     # keeps volumes
-docker compose down -v                  # DESTROYS every event, blob and key
+scripts/check-dns.sh         do the four names resolve here?
+scripts/update.sh            move to the latest stack release
+scripts/backup.sh            archive everything irreplaceable
+deploy/cloud-init/           user-data, first boot and host setup for any VPS
+deploy/digitalocean/         Packer image for a Marketplace 1-Click
 ```

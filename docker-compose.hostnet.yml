@@ -1,6 +1,7 @@
 # Optional: put the SFU back on the host network namespace.
 #
-#   docker compose -f docker-compose.yml -f docker-compose.hostnet.yml up -d
+#   append :docker-compose.hostnet.yml to COMPOSE_FILE in .env, then
+#   docker compose up -d
 #
 # Media is latency-sensitive UDP at thousands of packets per second, and
 # Docker's userland proxy adds per-packet cost on the published mux port. This

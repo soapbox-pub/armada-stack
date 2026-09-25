@@ -5,5 +5,8 @@
 .env.*
 !.env.example
 
+# scripts/backup.sh's default output. Holds .env copies — same rule.
+backups/
+
 # Local compose scratch
 docker-compose.override.yml
