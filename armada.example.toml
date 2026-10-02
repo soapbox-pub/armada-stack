@@ -22,8 +22,6 @@ auto_update = true
 relays = ["wss://relay.ditto.pub", "wss://relay.dreamith.to"]
 # Blossom servers to try after the ones the site and its author name.
 blossom_servers = ["https://blossom.ditto.pub/", "https://blossom.dreamith.to/", "https://blossom.primal.net/"]
-# Serve /index.html for paths the site has no file for, as Armada's router expects.
-spa = true
 # Seconds between full checks for a new version.
 resync_interval = 600
 # Bytes one file, and one version of the site, may be.

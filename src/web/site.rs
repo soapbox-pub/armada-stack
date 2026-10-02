@@ -60,19 +60,18 @@ impl Site {
     }
 
     /// Resolve a request path: exact match, then — for an extensionless
-    /// path — a `.html` sibling and then `index.html` beneath it, and finally
-    /// the site's own `/404.html`.
+    /// path — a `.html` sibling and then `index.html` beneath it.
     ///
-    /// `spa` turns the last step into a client-side router's entry point: a
-    /// document request gets the site's shell under a `200` — `/404.html`
-    /// first, since NIP-5A names it as the fallback path, then `/index.html`.
-    /// Asset requests are untouched: a missing script must 404, not answer
-    /// with a page of HTML, or Armada's chunk-error recovery can't tell.
-    pub fn resolve(&self, request_path: &str, spa: bool) -> Option<(Resolved<'_>, &File)> {
+    /// Past that, a document request is a client-side route, and gets the
+    /// site's shell under a `200`: `/404.html` first, since NIP-5A names it as
+    /// the fallback path, then `/index.html`. Any other request gets
+    /// `/404.html` under a `404`: a missing script must 404, not answer with a
+    /// page of HTML, or Armada's chunk-error recovery can't tell.
+    pub fn resolve(&self, request_path: &str) -> Option<(Resolved<'_>, &File)> {
         let normalized = normalize_site_path(request_path);
         let extension = extname(&normalized);
         let extensionless = extension.is_empty();
-        let shell = spa && matches!(extension.to_ascii_lowercase().as_str(), "" | ".html" | ".htm");
+        let shell = matches!(extension.to_ascii_lowercase().as_str(), "" | ".html" | ".htm");
 
         let mut candidates: Vec<(String, u16)> = vec![(normalized.clone(), 200)];
         if extensionless && normalized != "/" {
@@ -107,8 +106,8 @@ mod tests {
         }
     }
 
-    fn resolve(site: &Site, path: &str, spa: bool) -> Option<(String, u16)> {
-        site.resolve(path, spa).map(|(resolved, _)| (resolved.path.to_string(), resolved.status))
+    fn resolve(site: &Site, path: &str) -> Option<(String, u16)> {
+        site.resolve(path).map(|(resolved, _)| (resolved.path.to_string(), resolved.status))
     }
 
     #[test]
@@ -116,23 +115,21 @@ mod tests {
         let docs = site(&["/index.html", "/about.html", "/guide/index.html", "/a b.txt", "/404.html"]);
         let found = |path: &str| Some((path.to_string(), 200));
 
-        assert_eq!(resolve(&docs, "/", false), found("/index.html"));
-        assert_eq!(resolve(&docs, "/about", false), found("/about.html"));
-        assert_eq!(resolve(&docs, "/guide", false), found("/guide/index.html"));
-        assert_eq!(resolve(&docs, "/guide/", false), found("/guide/index.html"));
-        assert_eq!(resolve(&docs, "/a%20b.txt", false), found("/a b.txt"));
-        assert_eq!(resolve(&docs, "/../about.html", false), found("/about.html"));
-        assert_eq!(resolve(&docs, "/missing", false), Some(("/404.html".into(), 404)));
-        assert_eq!(resolve(&docs, "/missing", true), Some(("/404.html".into(), 200)));
-        assert_eq!(resolve(&docs, "/missing.js", true), Some(("/404.html".into(), 404)));
+        assert_eq!(resolve(&docs, "/"), found("/index.html"));
+        assert_eq!(resolve(&docs, "/about"), found("/about.html"));
+        assert_eq!(resolve(&docs, "/guide"), found("/guide/index.html"));
+        assert_eq!(resolve(&docs, "/guide/"), found("/guide/index.html"));
+        assert_eq!(resolve(&docs, "/a%20b.txt"), found("/a b.txt"));
+        assert_eq!(resolve(&docs, "/../about.html"), found("/about.html"));
+        assert_eq!(resolve(&docs, "/missing"), Some(("/404.html".into(), 200)));
+        assert_eq!(resolve(&docs, "/missing.js"), Some(("/404.html".into(), 404)));
     }
 
     #[test]
     fn falls_back_to_the_shell() {
         let app = site(&["/index.html", "/assets/app.js"]);
-        assert_eq!(resolve(&app, "/invite/naddr1abc", true), Some(("/index.html".into(), 200)));
-        assert_eq!(resolve(&app, "/settings.html", true), Some(("/index.html".into(), 200)));
-        assert_eq!(resolve(&app, "/assets/gone.js", true), None);
-        assert_eq!(resolve(&app, "/invite/naddr1abc", false), None);
+        assert_eq!(resolve(&app, "/invite/naddr1abc"), Some(("/index.html".into(), 200)));
+        assert_eq!(resolve(&app, "/settings.html"), Some(("/index.html".into(), 200)));
+        assert_eq!(resolve(&app, "/assets/gone.js"), None);
     }
 }

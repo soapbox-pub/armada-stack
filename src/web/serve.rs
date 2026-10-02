@@ -32,7 +32,6 @@ const PREFLIGHT_MAX_AGE: &str = "86400";
 pub struct SiteServer {
     pub live: Arc<ArcSwapOption<Site>>,
     pub blobs: BlobStore,
-    pub spa: bool,
     /// The site's `X-Nsite-Addr`.
     pub naddr: HeaderValue,
 }
@@ -83,7 +82,7 @@ impl SiteServer {
                 .expect("response");
         };
 
-        let Some((resolved, file)) = site.resolve(path, self.spa) else {
+        let Some((resolved, file)) = site.resolve(path) else {
             return text(StatusCode::NOT_FOUND, "Not found.");
         };
 

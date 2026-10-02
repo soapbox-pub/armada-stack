@@ -52,9 +52,6 @@ pub struct WebConfig {
     pub relays: Vec<String>,
     /// Blossom servers to try after the ones the manifest and its author name.
     pub blossom_servers: Vec<String>,
-    /// Serve `/index.html` for document paths the site has no file for, as a
-    /// client-side router expects.
-    pub spa: bool,
     /// Seconds between full re-fetches of the manifest, which catch anything
     /// the live subscription missed.
     pub resync_interval: u64,
@@ -88,7 +85,6 @@ impl Default for WebConfig {
                 "https://blossom.dreamith.to/".into(),
                 "https://blossom.primal.net/".into(),
             ],
-            spa: true,
             resync_interval: 600,
             max_file_size: 100 << 20,
             max_site_size: 1 << 30,

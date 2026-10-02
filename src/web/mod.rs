@@ -66,7 +66,6 @@ impl Web {
         let server = Arc::new(SiteServer {
             live: live.clone(),
             blobs: blobs.clone(),
-            spa: config.spa,
             naddr: HeaderValue::from_str(&address.naddr()).expect("an naddr is a valid header"),
         });
         let worker = SyncWorker {
