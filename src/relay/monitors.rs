@@ -101,15 +101,6 @@ impl Monitors {
         }
     }
 
-    /// How many subscriptions a connection has open.
-    pub fn subscriptions(&self, conn: ConnId) -> usize {
-        self.conns.get(&conn).map_or(0, |c| c.subs.len())
-    }
-
-    pub fn has(&self, conn: ConnId, sub: &str) -> bool {
-        self.conns.get(&conn).is_some_and(|c| c.subs.contains_key(sub))
-    }
-
     /// Open a subscription, replacing any of the same id.
     pub fn subscribe(&mut self, conn: ConnId, sub: Arc<str>, filters: Vec<Filter>) {
         self.unsubscribe(conn, &sub);
@@ -281,7 +272,7 @@ mod tests {
         monitors.subscribe(1, "kinds".into(), filters(&[json!({"kinds": [1], "since": 500})]));
         assert_eq!(deliver(&monitors, &note), 1);
         assert_eq!(received(&mut rx), ["twice"]);
-        assert_eq!(monitors.subscriptions(1), 4);
+        assert_eq!(monitors.conns[&1].subs.len(), 4);
 
         monitors.disconnect(1);
         assert_eq!(deliver(&monitors, &Event::sign(BOB, 100, 7, vec![], "")), 0);

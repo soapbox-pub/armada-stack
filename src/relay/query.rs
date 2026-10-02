@@ -93,11 +93,11 @@ fn plan(store: &Store, txn: &Txn, filter: &Filter) -> Result<Plan> {
     let mut candidates = Vec::new();
     let no_tags = filter.tags.is_empty();
 
-    if let (Some(authors), Some(kinds)) = (&filter.authors, &filter.kinds) {
-        if authors.len() * kinds.len() <= MAX_AUTHOR_KINDS {
-            let keys = authors.iter().flat_map(|a| kinds.iter().map(move |k| [&a[..], &k.to_be_bytes()].concat())).collect();
-            candidates.push(Plan { db: t.author_kinds, keys, by_created: false, exact: no_tags });
-        }
+    if let (Some(authors), Some(kinds)) = (&filter.authors, &filter.kinds)
+        && authors.len() * kinds.len() <= MAX_AUTHOR_KINDS
+    {
+        let keys = authors.iter().flat_map(|a| kinds.iter().map(move |k| [&a[..], &k.to_be_bytes()].concat())).collect();
+        candidates.push(Plan { db: t.author_kinds, keys, by_created: false, exact: no_tags });
     }
     if let Some(authors) = &filter.authors {
         let keys = authors.iter().map(|a| a.to_vec()).collect();
@@ -347,7 +347,7 @@ mod tests {
                 .collect();
             expected.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.id.cmp(&b.id)));
             let expected: Vec<String> = expected.iter().take(limit).map(|e| e.id.clone()).collect();
-            assert_eq!(ids(&store, &[filter.clone()], 500), expected, "{filter}");
+            assert_eq!(ids(&store, std::slice::from_ref(&filter), 500), expected, "{filter}");
         }
     }
 

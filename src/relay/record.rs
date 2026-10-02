@@ -168,6 +168,7 @@ impl<'a> EventView<'a> {
         self.expiration.is_some_and(|expiration| i64::from(expiration) <= now)
     }
 
+    #[cfg(test)]
     pub fn content(&self) -> &'a str {
         self.content
     }
@@ -201,7 +202,7 @@ impl<'a> EventView<'a> {
     }
 
     /// The event as NIP-01 JSON.
-    pub fn to_json(&self) -> String {
+    pub fn to_json(self) -> String {
         let mut out = String::with_capacity(FIXED * 2 + self.content.len() + self.tags.len() * 2 + 96);
         out.push_str("{\"id\":\"");
         push_hex_str(&mut out, self.id());
@@ -330,6 +331,7 @@ impl Element<'_> {
     }
 
     /// Whether this is the value `encoded` (in [`tag_value`] form).
+    #[cfg(test)]
     pub fn is(&self, encoded: &[u8]) -> bool {
         match (self, encoded.split_first()) {
             (Element::Hex(bytes), Some((1, rest))) => rest == bytes.as_slice(),
@@ -397,6 +399,7 @@ mod tests {
         let record = encode(&event);
         let view = EventView::new(&record).unwrap();
         assert_eq!(view.kind(), 30_023);
+        assert_eq!(view.content(), event.content);
         assert_eq!(view.created_at(), 1_700_000_000);
         assert_eq!(view.expiration(), Some(1_800_000_000));
         assert!(view.is_expired(1_800_000_000) && !view.is_expired(1_799_999_999));

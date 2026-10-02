@@ -65,6 +65,27 @@ pub struct WebConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct RelayConfig {
     pub listen: SocketAddr,
+    /// Bytes one WebSocket message from a client may be.
+    pub max_message_length: usize,
+    /// Subscriptions one connection may have open at once.
+    pub max_subscriptions: usize,
+    /// Filters one REQ may have.
+    pub max_filters: usize,
+    /// The most events one filter returns, and how many it returns without
+    /// a limit of its own.
+    pub max_limit: u64,
+    /// Tags one event may have.
+    pub max_event_tags: usize,
+    /// Bytes an event's content may be.
+    pub max_content_length: usize,
+    /// Seconds into the future an event's `created_at` may be.
+    pub created_at_upper_limit: u64,
+    /// Events one connection may publish a minute, in bursts of as many.
+    /// 0 for no limit.
+    pub events_per_minute: u32,
+    /// The most the database may grow to, in bytes. Address space reserved,
+    /// not disk used, so generous is free.
+    pub map_size: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -101,7 +122,18 @@ impl Default for WebConfig {
 
 impl Default for RelayConfig {
     fn default() -> Self {
-        RelayConfig { listen: ([127, 0, 0, 1], 7777).into() }
+        RelayConfig {
+            listen: ([127, 0, 0, 1], 7777).into(),
+            max_message_length: 128 << 10,
+            max_subscriptions: 32,
+            max_filters: 16,
+            max_limit: 500,
+            max_event_tags: 2000,
+            max_content_length: 64 << 10,
+            created_at_upper_limit: 900,
+            events_per_minute: 600,
+            map_size: 256 << 30,
+        }
     }
 }
 
@@ -232,6 +264,16 @@ impl Config {
         if self.web.resync_interval == 0 {
             bail!("web.resync_interval has to be at least 1 second.");
         }
+        let relay = &self.relay;
+        if relay.max_message_length < 1024 {
+            bail!("relay.max_message_length has to be at least 1024 bytes.");
+        }
+        if relay.max_subscriptions == 0 || relay.max_filters == 0 || relay.max_limit == 0 {
+            bail!("relay.max_subscriptions, relay.max_filters, and relay.max_limit have to be at least 1.");
+        }
+        if relay.map_size < 1 << 24 || usize::try_from(relay.map_size).is_err() {
+            bail!("relay.map_size has to be at least 16 MiB, and fit in this machine's address space.");
+        }
         self.blossom.public_url()?;
         if self.blossom.max_blob_size < crate::blossom::sniff::MIN_SIZE {
             bail!("blossom.max_blob_size is smaller than any encrypted blob could be.");
@@ -321,6 +363,8 @@ mod tests {
         assert!(Config::parse("[blossom]\npublic_url = \"ftp://example.com\"").is_err());
         assert!(Config::parse("[blossom]\npublic_url = \"https://example.com/blossom\"").is_err());
         assert!(Config::parse("[blossom]\nmax_blob_size = 0").is_err());
+        assert!(Config::parse("[relay]\nmax_limit = 0").is_err());
+        assert!(Config::parse("[relay]\nmap_size = 1024").is_err());
         let config = Config::parse("[blossom]\npublic_url = \"https://Blossom.Example.com/\"").unwrap();
         assert_eq!(config.blossom.public_url().unwrap().unwrap().host_str(), Some("blossom.example.com"));
         assert!(Config::load(Some(Path::new("/nonexistent/armada.toml")), &Environment::default()).is_err());

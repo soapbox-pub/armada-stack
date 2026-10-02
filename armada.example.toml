@@ -29,8 +29,27 @@ resync_interval = 600
 max_file_size = 104857600
 max_site_size = 1073741824
 
+# A Nostr relay (NIP-01, 09, 11, 40) anyone may read from and publish to,
+# within these limits. They're advertised in its NIP-11 document.
 [relay]
 listen = "127.0.0.1:7777"
+# Bytes one message from a client may be.
+max_message_length = 131072
+# Subscriptions one connection may have open, and filters one REQ may have.
+max_subscriptions = 32
+max_filters = 16
+# The most events one filter returns, and how many it returns by default.
+max_limit = 500
+# Tags one event may have, and bytes its content may be.
+max_event_tags = 2000
+max_content_length = 65536
+# Seconds into the future an event's created_at may be.
+created_at_upper_limit = 900
+# Events one connection may publish a minute. 0 for no limit.
+events_per_minute = 600
+# The most the database may grow to, in bytes. Reserved address space, not
+# disk: the file only grows as events arrive.
+map_size = 274877906944
 
 # A Blossom server that only accepts encrypted blobs, and only ever serves
 # them back as application/octet-stream. Anyone with a valid upload token

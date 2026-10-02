@@ -164,6 +164,7 @@ impl Store {
     }
 
     /// How many events are stored.
+    #[cfg(test)]
     pub fn len(&self, txn: &Txn) -> Result<usize> {
         txn.len(self.tables.events)
     }
@@ -187,16 +188,16 @@ impl Store {
 
         let address = address_of(&view);
         if let Some(address) = &address {
-            if let Some(deleted) = txn.get(t.deleted_addrs, address)? {
-                if created_at <= u32::from_be_bytes(deleted.try_into().unwrap_or_default()) {
-                    return Ok(Outcome::Deleted);
-                }
+            if let Some(deleted) = txn.get(t.deleted_addrs, address)?
+                && created_at <= u32::from_be_bytes(deleted.try_into().unwrap_or_default())
+            {
+                return Ok(Outcome::Deleted);
             }
             if let Some(seq) = self.replaceable_seq(txn, address)? {
-                if let Some(old) = self.load(txn, seq)? {
-                    if (old.created_at(), std::cmp::Reverse(old.id())) >= (created_at, std::cmp::Reverse(id)) {
-                        return Ok(Outcome::Replaced);
-                    }
+                if let Some(old) = self.load(txn, seq)?
+                    && (old.created_at(), std::cmp::Reverse(old.id())) >= (created_at, std::cmp::Reverse(id))
+                {
+                    return Ok(Outcome::Replaced);
                 }
                 remove.push(seq);
             }
@@ -343,10 +344,10 @@ impl Store {
         for (db, key) in self.index_keys(&view) {
             txn.del(db, &key, Some(&stamp))?;
         }
-        if let Some(address) = address_of(&view) {
-            if self.replaceable_seq(txn, &address)? == Some(seq) {
-                txn.del(t.replaceable, &address, None)?;
-            }
+        if let Some(address) = address_of(&view)
+            && self.replaceable_seq(txn, &address)? == Some(seq)
+        {
+            txn.del(t.replaceable, &address, None)?;
         }
         if let Some(expiration) = view.expiration() {
             txn.del(t.expirations, &expiration_key(expiration, seq), None)?;

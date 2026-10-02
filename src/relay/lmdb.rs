@@ -187,6 +187,7 @@ impl Txn<'_> {
     }
 
     /// How many entries `db` holds.
+    #[cfg(test)]
     pub fn len(&self, db: Db) -> Result<usize> {
         // SAFETY: MDB_stat is plain data, filled in by LMDB.
         let mut stat = unsafe { std::mem::zeroed::<ffi::MDB_stat>() };
