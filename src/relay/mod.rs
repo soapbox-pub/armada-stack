@@ -3,6 +3,7 @@
 
 mod lmdb;
 mod record;
+mod store;
 
 use anyhow::Result;
 use axum::Router;
