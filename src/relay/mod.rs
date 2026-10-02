@@ -2,10 +2,12 @@
 //! tells any client that connects that it doesn't store anything yet.
 
 mod lmdb;
+mod monitors;
 mod record;
 mod filter;
 mod query;
 mod store;
+mod writer;
 
 use anyhow::Result;
 use axum::Router;
