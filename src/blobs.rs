@@ -215,6 +215,19 @@ impl BlobStore {
         size_of(&self.path(sha256))
     }
 
+    /// The first `max_bytes` of a blob, decoded as UTF-8 with anything invalid
+    /// replaced. The cap is the point: a site may publish a file of any size
+    /// at any name.
+    pub fn read_text(&self, sha256: BlobHash, max_bytes: u64) -> String {
+        use std::io::Read;
+        let Ok(file) = std::fs::File::open(self.path(sha256)) else {
+            return String::new();
+        };
+        let mut bytes = Vec::new();
+        let _ = file.take(max_bytes).read_to_end(&mut bytes);
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
     /// Sizes of a blob and every compressed copy it has, or `None` when the
     /// blob isn't stored.
     pub fn variants(&self, sha256: BlobHash) -> Option<Variants> {

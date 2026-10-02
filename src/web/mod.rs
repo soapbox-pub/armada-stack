@@ -5,6 +5,7 @@
 //! from there. No dashboard, no API, no host routing: every request is for
 //! that one site.
 
+mod csp;
 mod db;
 #[cfg(test)]
 mod e2e;

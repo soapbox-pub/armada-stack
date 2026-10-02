@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use http::HeaderValue;
 
+use super::csp::{MAX_HTML_BYTES, site_policy};
 use crate::blobs::{BlobStore, Variants};
 use crate::hash::BlobHash;
 use crate::nostr::Event;
@@ -27,6 +28,8 @@ pub struct Site {
     /// The `Last-Modified` every response carries: when the version was
     /// published, as its author's clock tells it.
     pub last_modified: HeaderValue,
+    /// The `Content-Security-Policy` every response carries.
+    pub csp: HeaderValue,
 }
 
 /// What a request path resolved to.
@@ -47,10 +50,12 @@ impl Site {
             let variants = blobs.variants(sha256).ok_or(sha256)?;
             files.insert(path, File { sha256, variants });
         }
+        let index = files.get("/index.html").map(|file| blobs.read_text(file.sha256, MAX_HTML_BYTES));
         Ok(Site {
             event_id: event.id.clone(),
             files,
             last_modified: HeaderValue::from_str(&http_date(event.created_at)).expect("an HTTP date is a valid header"),
+            csp: site_policy(index.as_deref()),
         })
     }
 
@@ -98,6 +103,7 @@ mod tests {
             event_id: String::new(),
             files: paths.iter().map(|path| (path.to_string(), file)).collect(),
             last_modified: HeaderValue::from_static(""),
+            csp: HeaderValue::from_static(""),
         }
     }
 

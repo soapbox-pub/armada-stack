@@ -154,7 +154,10 @@ async fn eventually(what: &str, mut check: impl AsyncFnMut() -> bool) {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_published_site_is_downloaded_and_served() {
     let harness = Harness::new().await;
-    let page = format!("<!doctype html><html><head><title>Armada</title></head><body>{}</body></html>", "hello ".repeat(200));
+    let page = format!(
+        "<!doctype html><html><head><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'; img-src https:\"><title>Armada</title></head><body>{}</body></html>",
+        "hello ".repeat(200)
+    );
     let script = "console.log('hi');\n".repeat(100);
     let manifest = harness.publish(crate::util::now() - 60, &[("/index.html", &page), ("/assets/app.js", &script)]);
     let web = harness.start(vec![manifest.clone()], true).await;
@@ -170,6 +173,7 @@ async fn a_published_site_is_downloaded_and_served() {
     assert_eq!(headers["vary"], "accept-encoding");
     assert_eq!(headers["access-control-allow-origin"], "*");
     assert_eq!(headers["x-nsite-addr"], harness.address.naddr());
+    assert_eq!(headers["content-security-policy"], "default-src 'self'; img-src https:");
     let mut decoded = Vec::new();
     brotli::BrotliDecompress(&mut body.as_slice(), &mut decoded).unwrap();
     assert_eq!(decoded, page.as_bytes());
@@ -187,8 +191,9 @@ async fn a_published_site_is_downloaded_and_served() {
     // A client-side route gets the app; a missing asset does not.
     let (status, _, body) = web.get("/invite/naddr1xyz", &[]).await;
     assert_eq!((status, body), (StatusCode::OK, page.as_bytes().to_vec()));
-    let (status, ..) = web.get("/assets/gone.js", &[]).await;
+    let (status, headers, _) = web.get("/assets/gone.js", &[]).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(headers["content-security-policy"], "default-src 'self'; img-src https:");
 
     let (status, ..) = web.request("POST", "/", &[]).await;
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
@@ -203,6 +208,8 @@ async fn a_new_version_replaces_the_old_and_survives_a_restart() {
     let first = harness.publish(now - 120, &[("/index.html", "first")]);
     let web = harness.start(vec![first.clone()], true).await;
     eventually("the first version going live", async || web.get("/", &[]).await.2 == b"first").await;
+    // A site with no policy of its own gets the default.
+    assert_eq!(web.get("/", &[]).await.1["content-security-policy"], super::csp::DEFAULT_CSP);
 
     // Published while subscribed: it goes live without waiting for a resync.
     let second = harness.publish(now - 60, &[("/index.html", "second")]);
@@ -260,5 +267,6 @@ async fn a_missing_blob_fails_the_deploy_and_says_why() {
     let (status, headers, _) = web.get("/", &[]).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(headers["retry-after"], "30");
+    assert_eq!(headers["content-security-policy"], super::csp::DEFAULT_CSP);
     web.stop().await;
 }

@@ -14,6 +14,7 @@ use bytes::Bytes;
 use http::header::{self, HeaderMap, HeaderValue};
 use http::{Method, Request, Response, StatusCode};
 
+use super::csp::DEFAULT_CSP;
 use super::site::Site;
 use crate::blobs::{BlobStore, Encoding, Variants};
 use crate::hash::BlobHash;
@@ -45,8 +46,13 @@ impl SiteServer {
         }
 
         let (parts, _) = request.into_parts();
-        let mut response = self.respond(&parts.method, parts.uri.path(), &parts.headers).await;
+        let site = self.live.load_full();
+        let mut response = self.respond(site.as_deref(), &parts.method, parts.uri.path(), &parts.headers).await;
         let headers = response.headers_mut();
+        // On every answer, not only documents: the policy is the site's, and a
+        // 404 or a 503 is the site answering too.
+        let csp = site.map_or(HeaderValue::from_static(DEFAULT_CSP), |site| site.csp.clone());
+        headers.insert(header::CONTENT_SECURITY_POLICY, csp);
         // Set on everything rather than only on what varied, because a cache
         // has to be told before it stores the first response.
         headers.append(header::VARY, HeaderValue::from_static("accept-encoding"));
@@ -57,7 +63,7 @@ impl SiteServer {
         response
     }
 
-    async fn respond(&self, method: &Method, path: &str, request: &HeaderMap) -> Reply {
+    async fn respond(&self, site: Option<&Site>, method: &Method, path: &str, request: &HeaderMap) -> Reply {
         if method != Method::GET && method != Method::HEAD {
             // An nsite is a pile of files. There is nothing to POST to.
             return Response::builder()
@@ -68,7 +74,7 @@ impl SiteServer {
                 .expect("response");
         }
 
-        let Some(site) = self.live.load_full() else {
+        let Some(site) = site else {
             return Response::builder()
                 .status(StatusCode::SERVICE_UNAVAILABLE)
                 .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
