@@ -1,6 +1,8 @@
 //! The relay. A stub for now: it listens, describes itself (NIP-11), and
 //! tells any client that connects that it doesn't store anything yet.
 
+mod lmdb;
+
 use anyhow::Result;
 use axum::Router;
 use axum::extract::ws::{Message, WebSocketUpgrade};

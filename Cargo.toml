@@ -25,6 +25,9 @@ hex = "0.4"
 http = "1"
 httpdate = "1"
 libc = "0.2"
+# The LMDB heed links, used directly by the relay for duplicate-sorted
+# lookups heed doesn't expose. Kept at heed's version so there's one LMDB.
+lmdb-master-sys = "0.2.6"
 lru = "0.12"
 memmap2 = "0.9"
 parking_lot = "0.12"

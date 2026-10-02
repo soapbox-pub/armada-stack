@@ -64,13 +64,19 @@ impl Storage {
         BlobStore::new(&dir)
     }
 
+    /// The directory of one service, created if need be.
+    pub fn service_dir(&self, service: &str) -> Result<PathBuf> {
+        let path = self.root.join(service);
+        std::fs::create_dir_all(&path).with_context(|| format!("Could not create {}", path.display()))?;
+        Ok(path)
+    }
+
     /// Open the LMDB environment of one service, creating it if need be.
     ///
     /// `map_size` is the most the database may grow to. It's address space
     /// reserved, not disk used, so generous is free.
     pub fn env(&self, service: &str, map_size: usize, max_dbs: u32) -> Result<Env<WithoutTls>> {
-        let path = self.root.join(service);
-        std::fs::create_dir_all(&path).with_context(|| format!("Could not create {}", path.display()))?;
+        let path = self.service_dir(service)?;
         // SAFETY: each environment is opened once per process, and nothing else
         // writes to its files while it is open.
         unsafe { EnvOpenOptions::new().read_txn_without_tls().map_size(map_size).max_dbs(max_dbs).open(&path) }
