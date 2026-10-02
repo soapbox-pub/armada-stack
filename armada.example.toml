@@ -1,24 +1,18 @@
 # armada configuration. Every setting is optional; these are the defaults.
-# Read from --config, else ~/.config/armada/armada.toml, else
-# /etc/armada/armada.toml.
 
 # Where data is kept. Relative paths are relative to this file. Defaults to
 # /var/lib/armada as root, else ~/.local/share/armada.
 # storage_dir = "/var/lib/armada"
 
-# Where the web app, relay (wss://) and Blossom server are served, on one
-# origin. Defaults to 127.0.0.1:8080, or [::]:443 with [tls] on.
+# Defaults to 127.0.0.1:8080, or [::]:443 with [tls] on.
 # listen = "127.0.0.1:8080"
-# The origin clients reach armada at. Unset, it's taken from each request's
-# Host and X-Forwarded-Proto.
+# Unset, it's taken from each request's Host and X-Forwarded-Proto.
 # public_url = "https://armada.example.com"
-# Believe X-Forwarded-For from a reverse proxy. On by default when listen is
-# loopback.
+# Believe X-Forwarded-For. On by default when listen is loopback.
 # trust_proxy = true
 
-# HTTPS without a reverse proxy, with a Let's Encrypt certificate for
-# public_url's domain. Needs DNS pointing here, ports 443 and 80 open, and
-# root or CAP_NET_BIND_SERVICE.
+# HTTPS with a Let's Encrypt certificate for public_url's domain. Needs DNS
+# pointing here, ports 443 and 80 open, and root or CAP_NET_BIND_SERVICE.
 [tls]
 acme = false
 # email = "ops@example.com"
@@ -31,11 +25,9 @@ http_listen = "[::]:80"
 [web]
 # The nsite to serve: an naddr, or an npub for that author's root site.
 nsite = "naddr1qvzqqqyf8qpzq7q6z5ns2hm5c8msyv83qwzxpxe52j8c4d4q5m92wsp9sflelkh9qqrxzundv9jxz0nw9gl"
-# Follow new versions as they're published.
 auto_update = true
 relays = ["wss://relay.ditto.pub", "wss://relay.dreamith.to"]
 blossom_servers = ["https://blossom.ditto.pub/", "https://blossom.dreamith.to/", "https://blossom.primal.net/"]
-# Seconds between full checks for a new version.
 resync_interval = 600
 max_file_size = 104857600
 max_site_size = 1073741824
@@ -67,7 +59,6 @@ token_ttl = 21600
 max_skew = 60
 # At least 240, and at least twice max_skew.
 replay_ttl = 240
-# Per IPv4 address or IPv6 /64.
 rate_limit_per_minute = 60
 health_interval = 15
 
