@@ -1,8 +1,10 @@
 //! One client's WebSocket: NIP-01's EVENT, REQ, and CLOSE.
 //!
-//! Events are checked and verified here, on the connection's own task, so
-//! the writer only ever sees valid ones. Queries run on the blocking pool,
-//! a few at a time.
+//! Events get their cheap checks here, on the connection's own task. The
+//! rest — the duplicate lookup, which reads the map and can stall on disk,
+//! and the signature — runs on the blocking pool, a few at a time, so the
+//! writer only ever sees valid events and no async thread waits on either.
+//! Queries run there too.
 //!
 //! A REQ's subscription goes live *before* its query reads the store: the
 //! query waits until its monitor shard confirms it's installed, so every
@@ -149,61 +151,49 @@ impl Session {
             }
         };
 
-        let verdict = self.check(&event);
-        let record = match verdict {
-            Ok(record) => record,
-            Err((accepted, message)) => return self.send(ok(&event.id, accepted, message)).await,
-        };
-        let submission = Submission { record, reply: self.link.clone() };
-        if self.shared.writer.submit(submission).is_err() {
-            return self.send(ok(&event.id, false, "rate-limited: the relay is busy, try again shortly")).await;
+        if let Err(message) = self.screen(&event) {
+            return self.send(ok(&event.id, false, message)).await;
         }
+        // Waiting here slows only this client when verifiers are scarce.
+        let Ok(permit) = self.shared.verifiers.clone().acquire_owned().await else { return Ok(()) };
+        let (shared, link) = (self.shared.clone(), self.link.clone());
+        tokio::task::spawn_blocking(move || {
+            admit(&shared, event, link);
+            drop(permit);
+        });
         Ok(())
     }
 
-    /// Check an event over, cheapest checks first, and encode it. Errors
-    /// are the `OK` to answer with instead.
-    fn check(&mut self, event: &Event) -> Result<Vec<u8>, (bool, &'static str)> {
+    /// The checks that cost next to nothing, and the rate limit. Errors are
+    /// the `OK` message to refuse with.
+    fn screen(&mut self, event: &Event) -> Result<(), &'static str> {
         let config = &self.shared.config;
         let now = now();
         if !is_hex64(&event.id) || !is_hex64(&event.pubkey) || event.sig.len() != 128 || hex::decode(&event.sig).is_err() {
-            return Err((false, "invalid: id, pubkey, and sig must be lowercase hex"));
+            return Err("invalid: id, pubkey, and sig must be lowercase hex");
         }
         if !(0..=i64::from(u16::MAX)).contains(&event.kind) {
-            return Err((false, "invalid: kind must be between 0 and 65535"));
+            return Err("invalid: kind must be between 0 and 65535");
         }
         if !(0..=i64::from(u32::MAX)).contains(&event.created_at) {
-            return Err((false, "invalid: created_at is out of range"));
+            return Err("invalid: created_at is out of range");
         }
         if event.created_at > now.saturating_add(config.created_at_upper_limit as i64) {
-            return Err((false, "invalid: created_at is too far in the future"));
+            return Err("invalid: created_at is too far in the future");
         }
         if event.tags.len() > config.max_event_tags {
-            return Err((false, "invalid: too many tags"));
+            return Err("invalid: too many tags");
         }
         if event.content.len() > config.max_content_length {
-            return Err((false, "invalid: content is too long"));
+            return Err("invalid: content is too long");
         }
         if record::expiration(event).is_some_and(|expiration| i64::from(expiration) <= now) {
-            return Err((false, "invalid: event has expired"));
+            return Err("invalid: event has expired");
         }
         if !self.tokens.take() {
-            return Err((false, "rate-limited: slow down"));
+            return Err("rate-limited: slow down");
         }
-
-        let mut id = [0; 32];
-        hex::decode_to_slice(&event.id, &mut id).expect("checked hex");
-        // Resent events are common and cost a signature check each, so
-        // look first. A forgery of a stored id is answered the same way,
-        // and stores nothing.
-        let store = &self.shared.store;
-        if store.read().and_then(|txn| store.contains(&txn, &id)).unwrap_or(false) {
-            return Err((true, "duplicate: already have this event"));
-        }
-        if !event.verify() {
-            return Err((false, "invalid: bad id or signature"));
-        }
-        Ok(record::encode(event))
+        Ok(())
     }
 
     async fn on_req(&mut self, message: &[Value], queries: &mut JoinSet<QueryDone>) -> Result<(), Gone> {
@@ -299,6 +289,29 @@ impl Session {
                 }
             }
         }
+    }
+}
+
+/// Look for an event, verify it, and queue it for the writer, answering
+/// through `link` if it goes no further. Blocks: run it off the async
+/// threads.
+fn admit(shared: &Shared, event: Event, link: Link) {
+    let refuse = |accepted, message| link.send(Outbound::Text(ok(&event.id, accepted, message)));
+    let mut id = [0; 32];
+    hex::decode_to_slice(&event.id, &mut id).expect("screened hex");
+    // Resent events are common and cost a signature check each, so look
+    // first. A forgery of a stored id is answered the same way, and stores
+    // nothing.
+    let store = &shared.store;
+    if store.read().and_then(|txn| store.contains(&txn, &id)).unwrap_or(false) {
+        return refuse(true, "duplicate: already have this event");
+    }
+    if !event.verify() {
+        return refuse(false, "invalid: bad id or signature");
+    }
+    let submission = Submission { record: record::encode(&event), reply: link.clone() };
+    if shared.writer.submit(submission).is_err() {
+        refuse(false, "rate-limited: the relay is busy, try again shortly");
     }
 }
 

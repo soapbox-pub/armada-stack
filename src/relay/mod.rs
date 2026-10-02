@@ -53,6 +53,8 @@ struct Shared {
     writer: Writer,
     /// Queries running at once, at most one per core.
     queries: Arc<Semaphore>,
+    /// Events being looked up and verified at once, at most one per core.
+    verifiers: Arc<Semaphore>,
     next_conn: AtomicU64,
     /// Fires on shutdown, closing every connection.
     cancel: CancellationToken,
@@ -71,6 +73,7 @@ impl Relay {
                 hub,
                 writer,
                 queries: Arc::new(Semaphore::new(cores)),
+                verifiers: Arc::new(Semaphore::new(cores)),
                 next_conn: AtomicU64::new(1),
                 cancel: CancellationToken::new(),
             }),
