@@ -3,6 +3,8 @@
 
 mod lmdb;
 mod record;
+mod filter;
+mod query;
 mod store;
 
 use anyhow::Result;

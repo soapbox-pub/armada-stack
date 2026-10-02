@@ -173,7 +173,7 @@ impl Store {
     pub fn insert(&self, txn: &mut RwTxn, record: &[u8]) -> Result<Outcome> {
         let view = EventView::new(record).expect("an encoded record");
         let t = self.tables;
-        let (id, pubkey, kind, created_at) = (view.id(), view.pubkey(), view.kind(), view.created_at());
+        let (id, kind, created_at) = (view.id(), view.kind(), view.created_at());
 
         if self.contains(txn, id)? {
             return Ok(Outcome::Duplicate);

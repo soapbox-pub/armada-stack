@@ -1,0 +1,362 @@
+//! Answering filters from the store.
+//!
+//! Each filter gets one index to scan. The candidates are the ones its
+//! fields allow — author and kind together, author, each tag, kind — and
+//! since every index key's stamps are counted by LMDB for free, the planner
+//! simply adds up the counts of each candidate's keys and takes the
+//! smallest. If that index pins down every field the filter has, its
+//! entries need no further checking.
+//!
+//! A scan opens a cursor per key, each starting at `until` and walking back
+//! in time, and merges them newest first until `since` or the limit.
+
+use std::collections::{BinaryHeap, HashSet};
+
+use super::filter::Filter;
+use super::lmdb::{Cursor, Db, Result, Txn};
+use super::record::EventView;
+use super::store::{MAX_SEQ, Stamp, Store, stamp, stamp_created_at, stamp_seq};
+
+/// The most author × kind keys a filter may be planned over together.
+const MAX_AUTHOR_KINDS: usize = 1024;
+
+/// The most records one filter may examine. Only filters whose fields the
+/// index can't pin down examine records that don't match, and this bounds
+/// how long one of those can hold a reader.
+const MAX_EXAMINED: usize = 100_000;
+
+/// The most extra events read past the limit to order a tie at the boundary.
+const MAX_TIES: usize = 1000;
+
+pub struct Results {
+    /// The sequence number the next event stored after this snapshot gets.
+    /// Anything below it was visible to the query.
+    pub next_seq: u64,
+    /// Matching events as JSON, each filter's newest first.
+    pub events: Vec<String>,
+}
+
+/// Run a REQ's filters. Each one's limit is capped at `max_limit`.
+pub fn run(store: &Store, filters: &[Filter], max_limit: u64, now: i64) -> Result<Results> {
+    let txn = store.read()?;
+    let next_seq = store.next_seq(&txn)?;
+    let mut seen = HashSet::new();
+    let mut events = Vec::new();
+    for filter in filters {
+        let limit = filter.limit.unwrap_or(max_limit).min(max_limit) as usize;
+        if filter.never || limit == 0 {
+            continue;
+        }
+        for (seq, view) in run_filter(store, &txn, filter, limit, now)? {
+            if seen.insert(seq) {
+                events.push(view.to_json());
+            }
+        }
+    }
+    Ok(Results { next_seq, events })
+}
+
+fn run_filter<'t>(store: &Store, txn: &'t Txn, filter: &Filter, limit: usize, now: i64) -> Result<Vec<(u64, EventView<'t>)>> {
+    let mut found = Vec::new();
+
+    if let Some(ids) = &filter.ids {
+        for id in ids {
+            let Some(seq) = store.seq_of(txn, id)? else { continue };
+            if let Some(view) = store.load(txn, seq)?.filter(|view| filter.matches(view) && !view.is_expired(now)) {
+                found.push((seq, view));
+            }
+        }
+    } else {
+        let plan = plan(store, txn, filter)?;
+        scan(store, txn, filter, &plan, limit, now, &mut found)?;
+    }
+
+    // Newest first; on a tie, the lowest id first (NIP-01).
+    found.sort_unstable_by(|(_, a), (_, b)| b.created_at().cmp(&a.created_at()).then_with(|| a.id().cmp(b.id())));
+    found.truncate(limit);
+    Ok(found)
+}
+
+#[derive(Debug)]
+struct Plan {
+    db: Db,
+    /// Keys whose stamps to merge; empty for the `created` table, whose
+    /// keys are the stamps.
+    keys: Vec<Vec<u8>>,
+    by_created: bool,
+    /// Whether every entry found matches the filter, time aside.
+    exact: bool,
+}
+
+fn plan(store: &Store, txn: &Txn, filter: &Filter) -> Result<Plan> {
+    let t = store.tables;
+    let mut candidates = Vec::new();
+    let no_tags = filter.tags.is_empty();
+
+    if let (Some(authors), Some(kinds)) = (&filter.authors, &filter.kinds) {
+        if authors.len() * kinds.len() <= MAX_AUTHOR_KINDS {
+            let keys = authors.iter().flat_map(|a| kinds.iter().map(move |k| [&a[..], &k.to_be_bytes()].concat())).collect();
+            candidates.push(Plan { db: t.author_kinds, keys, by_created: false, exact: no_tags });
+        }
+    }
+    if let Some(authors) = &filter.authors {
+        let keys = authors.iter().map(|a| a.to_vec()).collect();
+        candidates.push(Plan { db: t.authors, keys, by_created: false, exact: filter.kinds.is_none() && no_tags });
+    }
+    for (letter, values) in &filter.tags {
+        let keys = values.iter().map(|v| [&[*letter][..], v].concat()).collect();
+        let exact = filter.authors.is_none() && filter.kinds.is_none() && filter.tags.len() == 1;
+        candidates.push(Plan { db: t.tags, keys, by_created: false, exact });
+    }
+    if let Some(kinds) = &filter.kinds {
+        let keys = kinds.iter().map(|k| k.to_be_bytes().to_vec()).collect();
+        candidates.push(Plan { db: t.kinds, keys, by_created: false, exact: filter.authors.is_none() && no_tags });
+    }
+
+    let mut best: Option<(usize, Plan)> = None;
+    for candidate in candidates {
+        let bound = best.as_ref().map_or(usize::MAX, |(cost, _)| *cost);
+        let cost = cost(txn, &candidate, bound)?;
+        // Ties go to the earlier candidate, which pins down more fields.
+        if cost < bound {
+            best = Some((cost, candidate));
+        }
+    }
+    Ok(best.map_or(Plan { db: t.created, keys: Vec::new(), by_created: true, exact: true }, |(_, plan)| plan))
+}
+
+/// How many entries a plan would walk, at worst. Stops counting at `bound`.
+fn cost(txn: &Txn, plan: &Plan, bound: usize) -> Result<usize> {
+    let mut cursor = txn.cursor(plan.db)?;
+    let mut total = 0usize;
+    for key in &plan.keys {
+        if cursor.set(key)?.is_some() {
+            total = total.saturating_add(cursor.count()?);
+            if total >= bound {
+                break;
+            }
+        }
+    }
+    Ok(total)
+}
+
+/// One key's stamps, newest first.
+struct Source<'t> {
+    cursor: Cursor<'t>,
+    by_created: bool,
+}
+
+impl<'t> Source<'t> {
+    /// Position at the newest stamp no later than `until`.
+    fn start(txn: &'t Txn, plan: &Plan, key: &[u8], until: u32) -> Result<Option<(Stamp, Source<'t>)>> {
+        let mut source = Source { cursor: txn.cursor(plan.db)?, by_created: plan.by_created };
+        let ceiling = stamp(until, MAX_SEQ);
+        let entry = if plan.by_created {
+            match source.cursor.set_range(&ceiling)? {
+                Some(_) => source.cursor.prev()?,
+                None => source.cursor.last()?,
+            }
+        } else {
+            match source.cursor.get_both_range(key, &ceiling)? {
+                Some(_) => source.cursor.prev_dup()?,
+                None => match source.cursor.set(key)? {
+                    Some(_) => source.cursor.last_dup()?,
+                    None => None,
+                },
+            }
+        };
+        Ok(source.stamp_of(entry).map(|stamp| (stamp, source)))
+    }
+
+    fn next(&mut self) -> Result<Option<Stamp>> {
+        let entry = if self.by_created { self.cursor.prev()? } else { self.cursor.prev_dup()? };
+        Ok(self.stamp_of(entry))
+    }
+
+    fn stamp_of(&self, entry: Option<(&[u8], &[u8])>) -> Option<Stamp> {
+        let (key, value) = entry?;
+        let stamp = if self.by_created { key } else { value };
+        stamp.try_into().ok()
+    }
+}
+
+fn scan<'t>(store: &Store, txn: &'t Txn, filter: &Filter, plan: &Plan, limit: usize, now: i64, found: &mut Vec<(u64, EventView<'t>)>) -> Result<()> {
+    let mut sources = Vec::new();
+    let mut heap = BinaryHeap::new();
+    let keys: Vec<&[u8]> = if plan.by_created { vec![&[]] } else { plan.keys.iter().map(Vec::as_slice).collect() };
+    for key in keys {
+        if let Some((stamp, source)) = Source::start(txn, plan, key, filter.until)? {
+            heap.push((stamp, sources.len()));
+            sources.push(source);
+        }
+    }
+
+    let mut last = None;
+    let mut examined = 0;
+    while let Some((stamp, i)) = heap.pop() {
+        if let Some(next) = sources[i].next()? {
+            heap.push((next, i));
+        }
+        let created_at = stamp_created_at(&stamp);
+        if created_at < filter.since {
+            // The newest left is too old, so all of them are.
+            break;
+        }
+        // The same event under two keys pops twice in a row.
+        if last == Some(stamp) {
+            continue;
+        }
+        last = Some(stamp);
+        // Past the limit, keep going only through a tie with the last one.
+        if found.len() >= limit && (found.len() >= limit + MAX_TIES || found.last().is_some_and(|(_, v)| created_at < v.created_at())) {
+            break;
+        }
+        examined += 1;
+        if examined > MAX_EXAMINED {
+            break;
+        }
+
+        let seq = stamp_seq(&stamp);
+        let Some(view) = store.load(txn, seq)? else { continue };
+        if (plan.exact || filter.matches(&view)) && !view.is_expired(now) {
+            found.push((seq, view));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nostr::Event;
+    use crate::relay::store::tests::{ALICE, BOB, open, put, tags};
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+    use serde_json::{Value, json};
+
+    const CAROL: &str = "0000000000000000000000000000000000000000000000000000000000000003";
+
+    fn ids(store: &Store, filters: &[Value], max_limit: u64) -> Vec<String> {
+        let filters: Vec<Filter> = filters.iter().map(|f| Filter::parse(f).unwrap()).collect();
+        let results = run(store, &filters, max_limit, 1_000_000).unwrap();
+        results.events.iter().map(|json| serde_json::from_str::<Event>(json).unwrap().id).collect()
+    }
+
+    #[test]
+    fn plans_by_counts() {
+        let (_dir, store) = open();
+        let alice = crate::nostr::event::public_key(ALICE);
+        for i in 0..20 {
+            put(&store, &Event::sign(ALICE, 100 + i, 1, tags(&[&["t", "common"]]), ""));
+        }
+        put(&store, &Event::sign(BOB, 100, 1, tags(&[&["t", "rare"]]), ""));
+
+        let txn = store.read().unwrap();
+        let plan_for = |filter: Value| plan(&store, &txn, &Filter::parse(&filter).unwrap()).unwrap();
+
+        // The rare tag beats the author with twenty events, and needs checking.
+        let p = plan_for(json!({"authors": [alice], "#t": ["rare"]}));
+        assert_eq!(p.keys, vec![[&b"t"[..], &[0], b"rare"].concat()]);
+        assert!(!p.exact);
+        // Author and kind together, exactly.
+        let p = plan_for(json!({"authors": [alice], "kinds": [1]}));
+        assert_eq!(p.keys[0].len(), 34);
+        assert!(p.exact);
+        assert!(plan_for(json!({"since": 5})).by_created);
+    }
+
+    #[test]
+    fn pages_newest_first_breaking_ties_by_id() {
+        let (_dir, store) = open();
+        let mut events: Vec<Event> = (0..10).map(|i| Event::sign(ALICE, 100 + i / 2, 1, vec![], &i.to_string())).collect();
+        for event in &events {
+            put(&store, event);
+        }
+        events.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.id.cmp(&b.id)));
+        let expected: Vec<String> = events.iter().map(|e| e.id.clone()).collect();
+
+        assert_eq!(ids(&store, &[json!({"kinds": [1]})], 100), expected);
+        assert_eq!(ids(&store, &[json!({})], 100), expected);
+        // A limit landing mid-tie still gets the lowest ids of the tie.
+        assert_eq!(ids(&store, &[json!({"kinds": [1], "limit": 3})], 100), expected[..3]);
+        assert_eq!(ids(&store, &[json!({"limit": 3})], 100), expected[..3]);
+        // The relay's own cap.
+        assert_eq!(ids(&store, &[json!({"kinds": [1]})], 4), expected[..4]);
+        assert_eq!(ids(&store, &[json!({"kinds": [1], "until": 102, "since": 101})], 100), expected[4..8]);
+        assert!(ids(&store, &[json!({"kinds": [1], "limit": 0})], 100).is_empty());
+    }
+
+    #[test]
+    fn hides_expired_events() {
+        let (_dir, store) = open();
+        put(&store, &Event::sign(ALICE, 100, 1, tags(&[&["expiration", "999999"]]), ""));
+        put(&store, &Event::sign(ALICE, 100, 1, tags(&[&["expiration", "1000001"]]), ""));
+        assert_eq!(ids(&store, &[json!({})], 100).len(), 1);
+    }
+
+    /// Random events and filters, checked against matching every event.
+    #[test]
+    fn agrees_with_brute_force() {
+        let (_dir, store) = open();
+        let mut rng = StdRng::seed_from_u64(7);
+        let secrets = [ALICE, BOB, CAROL];
+        let topics = ["a", "b", "c", "d"];
+        let mut all = Vec::new();
+        for i in 0..300 {
+            let secret = secrets[rng.random_range(0..3)];
+            let kind = [1, 7, 1111][rng.random_range(0..3)];
+            let mut event_tags = vec![];
+            for _ in 0..rng.random_range(0..3) {
+                event_tags.push(vec!["t".to_string(), topics[rng.random_range(0..4)].to_string()]);
+            }
+            let event = Event::sign(secret, rng.random_range(100..160), kind, event_tags, &i.to_string());
+            put(&store, &event);
+            all.push(event);
+        }
+        let pubkeys: Vec<String> = secrets.iter().map(|s| crate::nostr::event::public_key(s)).collect();
+
+        for _ in 0..300 {
+            let mut filter = serde_json::Map::new();
+            if rng.random_bool(0.5) {
+                filter.insert("authors".into(), json!(pubkeys[..rng.random_range(1..3)]));
+            }
+            if rng.random_bool(0.5) {
+                let kind = [1, 7, 1111][rng.random_range(0..3)];
+                filter.insert("kinds".into(), json!([kind, 9]));
+            }
+            if rng.random_bool(0.5) {
+                filter.insert("#t".into(), json!(topics[..rng.random_range(1..4)]));
+            }
+            if rng.random_bool(0.3) {
+                filter.insert("since".into(), json!(rng.random_range(100..160)));
+            }
+            if rng.random_bool(0.3) {
+                filter.insert("until".into(), json!(rng.random_range(100..160)));
+            }
+            let limit = rng.random_range(1..40);
+            filter.insert("limit".into(), json!(limit));
+            let filter = Value::Object(filter);
+
+            let parsed = Filter::parse(&filter).unwrap();
+            let mut expected: Vec<&Event> = all
+                .iter()
+                .filter(|e| {
+                    let record = crate::relay::record::encode(e);
+                    parsed.matches(&EventView::new(&record).unwrap())
+                })
+                .collect();
+            expected.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.id.cmp(&b.id)));
+            let expected: Vec<String> = expected.iter().take(limit).map(|e| e.id.clone()).collect();
+            assert_eq!(ids(&store, &[filter.clone()], 500), expected, "{filter}");
+        }
+    }
+
+    #[test]
+    fn merges_filters_without_repeats() {
+        let (_dir, store) = open();
+        let note = Event::sign(ALICE, 100, 1, vec![], "");
+        put(&store, &note);
+        let found = ids(&store, &[json!({"kinds": [1]}), json!({"ids": [note.id]})], 100);
+        assert_eq!(found, vec![note.id.clone()]);
+    }
+}
