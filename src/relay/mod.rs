@@ -2,6 +2,7 @@
 //! tells any client that connects that it doesn't store anything yet.
 
 mod lmdb;
+mod record;
 
 use anyhow::Result;
 use axum::Router;
