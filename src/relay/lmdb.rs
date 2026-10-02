@@ -141,6 +141,14 @@ impl Env {
         Ok(Db(dbi))
     }
 
+    /// Write a compacted copy of the environment into the directory `path`.
+    #[cfg(test)]
+    pub fn copy_compact(&self, path: &Path) -> Result<()> {
+        let path = CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| Error(libc::EINVAL))?;
+        // SAFETY: the env is open and the path NUL-terminated.
+        check(unsafe { ffi::mdb_env_copy2(self.ptr, path.as_ptr(), ffi::MDB_CP_COMPACT) })
+    }
+
     pub fn read_txn(&self) -> Result<RoTxn<'_>> {
         Ok(RoTxn(self.begin(ffi::MDB_RDONLY)?))
     }
@@ -186,7 +194,7 @@ impl Txn<'_> {
         Ok(Cursor { ptr, _txn: PhantomData })
     }
 
-    /// How many entries `db` holds.
+    /// How many entries `db` holds, counting each duplicate.
     #[cfg(test)]
     pub fn len(&self, db: Db) -> Result<usize> {
         // SAFETY: MDB_stat is plain data, filled in by LMDB.
@@ -287,11 +295,6 @@ impl<'t> Cursor<'t> {
         self.op(Some(key), None, ffi::MDB_SET_KEY)
     }
 
-    /// The first entry whose key is at least `key`.
-    pub fn set_range(&mut self, key: &[u8]) -> Result<Option<Entry<'t>>> {
-        self.op(Some(key), None, ffi::MDB_SET_RANGE)
-    }
-
     /// Within `key`'s duplicates, the first value at least `value`.
     pub fn get_both_range(&mut self, key: &[u8], value: &[u8]) -> Result<Option<Entry<'t>>> {
         self.op(Some(key), Some(value), ffi::MDB_GET_BOTH_RANGE)
@@ -301,16 +304,8 @@ impl<'t> Cursor<'t> {
         self.op(None, None, ffi::MDB_FIRST)
     }
 
-    pub fn last(&mut self) -> Result<Option<Entry<'t>>> {
-        self.op(None, None, ffi::MDB_LAST)
-    }
-
     pub fn next(&mut self) -> Result<Option<Entry<'t>>> {
         self.op(None, None, ffi::MDB_NEXT)
-    }
-
-    pub fn prev(&mut self) -> Result<Option<Entry<'t>>> {
-        self.op(None, None, ffi::MDB_PREV)
     }
 
     /// The last value of the current key.
@@ -318,6 +313,11 @@ impl<'t> Cursor<'t> {
         // MDB_LAST_DUP returns only the value; the key is unchanged.
         let hit = self.op(None, None, ffi::MDB_LAST_DUP)?;
         Ok(hit.map(|(_, v)| (&[][..], v)))
+    }
+
+    /// The next value of the current key, not crossing into another.
+    pub fn next_dup(&mut self) -> Result<Option<Entry<'t>>> {
+        self.op(None, None, ffi::MDB_NEXT_DUP)
     }
 
     /// The previous value of the current key, not crossing into another.
@@ -399,7 +399,6 @@ mod tests {
         cursor.set(b"k").unwrap();
         assert_eq!(cursor.last_dup().unwrap().unwrap().1, 30u16.to_be_bytes());
         assert!(cursor.set(b"x").unwrap().is_none());
-        assert_eq!(cursor.set_range(b"l").unwrap().unwrap().0, b"m");
         assert_eq!(txn.len(db).unwrap(), 4);
     }
 
@@ -417,7 +416,7 @@ mod tests {
         let key = |entry: Option<Entry>| u64::from_ne_bytes(entry.unwrap().0.try_into().unwrap());
         assert_eq!(key(cursor.first().unwrap()), 1);
         assert_eq!(key(cursor.next().unwrap()), 256);
-        assert_eq!(key(cursor.last().unwrap()), 65536);
-        assert_eq!(key(cursor.prev().unwrap()), 256);
+        assert_eq!(key(cursor.next().unwrap()), 65536);
+        assert!(cursor.next().unwrap().is_none());
     }
 }

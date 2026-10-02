@@ -15,7 +15,7 @@ use std::collections::{BinaryHeap, HashSet};
 use super::filter::Filter;
 use super::lmdb::{Cursor, Db, Result, Txn};
 use super::record::EventView;
-use super::store::{MAX_SEQ, Stamp, Store, stamp, stamp_created_at, stamp_seq};
+use super::store::{CREATED, MAX_SEQ, Stamp, Store, stamp, stamp_created_at, stamp_seq};
 
 /// The most author × kind keys a filter may be planned over together.
 const MAX_AUTHOR_KINDS: usize = 1024;
@@ -80,10 +80,8 @@ fn run_filter<'t>(store: &Store, txn: &'t Txn, filter: &Filter, limit: usize, no
 #[derive(Debug)]
 struct Plan {
     db: Db,
-    /// Keys whose stamps to merge; empty for the `created` table, whose
-    /// keys are the stamps.
+    /// Keys whose stamps to merge.
     keys: Vec<Vec<u8>>,
-    by_created: bool,
     /// Whether every entry found matches the filter, time aside.
     exact: bool,
 }
@@ -97,20 +95,20 @@ fn plan(store: &Store, txn: &Txn, filter: &Filter) -> Result<Plan> {
         && authors.len() * kinds.len() <= MAX_AUTHOR_KINDS
     {
         let keys = authors.iter().flat_map(|a| kinds.iter().map(move |k| [&a[..], &k.to_be_bytes()].concat())).collect();
-        candidates.push(Plan { db: t.author_kinds, keys, by_created: false, exact: no_tags });
+        candidates.push(Plan { db: t.author_kinds, keys, exact: no_tags });
     }
     if let Some(authors) = &filter.authors {
         let keys = authors.iter().map(|a| a.to_vec()).collect();
-        candidates.push(Plan { db: t.authors, keys, by_created: false, exact: filter.kinds.is_none() && no_tags });
+        candidates.push(Plan { db: t.authors, keys, exact: filter.kinds.is_none() && no_tags });
     }
     for (letter, values) in &filter.tags {
         let keys = values.iter().map(|v| [&[*letter][..], v].concat()).collect();
         let exact = filter.authors.is_none() && filter.kinds.is_none() && filter.tags.len() == 1;
-        candidates.push(Plan { db: t.tags, keys, by_created: false, exact });
+        candidates.push(Plan { db: t.tags, keys, exact });
     }
     if let Some(kinds) = &filter.kinds {
         let keys = kinds.iter().map(|k| k.to_be_bytes().to_vec()).collect();
-        candidates.push(Plan { db: t.kinds, keys, by_created: false, exact: filter.authors.is_none() && no_tags });
+        candidates.push(Plan { db: t.kinds, keys, exact: filter.authors.is_none() && no_tags });
     }
 
     let mut best: Option<(usize, Plan)> = None;
@@ -122,7 +120,7 @@ fn plan(store: &Store, txn: &Txn, filter: &Filter) -> Result<Plan> {
             best = Some((cost, candidate));
         }
     }
-    Ok(best.map_or(Plan { db: t.created, keys: Vec::new(), by_created: true, exact: true }, |(_, plan)| plan))
+    Ok(best.map_or(Plan { db: t.created, keys: vec![CREATED.to_vec()], exact: true }, |(_, plan)| plan))
 }
 
 /// How many entries a plan would walk, at worst. Stops counting at `bound`.
@@ -143,49 +141,36 @@ fn cost(txn: &Txn, plan: &Plan, bound: usize) -> Result<usize> {
 /// One key's stamps, newest first.
 struct Source<'t> {
     cursor: Cursor<'t>,
-    by_created: bool,
 }
 
 impl<'t> Source<'t> {
     /// Position at the newest stamp no later than `until`.
-    fn start(txn: &'t Txn, plan: &Plan, key: &[u8], until: u32) -> Result<Option<(Stamp, Source<'t>)>> {
-        let mut source = Source { cursor: txn.cursor(plan.db)?, by_created: plan.by_created };
-        let ceiling = stamp(until, MAX_SEQ);
-        let entry = if plan.by_created {
-            match source.cursor.set_range(&ceiling)? {
-                Some(_) => source.cursor.prev()?,
-                None => source.cursor.last()?,
-            }
-        } else {
-            match source.cursor.get_both_range(key, &ceiling)? {
-                Some(_) => source.cursor.prev_dup()?,
-                None => match source.cursor.set(key)? {
-                    Some(_) => source.cursor.last_dup()?,
-                    None => None,
-                },
-            }
+    fn start(txn: &'t Txn, db: Db, key: &[u8], until: u32) -> Result<Option<(Stamp, Source<'t>)>> {
+        let mut cursor = txn.cursor(db)?;
+        let entry = match cursor.get_both_range(key, &stamp(until, MAX_SEQ))? {
+            Some(_) => cursor.prev_dup()?,
+            None => match cursor.set(key)? {
+                Some(_) => cursor.last_dup()?,
+                None => None,
+            },
         };
-        Ok(source.stamp_of(entry).map(|stamp| (stamp, source)))
+        Ok(stamp_of(entry).map(|stamp| (stamp, Source { cursor })))
     }
 
     fn next(&mut self) -> Result<Option<Stamp>> {
-        let entry = if self.by_created { self.cursor.prev()? } else { self.cursor.prev_dup()? };
-        Ok(self.stamp_of(entry))
+        Ok(stamp_of(self.cursor.prev_dup()?))
     }
+}
 
-    fn stamp_of(&self, entry: Option<(&[u8], &[u8])>) -> Option<Stamp> {
-        let (key, value) = entry?;
-        let stamp = if self.by_created { key } else { value };
-        stamp.try_into().ok()
-    }
+fn stamp_of(entry: Option<(&[u8], &[u8])>) -> Option<Stamp> {
+    entry?.1.try_into().ok()
 }
 
 fn scan<'t>(store: &Store, txn: &'t Txn, filter: &Filter, plan: &Plan, limit: usize, now: i64, found: &mut Vec<(u64, EventView<'t>)>) -> Result<()> {
     let mut sources = Vec::new();
     let mut heap = BinaryHeap::new();
-    let keys: Vec<&[u8]> = if plan.by_created { vec![&[]] } else { plan.keys.iter().map(Vec::as_slice).collect() };
-    for key in keys {
-        if let Some((stamp, source)) = Source::start(txn, plan, key, filter.until)? {
+    for key in &plan.keys {
+        if let Some((stamp, source)) = Source::start(txn, plan.db, key, filter.until)? {
             heap.push((stamp, sources.len()));
             sources.push(source);
         }
@@ -262,7 +247,7 @@ mod tests {
         let p = plan_for(json!({"authors": [alice], "kinds": [1]}));
         assert_eq!(p.keys[0].len(), 34);
         assert!(p.exact);
-        assert!(plan_for(json!({"since": 5})).by_created);
+        assert_eq!(plan_for(json!({"since": 5})).keys, [CREATED]);
     }
 
     #[test]

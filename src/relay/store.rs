@@ -12,8 +12,8 @@
 //! | table           | key                          | value                  |
 //! |-----------------|------------------------------|------------------------|
 //! | `events`        | seq (native u64)             | record                 |
-//! | `ids`           | id                           | seq (u64 BE)           |
-//! | `created`       | stamp                        | —                      |
+//! | `ids`           | id prefix (8 bytes)          | seqs (u64 BE)          |
+//! | `created`       | `CREATED`                    | stamps                 |
 //! | `kinds`         | kind (u16 BE)                | stamps                 |
 //! | `authors`       | pubkey                       | stamps                 |
 //! | `author_kinds`  | pubkey ‖ kind                | stamps                 |
@@ -23,6 +23,11 @@
 //! | `deleted_addrs` | address                      | created_at (u32 BE)    |
 //! | `expirations`   | expiration (u32 BE) ‖ seq    | —                      |
 //! | `meta`          | name                         | value                  |
+//!
+//! `ids` is keyed by a prefix of the id, a quarter its size; the record has
+//! the whole id, so a lookup checks there, and the rare prefix shared by two
+//! ids just means reading both records. `created` files every stamp under
+//! one key, packed like the other indexes.
 //!
 //! Tag values are indexed in [`record::tag_value`] form; an *address* is
 //! pubkey ‖ kind ‖ the `d` tag in that form (always empty for replaceable
@@ -51,6 +56,12 @@ pub const MAX_INDEXED_TAG: usize = 256;
 
 /// Longer `d` tags are hashed in addresses, to fit in a key.
 const MAX_ADDRESS_D: usize = 256;
+
+/// The one key of the `created` table.
+pub const CREATED: &[u8] = &[0];
+
+/// The bytes of an id the `ids` table is keyed by.
+const ID_PREFIX: usize = 8;
 
 /// How many expired events one sweep removes, so it never holds the writer
 /// long.
@@ -112,8 +123,8 @@ impl Store {
         let env = Env::open(dir, map_size, 16, 1024).with_context(|| format!("Could not open the relay database at {}", dir.display()))?;
         let tables = Tables {
             events: env.create_db("events", DbFlags::INTEGER_KEY)?,
-            ids: env.create_db("ids", DbFlags::PLAIN)?,
-            created: env.create_db("created", DbFlags::PLAIN)?,
+            ids: env.create_db("ids", DbFlags::DUP_FIXED)?,
+            created: env.create_db("created", DbFlags::DUP_FIXED)?,
             kinds: env.create_db("kinds", DbFlags::DUP_FIXED)?,
             authors: env.create_db("authors", DbFlags::DUP_FIXED)?,
             author_kinds: env.create_db("author_kinds", DbFlags::DUP_FIXED)?,
@@ -137,6 +148,11 @@ impl Store {
         Ok(Store { env, tables })
     }
 
+    #[cfg(test)]
+    pub fn copy_compact(&self, path: &Path) -> Result<()> {
+        self.env.copy_compact(path)
+    }
+
     pub fn read(&self) -> Result<RoTxn<'_>> {
         self.env.read_txn()
     }
@@ -152,11 +168,20 @@ impl Store {
     }
 
     pub fn contains(&self, txn: &Txn, id: &[u8; 32]) -> Result<bool> {
-        Ok(txn.get(self.tables.ids, id)?.is_some())
+        Ok(self.seq_of(txn, id)?.is_some())
     }
 
     pub fn seq_of(&self, txn: &Txn, id: &[u8; 32]) -> Result<Option<u64>> {
-        Ok(txn.get(self.tables.ids, id)?.map(|v| u64::from_be_bytes(v.try_into().unwrap_or_default())))
+        let mut cursor = txn.cursor(self.tables.ids)?;
+        let mut entry = cursor.set(&id[..ID_PREFIX])?;
+        while let Some((_, value)) = entry {
+            let seq = u64::from_be_bytes(value.try_into().unwrap_or_default());
+            if self.load(txn, seq)?.is_some_and(|view| view.id() == id) {
+                return Ok(Some(seq));
+            }
+            entry = cursor.next_dup()?;
+        }
+        Ok(None)
     }
 
     pub fn load<'t>(&self, txn: &'t Txn, seq: u64) -> Result<Option<EventView<'t>>> {
@@ -212,8 +237,8 @@ impl Store {
         assert!(seq <= MAX_SEQ, "the relay has run out of sequence numbers");
         let stamp = stamp(created_at, seq);
         txn.put(t.events, &seq.to_ne_bytes(), record)?;
-        txn.put(t.ids, id, &seq.to_be_bytes())?;
-        txn.put(t.created, &stamp, &[])?;
+        txn.put_dup(t.ids, &id[..ID_PREFIX], &seq.to_be_bytes())?;
+        txn.put_dup(t.created, CREATED, &stamp)?;
         for (db, key) in self.index_keys(&view) {
             txn.put_dup(db, &key, &stamp)?;
         }
@@ -312,7 +337,7 @@ impl Store {
         Ok(txn.get(self.tables.replaceable, address)?.map(|v| u64::from_be_bytes(v.try_into().unwrap_or_default())))
     }
 
-    /// Every (index, key) an event is filed under, besides `ids` and
+    /// Every (index, key) an event's stamp is filed under, besides
     /// `created`. Each at most once, since a stamp is only stored once per
     /// key anyway.
     fn index_keys(&self, view: &EventView) -> Vec<(Db, Vec<u8>)> {
@@ -352,8 +377,8 @@ impl Store {
         if let Some(expiration) = view.expiration() {
             txn.del(t.expirations, &expiration_key(expiration, seq), None)?;
         }
-        txn.del(t.created, &stamp, None)?;
-        txn.del(t.ids, view.id(), None)?;
+        txn.del(t.created, CREATED, Some(&stamp))?;
+        txn.del(t.ids, &view.id()[..ID_PREFIX], Some(&seq.to_be_bytes()))?;
         txn.del(t.events, &seq.to_ne_bytes(), None)?;
         Ok(true)
     }
@@ -605,6 +630,55 @@ pub mod tests {
         assert_eq!(store.sweep_expired(&mut txn, 1000).unwrap(), 1);
         txn.commit().unwrap();
         assert!(!has(&store, &soon) && has(&store, &later) && has(&store, &never));
+    }
+
+    /// How big the database is, compacted, against the events' JSON. Slow,
+    /// so run by hand: `cargo test --release disk_usage -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn disk_usage() {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        let (_dir, store) = open_sized(1 << 32);
+        let mut rng = StdRng::seed_from_u64(1);
+        let secrets: Vec<String> = (1..=500u32).map(|n| format!("{n:064x}")).collect();
+        let people: Vec<String> = secrets.iter().map(|s| public_key(s)).collect();
+        let mut ids: Vec<String> = Vec::new();
+        let (mut json, mut count) = (0usize, 0usize);
+        let mut txn = store.write().unwrap();
+        for i in 0..100_000u32 {
+            // A typical feed: notes, replies, and reactions, mentioning people.
+            let mut event_tags = Vec::new();
+            let kind = if i % 3 == 0 && !ids.is_empty() { 7 } else { 1 };
+            if !ids.is_empty() && (kind == 7 || rng.random_bool(0.4)) {
+                event_tags.push(vec!["e".into(), ids[rng.random_range(0..ids.len())].clone()]);
+            }
+            for _ in 0..rng.random_range(0..3) {
+                event_tags.push(vec!["p".into(), people[rng.random_range(0..people.len())].clone()]);
+            }
+            let content: String = if kind == 7 { "+".into() } else { (0..rng.random_range(20..280)).map(|_| rng.random_range('a'..='z')).collect() };
+            let event = Event::sign(&secrets[rng.random_range(0..secrets.len())], 1_700_000_000 + i64::from(i), kind, event_tags, &content);
+            json += serde_json::to_string(&event).unwrap().len();
+            store.insert(&mut txn, &record::encode(&event)).unwrap();
+            ids.push(event.id);
+            count += 1;
+            if count % 10_000 == 0 {
+                txn.commit().unwrap();
+                txn = store.write().unwrap();
+            }
+        }
+        txn.commit().unwrap();
+        let compact = tempfile::tempdir().unwrap();
+        store.copy_compact(compact.path()).unwrap();
+        let disk = std::fs::metadata(compact.path().join("data.mdb")).unwrap().len() as usize;
+        println!("{count} events: {json} bytes of JSON, {disk} bytes on disk ({:.2}x), {} per event", disk as f64 / json as f64, disk / count);
+    }
+
+    fn open_sized(map_size: usize) -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path(), map_size).unwrap();
+        (dir, store)
     }
 
     #[test]
