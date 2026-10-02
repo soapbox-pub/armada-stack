@@ -26,13 +26,15 @@ const SYSTEM_STORAGE_DIR: &str = "/var/lib/armada";
 /// Armada's official nsite, published by Team Soapbox.
 pub const DEFAULT_NSITE: &str = "naddr1qvzqqqyf8qpzq7q6z5ns2hm5c8msyv83qwzxpxe52j8c4d4q5m92wsp9sflelkh9qqrxzundv9jxz0nw9gl";
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Where every service is served from. They share one origin: the web
     /// app has the paths, the relay WebSocket upgrades and NIP-11 requests
     /// to `/`, and the Blossom server its own endpoints (see [`crate::routes`]).
-    pub listen: SocketAddr,
+    /// Unset, `127.0.0.1:8080` for a reverse proxy to reach, or `[::]:443`
+    /// when armada serves TLS itself; see [`Config::listen`].
+    pub listen: Option<SocketAddr>,
     /// The origin clients reach armada at, like `https://armada.example.com`:
     /// what Blossom blob URLs are built on, and the domain `server` tags in
     /// Blossom tokens must name. Unset, it's taken from each request's `Host`
@@ -52,6 +54,26 @@ pub struct Config {
     pub relay: RelayConfig,
     pub blossom: BlossomConfig,
     pub av: AvConfig,
+    pub tls: TlsConfig,
+}
+
+/// HTTPS served by armada itself, with a certificate it gets and renews
+/// over ACME, so no reverse proxy is needed in front.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TlsConfig {
+    /// Get a certificate for `public_url`'s domain, renew it, and serve
+    /// HTTPS on `listen`. Off, armada serves plain HTTP for a proxy to front.
+    pub acme: bool,
+    /// An address the CA may write to about the certificate, if any.
+    pub email: Option<String>,
+    /// The ACME directory to get certificates from: Let's Encrypt's by
+    /// default, or its staging one to try things out without its rate limits.
+    pub directory: String,
+    /// Also listen on `http_listen`, redirecting everything to HTTPS and
+    /// answering the CA's HTTP-01 challenges.
+    pub redirect_http: bool,
+    pub http_listen: SocketAddr,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -150,17 +172,17 @@ pub struct AvNode {
 /// The longest an AV token may last. It's a bearer credential for a seat.
 pub const MAX_AV_TOKEN_TTL: u64 = 24 * 60 * 60;
 
-impl Default for Config {
+/// Let's Encrypt's production directory.
+pub const LETS_ENCRYPT: &str = "https://acme-v02.api.letsencrypt.org/directory";
+
+impl Default for TlsConfig {
     fn default() -> Self {
-        Config {
-            listen: ([127, 0, 0, 1], 8080).into(),
-            public_url: None,
-            storage_dir: None,
-            trust_proxy: None,
-            web: WebConfig::default(),
-            relay: RelayConfig::default(),
-            blossom: BlossomConfig::default(),
-            av: AvConfig::default(),
+        TlsConfig {
+            acme: false,
+            email: None,
+            directory: LETS_ENCRYPT.into(),
+            redirect_http: true,
+            http_listen: (std::net::Ipv6Addr::UNSPECIFIED, 80).into(),
         }
     }
 }
@@ -316,9 +338,27 @@ impl Config {
         Ok(Some(url))
     }
 
+    /// Where everything is served from; see [`Config::listen`].
+    pub fn listen(&self) -> SocketAddr {
+        match self.listen {
+            Some(listen) => listen,
+            None if self.tls.acme => (std::net::Ipv6Addr::UNSPECIFIED, 443).into(),
+            None => ([127, 0, 0, 1], 8080).into(),
+        }
+    }
+
+    /// The domain to get a certificate for, if armada serves TLS itself.
+    /// Checked when the config is loaded.
+    pub fn acme_domain(&self) -> Option<String> {
+        if !self.tls.acme {
+            return None;
+        }
+        self.public_url().ok().flatten().and_then(|url| url.domain().map(str::to_string))
+    }
+
     /// Whether to believe `X-Forwarded-For`; see [`Config::trust_proxy`].
     pub fn trusts_proxy(&self) -> bool {
-        self.trust_proxy.unwrap_or_else(|| self.listen.ip().is_loopback())
+        self.trust_proxy.unwrap_or_else(|| self.listen().ip().is_loopback())
     }
 
     #[cfg(test)]
@@ -357,6 +397,36 @@ impl Config {
             bail!("blossom.max_blob_size is smaller than any encrypted blob could be.");
         }
         self.validate_av()?;
+        self.validate_tls()?;
+        Ok(())
+    }
+
+    fn validate_tls(&self) -> Result<()> {
+        let tls = &self.tls;
+        if !tls.acme {
+            return Ok(());
+        }
+        // The certificate is for the domain clients reach armada at, and
+        // nothing else can say what that is.
+        let Some(url) = self.public_url()? else {
+            bail!("public_url has to be set for tls.acme: it names the domain to get a certificate for.");
+        };
+        if url.scheme() != "https" || url.port().is_some() {
+            bail!("public_url has to be https:// on the default port for tls.acme: {url}");
+        }
+        if url.domain().is_none_or(|domain| !domain.contains('.')) {
+            bail!("public_url has to be a public domain name for tls.acme, not an IP address: {url}");
+        }
+        let directory = url::Url::parse(&tls.directory).with_context(|| format!("tls.directory: not a valid URL: {}", tls.directory))?;
+        if directory.scheme() != "https" {
+            bail!("tls.directory has to be an https:// URL: {}", tls.directory);
+        }
+        if tls.email.as_deref().is_some_and(|email| !email.contains('@') || email.contains(char::is_whitespace)) {
+            bail!("tls.email is not an email address.");
+        }
+        if tls.redirect_http && tls.http_listen.port() == self.listen().port() && tls.http_listen.ip() == self.listen().ip() {
+            bail!("tls.http_listen and listen can't be the same address.");
+        }
         Ok(())
     }
 
@@ -464,7 +534,8 @@ mod tests {
     #[test]
     fn defaults() {
         let config = Config::parse("").unwrap();
-        assert_eq!(config.listen.port(), 8080);
+        assert_eq!(config.listen().port(), 8080);
+        assert!(!config.tls.acme);
         assert_eq!(config.public_url().unwrap(), None);
         assert!(config.web.auto_update);
         assert_eq!(config.web.relay_urls(), ["wss://relay.ditto.pub", "wss://relay.dreamith.to"]);
@@ -490,7 +561,7 @@ mod tests {
         assert_eq!(config.storage_dir.as_deref(), Some(Path::new("/srv/armada")));
         assert!(!config.web.auto_update);
         assert_eq!(config.web.relay_urls(), ["ws://localhost:7777"]);
-        assert_eq!(config.listen.port(), 80);
+        assert_eq!(config.listen().port(), 80);
     }
 
     #[test]
@@ -551,6 +622,37 @@ mod tests {
         assert!(!Config::parse("listen = \"0.0.0.0:8080\"").unwrap().trusts_proxy());
         assert!(Config::parse("listen = \"0.0.0.0:8080\"\ntrust_proxy = true").unwrap().trusts_proxy());
         assert!(!Config::parse("trust_proxy = false").unwrap().trusts_proxy());
+    }
+
+    #[test]
+    fn the_example_is_the_defaults() {
+        let example = Config::parse(include_str!("../armada.example.toml")).unwrap();
+        assert_eq!(format!("{example:?}"), format!("{:?}", Config::default()));
+    }
+
+    #[test]
+    fn tls() {
+        let config = Config::parse("public_url = \"https://armada.example.com\"\n[tls]\nacme = true").unwrap();
+        assert_eq!(config.acme_domain().as_deref(), Some("armada.example.com"));
+        assert_eq!(config.listen(), "[::]:443".parse().unwrap());
+        assert_eq!(config.tls.http_listen, "[::]:80".parse().unwrap());
+        // Reached directly, so nothing forwarded is believed.
+        assert!(!config.trusts_proxy());
+        assert_eq!(Config::parse("public_url = \"https://armada.example.com\"").unwrap().acme_domain(), None);
+
+        let with = |url: &str, extra: &str| Config::parse(&format!("public_url = \"{url}\"\n[tls]\nacme = true\n{extra}"));
+        assert!(Config::parse("[tls]\nacme = true").is_err());
+        assert!(with("http://armada.example.com", "").is_err());
+        assert!(with("https://armada.example.com:8443", "").is_err());
+        assert!(with("https://203.0.113.5", "").is_err());
+        assert!(with("https://localhost", "").is_err());
+        assert!(with("https://a.example.com", "directory = \"http://acme.example.com/dir\"").is_err());
+        assert!(with("https://a.example.com", "email = \"nope\"").is_err());
+        assert!(with("https://a.example.com", "email = \"ops@example.com\"").is_ok());
+        assert!(with("https://a.example.com", "http_listen = \"[::]:443\"").is_err());
+        assert!(with("https://a.example.com", "http_listen = \"[::]:443\"\nredirect_http = false").is_ok());
+        let config = Config::parse("listen = \"0.0.0.0:8443\"\npublic_url = \"https://a.example.com\"\n[tls]\nacme = true").unwrap();
+        assert_eq!(config.listen().port(), 8443);
     }
 
     fn user(home: &str) -> Environment {

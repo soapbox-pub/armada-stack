@@ -13,10 +13,12 @@
 
 # Where everything is served from, on one origin: the web app at its own
 # paths, the relay at / (WebSocket upgrades and NIP-11 requests), and the
-# Blossom server at /upload, /mirror and /<sha256>. Point one reverse proxy
-# at it, and use https://armada.example.com/ as both the relay (wss://) and
-# the Blossom server.
-listen = "127.0.0.1:8080"
+# Blossom server at /upload, /mirror and /<sha256>. Use
+# https://armada.example.com/ as both the relay (wss://) and the Blossom
+# server. Either point a reverse proxy at it, or turn on [tls] below to
+# serve HTTPS directly. Defaults to 127.0.0.1:8080, or to [::]:443 with
+# [tls] on.
+# listen = "127.0.0.1:8080"
 # The origin clients reach armada at. Blossom blob URLs are built on it, and
 # Blossom tokens scoped with `server` tags must name its domain. Unset, it's
 # taken from each request's Host and X-Forwarded-Proto headers.
@@ -25,6 +27,26 @@ listen = "127.0.0.1:8080"
 # X-Forwarded-For entry, the one the proxy added. On by default when listen
 # is a loopback address, since only something on this box can reach it then.
 # trust_proxy = true
+
+# HTTPS without a reverse proxy: armada gets a certificate for public_url's
+# domain from Let's Encrypt, renews it, and serves on listen ([::]:443 by
+# default). The domain's DNS has to point at this box, and ports 443 and 80
+# be reachable from the internet. Ports below 1024 need root, or
+# CAP_NET_BIND_SERVICE (AmbientCapabilities=CAP_NET_BIND_SERVICE under
+# systemd). The certificate and ACME account are kept in storage_dir/tls/.
+[tls]
+# Needs public_url, as https:// on the default port.
+acme = false
+# An address Let's Encrypt may write to about the certificate.
+# email = "ops@example.com"
+# The ACME directory. Let's Encrypt's staging one,
+# https://acme-staging-v02.api.letsencrypt.org/directory, issues untrusted
+# certificates but has far looser rate limits: try a new setup against it.
+directory = "https://acme-v02.api.letsencrypt.org/directory"
+# Also listen on http_listen, redirecting to HTTPS and answering the CA's
+# HTTP-01 challenges if its TLS-ALPN-01 ones, on listen, don't get through.
+redirect_http = true
+http_listen = "[::]:80"
 
 [web]
 # The nsite to serve: an naddr, or an npub for that author's root site.

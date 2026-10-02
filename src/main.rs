@@ -14,6 +14,7 @@ mod nsite;
 mod relay;
 mod routes;
 mod storage;
+mod tls;
 mod util;
 mod web;
 
@@ -60,8 +61,17 @@ async fn main() -> Result<()> {
 
     // Bound before anything starts, so a port already in use stops at once
     // rather than after the site has started downloading.
-    let listener = TcpListener::bind(config.listen).await.with_context(|| format!("Could not listen on {}", config.listen))?;
-    tracing::info!(address = %listener.local_addr()?, "listening");
+    let tls = tls::Tls::open(&config, &storage)?;
+    let listener = bind(config.listen()).await?;
+    tracing::info!(address = %listener.local_addr()?, tls = tls.is_some(), "listening");
+    let redirect_listener = match &tls {
+        Some(_) if config.tls.redirect_http => {
+            let listener = bind(config.tls.http_listen).await?;
+            tracing::info!(address = %listener.local_addr()?, "redirecting to HTTPS");
+            Some(listener)
+        }
+        _ => None,
+    };
 
     let cancel = CancellationToken::new();
     let nostr = Arc::new(NostrService::new(config.web.relay_urls()));
@@ -71,7 +81,7 @@ async fn main() -> Result<()> {
     let av = av::Av::open(&config, &cancel)?;
     if av.is_some() {
         tracing::info!(nodes = config.av.nodes.len(), "offering AV");
-        if config.trust_proxy == Some(true) && config.listen.ip().is_unspecified() {
+        if config.trust_proxy == Some(true) && config.listen().ip().is_unspecified() {
             tracing::warn!("trust_proxy is on while listening on every interface: anyone reaching armada directly can forge X-Forwarded-For.");
         }
     }
@@ -87,12 +97,38 @@ async fn main() -> Result<()> {
 
     let (web, sync) = web.start(cancel.clone());
     let router = routes::router(routes::Services { web, relay, blossom, av });
-    let served = axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(cancel.clone().cancelled_owned()).await;
+    let served = match tls {
+        Some(tls) => {
+            if let Some(redirect_listener) = redirect_listener {
+                let redirect = tls.redirect_router();
+                let shutdown = cancel.clone().cancelled_owned();
+                tokio::spawn(async move {
+                    if let Err(error) = axum::serve(redirect_listener, redirect).with_graceful_shutdown(shutdown).await {
+                        tracing::error!("serving the HTTPS redirect: {error}");
+                    }
+                });
+            }
+            let config = tls.server_config();
+            tls.start(cancel.clone());
+            tls::serve(listener, config, router, cancel.clone()).await
+        }
+        None => axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(cancel.clone().cancelled_owned()).await,
+    };
     // However serving ended, the rest stops with it.
     cancel.cancel();
     let _ = sync.await;
     served.context("serving")?;
     Ok(())
+}
+
+async fn bind(address: SocketAddr) -> Result<TcpListener> {
+    TcpListener::bind(address).await.with_context(|| {
+        if address.port() < 1024 {
+            format!("Could not listen on {address}. Ports below 1024 need root, or CAP_NET_BIND_SERVICE (AmbientCapabilities=CAP_NET_BIND_SERVICE under systemd).")
+        } else {
+            format!("Could not listen on {address}")
+        }
+    })
 }
 
 /// Human-readable logs by default; `LOG_FORMAT=json` for one JSON object per
