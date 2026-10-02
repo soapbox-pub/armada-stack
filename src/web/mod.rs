@@ -9,7 +9,7 @@ mod csp;
 mod db;
 #[cfg(test)]
 mod e2e;
-mod serve;
+pub mod serve;
 mod site;
 mod sync;
 

@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use bytes::Bytes;
+use futures_util::{Stream, StreamExt};
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
@@ -109,6 +110,10 @@ pub enum DownloadReason {
     HashMismatch,
     Network,
     Blocked,
+    /// An [`Inspector`] refused the bytes.
+    Rejected,
+    /// The store itself failed: a temp file couldn't be written or renamed.
+    Storage,
 }
 
 impl DownloadReason {
@@ -119,7 +124,45 @@ impl DownloadReason {
             DownloadReason::HashMismatch => "hash_mismatch",
             DownloadReason::Network => "network",
             DownloadReason::Blocked => "blocked",
+            DownloadReason::Rejected => "rejected",
+            DownloadReason::Storage => "storage",
         }
+    }
+}
+
+/// Looks at a blob's bytes as they stream into the store, and may refuse
+/// them. A refusal stops the transfer and leaves nothing behind.
+pub trait Inspector: Send {
+    /// Each chunk, in order, before it is written.
+    fn chunk(&mut self, bytes: &[u8]) -> Result<(), String>;
+    /// Called once every byte has arrived, before the blob is committed.
+    fn finish(&mut self) -> Result<(), String>;
+}
+
+/// The inspector that accepts everything.
+struct AcceptAll;
+
+impl Inspector for AcceptAll {
+    fn chunk(&mut self, _: &[u8]) -> Result<(), String> {
+        Ok(())
+    }
+    fn finish(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// A blob written, hashed, and inspected, but not yet in the store. Dropping
+/// it discards the bytes; [`Staged::commit`] moves them into place.
+pub struct Staged {
+    store: BlobStore,
+    tmp: TempFile,
+    pub sha256: BlobHash,
+    pub size: u64,
+}
+
+impl Staged {
+    pub fn commit(self) -> Result<()> {
+        self.store.commit(self.tmp, self.sha256)
     }
 }
 
@@ -326,7 +369,23 @@ impl BlobStore {
         max_size: u64,
         cancel: &CancellationToken,
     ) -> Result<u64, DownloadError> {
-        let work = self.download_inner(url, sha256, max_size);
+        let staged = self.download_staged(url, sha256, max_size, &mut AcceptAll, cancel).await?;
+        let size = staged.size;
+        staged.commit().map_err(|e| fail(e.to_string(), DownloadReason::Storage, None))?;
+        Ok(size)
+    }
+
+    /// [`BlobStore::download`], with every byte shown to `inspector`, and
+    /// the blob left staged for the caller to commit.
+    pub async fn download_staged(
+        &self,
+        url: &str,
+        sha256: BlobHash,
+        max_size: u64,
+        inspector: &mut dyn Inspector,
+        cancel: &CancellationToken,
+    ) -> Result<Staged, DownloadError> {
+        let work = self.download_inner(url, sha256, max_size, inspector);
         tokio::select! {
             result = tokio::time::timeout(DOWNLOAD_TIMEOUT, work) => match result {
                 Ok(result) => result,
@@ -336,8 +395,14 @@ impl BlobStore {
         }
     }
 
-    async fn download_inner(&self, url: &str, sha256: BlobHash, max_size: u64) -> Result<u64, DownloadError> {
-        let mut response = self.request(url).await?;
+    async fn download_inner(
+        &self,
+        url: &str,
+        sha256: BlobHash,
+        max_size: u64,
+        inspector: &mut dyn Inspector,
+    ) -> Result<Staged, DownloadError> {
+        let response = self.request(url).await?;
 
         let status = response.status().as_u16();
         if !response.status().is_success() {
@@ -351,46 +416,62 @@ impl BlobStore {
             return Err(fail(format!("{declared} bytes exceeds the {max_size} byte limit"), DownloadReason::TooLarge, None));
         }
 
-        let tmp = self.temp_file().map_err(|e| fail(e.to_string(), DownloadReason::Network, None))?;
-        let result = async {
-            let mut file = tokio::io::BufWriter::with_capacity(
-                256 * 1024,
-                tokio::fs::File::create(&tmp).await.map_err(|e| fail(e.to_string(), DownloadReason::Network, None))?,
-            );
-            let mut hash = Sha256::new();
-            let mut size: u64 = 0;
+        self.ingest(response.bytes_stream(), Some(sha256), max_size, inspector).await
+    }
 
-            loop {
-                let chunk = response.chunk().await.map_err(|e| fail(error_chain(&e), DownloadReason::Network, None))?;
-                let Some(chunk) = chunk else { break };
-                size += chunk.len() as u64;
-                // Servers may omit content-length, so enforce the cap mid-stream too.
-                if size > max_size {
-                    return Err(fail(format!("Body exceeds the {max_size} byte limit"), DownloadReason::TooLarge, None));
-                }
-                hash.update(&chunk);
-                file.write_all(&chunk).await.map_err(|e| fail(e.to_string(), DownloadReason::Network, None))?;
-            }
-            file.flush().await.map_err(|e| fail(e.to_string(), DownloadReason::Network, None))?;
+    /// Stream a blob into a staged temp file: hashed, capped at `max_size`,
+    /// shown to `inspector`, and checked against `expected` when given.
+    pub async fn ingest<E: std::error::Error>(
+        &self,
+        body: impl Stream<Item = Result<Bytes, E>>,
+        expected: Option<BlobHash>,
+        max_size: u64,
+        inspector: &mut dyn Inspector,
+    ) -> Result<Staged, DownloadError> {
+        let storage = |e: std::io::Error| fail(e.to_string(), DownloadReason::Storage, None);
+        let tmp = self.temp_file().map_err(|e| fail(e.to_string(), DownloadReason::Storage, None))?;
+        let mut file = tokio::io::BufWriter::with_capacity(256 * 1024, tokio::fs::File::create(&tmp).await.map_err(storage)?);
+        let mut hash = Sha256::new();
+        let mut size: u64 = 0;
 
-            let digest = BlobHash::from_bytes(hash.finalize().into());
-            if digest != sha256 {
-                return Err(fail(
-                    format!("Expected {sha256}, server returned {digest}"),
-                    DownloadReason::HashMismatch,
-                    None,
-                ));
+        let mut body = std::pin::pin!(body);
+        while let Some(chunk) = body.next().await {
+            let chunk = chunk.map_err(|e| fail(error_chain(&e), DownloadReason::Network, None))?;
+            size += chunk.len() as u64;
+            // Senders may omit content-length, so enforce the cap mid-stream too.
+            if size > max_size {
+                return Err(fail(format!("Body exceeds the {max_size} byte limit"), DownloadReason::TooLarge, None));
             }
-            Ok(size)
+            inspector.chunk(&chunk).map_err(|reason| fail(reason, DownloadReason::Rejected, None))?;
+            hash.update(&chunk);
+            file.write_all(&chunk).await.map_err(storage)?;
         }
-        .await;
+        file.flush().await.map_err(storage)?;
+        inspector.finish().map_err(|reason| fail(reason, DownloadReason::Rejected, None))?;
 
-        match result {
-            Ok(size) => {
-                self.commit(tmp, sha256).map_err(|e| fail(e.to_string(), DownloadReason::Network, None))?;
-                Ok(size)
+        let digest = BlobHash::from_bytes(hash.finalize().into());
+        if let Some(expected) = expected
+            && digest != expected
+        {
+            return Err(fail(format!("Expected {expected}, got {digest}"), DownloadReason::HashMismatch, None));
+        }
+        Ok(Staged { store: self.clone(), tmp, sha256: digest, size })
+    }
+
+    /// Delete a blob and its compressed copies, and forget any mapping of
+    /// them, so nothing serves them again.
+    pub fn remove(&self, sha256: BlobHash) -> Result<()> {
+        {
+            let mut mapped = self.inner.mapped.lock();
+            mapped.pop(&(sha256, None));
+            for encoding in Encoding::ALL {
+                mapped.pop(&(sha256, Some(encoding)));
+                let _ = std::fs::remove_file(self.variant_path(sha256, encoding));
             }
-            Err(error) => Err(error),
+        }
+        match std::fs::remove_file(self.path(sha256)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
+            _ => Ok(()),
         }
     }
 

@@ -63,6 +63,7 @@ async fn main() -> Result<()> {
 
     let nostr = Arc::new(NostrService::new(config.web.relay_urls()));
     let web = web::Web::open(&config.web, &storage, nostr).await?;
+    let blossom = blossom::Blossom::open(&config.blossom, &storage)?;
 
     let cancel = CancellationToken::new();
     tokio::spawn({
@@ -77,7 +78,7 @@ async fn main() -> Result<()> {
     let (web, relay, blossom) = tokio::join!(
         stop_all_on_exit(web.run(web_listener, cancel.clone()), &cancel),
         stop_all_on_exit(relay::run(relay_listener, cancel.clone()), &cancel),
-        stop_all_on_exit(blossom::run(blossom_listener, cancel.clone()), &cancel),
+        stop_all_on_exit(blossom.run(blossom_listener, cancel.clone()), &cancel),
     );
     web.context("web")?;
     relay.context("relay")?;

@@ -23,6 +23,10 @@ impl BlobHash {
         BlobHash(bytes)
     }
 
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
     /// Exactly 64 hex digits, in either case.
     pub fn parse(hex: &str) -> Option<BlobHash> {
         let mut bytes = [0u8; 32];

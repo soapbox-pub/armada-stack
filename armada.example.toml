@@ -5,7 +5,8 @@
 #   /etc/armada/armada.toml
 
 # Where every service keeps its data: web/, relay/ and blossom/ each hold an
-# LMDB database, and blobs/ the files they share. A relative path is relative
+# LMDB database, blobs/ the site's files, and blossom/blobs/ the Blossom
+# server's uploads. A relative path is relative
 # to this file's directory. Defaults to /var/lib/armada when run as root, and
 # to $XDG_DATA_HOME/armada (~/.local/share/armada) for anyone else.
 # storage_dir = "/var/lib/armada"
@@ -31,5 +32,14 @@ max_site_size = 1073741824
 [relay]
 listen = "127.0.0.1:7777"
 
+# A Blossom server that only accepts encrypted blobs, and only ever serves
+# them back as application/octet-stream. Anyone with a valid upload token
+# may upload.
 [blossom]
 listen = "127.0.0.1:24242"
+# The origin clients reach this server at. Blob URLs are built on it, and
+# tokens scoped with `server` tags must name its domain. Unset, it's taken
+# from each request's Host and X-Forwarded-Proto headers.
+# public_url = "https://blossom.example.com"
+# Bytes one blob may be.
+max_blob_size = 104857600
