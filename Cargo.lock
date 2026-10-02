@@ -120,6 +120,7 @@ dependencies = [
  "http",
  "http-body-util",
  "httpdate",
+ "libc",
  "lru",
  "memmap2",
  "parking_lot",

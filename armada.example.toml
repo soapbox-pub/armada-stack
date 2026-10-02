@@ -1,9 +1,14 @@
 # armada configuration. Every setting is optional; these are the defaults.
-# Read from /etc/armada/armada.toml, or the file passed with --config.
+#
+# Read from the file passed with --config, or else the first that exists of:
+#   $XDG_CONFIG_HOME/armada/armada.toml  (~/.config/armada/armada.toml)
+#   /etc/armada/armada.toml
 
 # Where every service keeps its data: web/, relay/ and blossom/ each hold an
-# LMDB database, and blobs/ the files they share.
-storage_dir = "/var/lib/armada"
+# LMDB database, and blobs/ the files they share. A relative path is relative
+# to this file's directory. Defaults to /var/lib/armada when run as root, and
+# to $XDG_DATA_HOME/armada (~/.local/share/armada) for anyone else.
+# storage_dir = "/var/lib/armada"
 
 [web]
 listen = "127.0.0.1:8080"

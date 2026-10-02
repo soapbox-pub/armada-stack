@@ -24,14 +24,16 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
-use config::Config;
+use config::{Config, Environment};
 use nostr::service::NostrService;
 use storage::Storage;
 
 #[derive(Parser)]
 #[command(name = "armada", version, about = "Self-host Armada: its web app, a relay, and a Blossom server")]
 struct Cli {
-    /// Configuration file [default: /etc/armada/armada.toml, if it exists]
+    /// Configuration file [default: the first that exists of
+    /// $XDG_CONFIG_HOME/armada/armada.toml (~/.config/armada/armada.toml)
+    /// and /etc/armada/armada.toml]
     #[arg(short, long, value_name = "PATH")]
     config: Option<PathBuf>,
 }
@@ -45,8 +47,12 @@ async fn main() -> Result<()> {
     // Blossom servers are both reached over it.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let config = Config::load(cli.config.as_deref())?;
-    let storage = Storage::open(&config.storage_dir)?;
+    let config::Loaded { config, source, storage_dir } = Config::load(cli.config.as_deref(), &Environment::current())?;
+    match &source {
+        Some(path) => tracing::info!(config = %path.display(), "config loaded"),
+        None => tracing::info!("no config file found; using the defaults"),
+    }
+    let storage = Storage::open(&storage_dir)?;
     tracing::info!(storage = %storage.root().display(), "storage opened");
 
     // Bound before anything starts, so a port already in use stops the whole

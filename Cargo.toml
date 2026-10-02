@@ -23,6 +23,7 @@ heed = { version = "0.22", default-features = false, features = ["serde-json"] }
 hex = "0.4"
 http = "1"
 httpdate = "1"
+libc = "0.2"
 lru = "0.12"
 memmap2 = "0.9"
 parking_lot = "0.12"
