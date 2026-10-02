@@ -1,0 +1,50 @@
+# A LiveKit server for armada's AV broker to place calls on. Run it with its
+# keys in the environment, so no secret lives in this file:
+#
+#   LIVEKIT_KEYS="APIxxxxxxxxxxxx: <secret>" livekit-server --config livekit.yaml
+#
+# and list it in armada.toml under [[av.nodes]] with the same key and secret.
+# Run it on the host network: media is latency-sensitive UDP, and Docker's
+# port mapping adds a cost to every packet.
+port: 7880
+
+# Signaling and the server API on loopback only. The reverse proxy sends
+# wss://<domain>/rtc here, and armada checks health over 127.0.0.1, so
+# nothing needs 7880 from outside. Don't route /twirp publicly: nothing
+# needs it, and it would only offer the API credentials up for guessing.
+# Media binds its own sockets, below, and has to be reachable.
+bind_addresses:
+  - "127.0.0.1"
+
+rtc:
+  # ICE over TCP, for clients on networks that block UDP. Open 7881/tcp.
+  tcp_port: 7881
+  # Every participant's media on one UDP port. A port range costs a port per
+  # participant; this way a node is bounded by bandwidth and CPU instead.
+  # Open 7882/udp, or clients fall back to TCP and calls suffer.
+  udp_port: 7882
+  use_external_ip: true
+
+# TURN over TLS reaches clients whose networks allow nothing else — the usual
+# reason someone can chat but keeps dropping out of calls. It needs a
+# certificate LiveKit can read, so it ships off.
+# turn:
+#   enabled: true
+#   domain: turn.example.com   # must resolve to this host
+#   tls_port: 5349             # open 5349/tcp
+#   cert_file: /etc/livekit/turn.crt
+#   key_file: /etc/livekit/turn.key
+
+# Rooms are made on demand, named by a Channel's voice_key.pk (CORD-07 §1),
+# and mean nothing to the server.
+room:
+  auto_create: true
+  empty_timeout: 300
+  # 0 is unbounded, which is fine while the people calling are people you
+  # know. The broker can't cap a room itself — counting members means
+  # learning who they are — so set a real number here before opening it to
+  # strangers.
+  max_participants: 0
+
+logging:
+  level: info

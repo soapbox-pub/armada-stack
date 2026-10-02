@@ -1,6 +1,8 @@
-//! `armada`: a self-hosted Armada in one binary — its web app, a relay, and
-//! a Blossom server, all on one origin and sharing one storage directory.
+//! `armada`: a self-hosted Armada in one binary — its web app, a relay, a
+//! Blossom server, and optionally a Concord AV broker, all on one origin and
+//! sharing one storage directory.
 
+mod av;
 mod blobs;
 mod blossom;
 mod config;
@@ -15,6 +17,7 @@ mod storage;
 mod util;
 mod web;
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -29,7 +32,7 @@ use nostr::service::NostrService;
 use storage::Storage;
 
 #[derive(Parser)]
-#[command(name = "armada", version, about = "Self-host Armada: its web app, a relay, and a Blossom server")]
+#[command(name = "armada", version, about = "Self-host Armada: its web app, a relay, a Blossom server, and a Concord AV broker")]
 struct Cli {
     /// Configuration file [default: the first that exists of
     /// $XDG_CONFIG_HOME/armada/armada.toml (~/.config/armada/armada.toml)
@@ -65,6 +68,13 @@ async fn main() -> Result<()> {
     let web = web::Web::open(&config.web, &storage, nostr).await?;
     let blossom = blossom::Blossom::open(&config.blossom, config.public_url()?, &storage, &cancel)?;
     let relay = relay::Relay::open(&config.relay, &storage, &cancel)?;
+    let av = av::Av::open(&config, &cancel)?;
+    if av.is_some() {
+        tracing::info!(nodes = config.av.nodes.len(), "offering AV");
+        if config.trust_proxy == Some(true) && config.listen.ip().is_unspecified() {
+            tracing::warn!("trust_proxy is on while listening on every interface: anyone reaching armada directly can forge X-Forwarded-For.");
+        }
+    }
 
     tokio::spawn({
         let cancel = cancel.clone();
@@ -76,8 +86,8 @@ async fn main() -> Result<()> {
     });
 
     let (web, sync) = web.start(cancel.clone());
-    let router = routes::router(routes::Services { web, relay, blossom });
-    let served = axum::serve(listener, router).with_graceful_shutdown(cancel.clone().cancelled_owned()).await;
+    let router = routes::router(routes::Services { web, relay, blossom, av });
+    let served = axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(cancel.clone().cancelled_owned()).await;
     // However serving ended, the rest stops with it.
     cancel.cancel();
     let _ = sync.await;

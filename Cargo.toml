@@ -3,7 +3,7 @@ name = "armada-stack"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "Self-host Armada: its web app, a relay, and a Blossom server in one binary"
+description = "Self-host Armada: its web app, a relay, a Blossom server, and a Concord AV broker in one binary"
 license = "AGPL-3.0-only"
 
 [[bin]]
@@ -22,6 +22,7 @@ flate2 = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 heed = { version = "0.22", default-features = false, features = ["serde-json"] }
 hex = "0.4"
+hmac = "0.12"
 http = "1"
 httpdate = "1"
 libc = "0.2"

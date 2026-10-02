@@ -6,7 +6,9 @@
 //! 1. A WebSocket upgrade or NIP-11 request to `/`: the relay.
 //! 2. `/upload`, `/mirror`, `/<sha256>` and Blossom's other endpoints, by
 //!    any method, CORS preflights included: the Blossom server.
-//! 3. Everything else: the web app, whose shell answers any path it lacks a
+//! 3. `/.well-known/concord/av` and beneath it: the AV broker, or a 404 if
+//!    there isn't one.
+//! 4. Everything else: the web app, whose shell answers any path it lacks a
 //!    file for — which is why it comes last.
 //!
 //! Each service sets its own response headers, so a blob keeps its sandbox
@@ -18,6 +20,7 @@ use axum::Router;
 use axum::extract::Request;
 use axum::response::{IntoResponse, Response};
 
+use crate::av::{self, Av};
 use crate::blossom::{self, Blossom};
 use crate::relay::{self, Relay};
 use crate::web::serve::SiteServer;
@@ -27,6 +30,8 @@ pub struct Services {
     pub web: Arc<SiteServer>,
     pub relay: Relay,
     pub blossom: Blossom,
+    /// Absent unless AV nodes are configured.
+    pub av: Option<Av>,
 }
 
 pub fn router(services: Services) -> Router {
@@ -42,6 +47,11 @@ async fn dispatch(services: &Services, request: Request) -> Response {
         services.relay.handle(request).await
     } else if blossom::wants(path) {
         services.blossom.handle(request).await.into_response()
+    } else if av::wants(path) {
+        match &services.av {
+            Some(av) => av.handle(request).into_response(),
+            None => av::not_offered().into_response(),
+        }
     } else {
         services.web.serve(request).await.into_response()
     }
@@ -86,7 +96,7 @@ mod tests {
         });
         let relay = Relay::open(&config.relay, &storage, &cancel).unwrap();
         let blossom = Blossom::open(&config.blossom, None, &storage, &cancel).unwrap();
-        let router = router(Services { web, relay, blossom });
+        let router = router(Services { web, relay, blossom, av: None });
         Harness { _dir: dir, router, _cancel: cancel.drop_guard() }
     }
 
@@ -154,6 +164,18 @@ mod tests {
         let (status, headers, _) = harness.send(Method::OPTIONS, "/assets/app.js", &preflight).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
         assert_eq!(headers["access-control-allow-methods"], "GET, HEAD, OPTIONS");
+    }
+
+    #[tokio::test]
+    async fn the_av_broker_is_never_the_sites() {
+        let harness = harness();
+        for path in ["/.well-known/concord/av", "/.well-known/concord/av/abc"] {
+            let (status, headers, _) = harness.send(Method::GET, path, &[]).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+            assert_eq!(headers["access-control-allow-origin"], "*");
+        }
+        let (status, _, _) = harness.send(Method::GET, "/.well-known/concord/avatar", &[]).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

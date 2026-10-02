@@ -21,6 +21,10 @@ listen = "127.0.0.1:8080"
 # Blossom tokens scoped with `server` tags must name its domain. Unset, it's
 # taken from each request's Host and X-Forwarded-Proto headers.
 # public_url = "https://armada.example.com"
+# Whether a reverse proxy sits in front, so a client's address is the last
+# X-Forwarded-For entry, the one the proxy added. On by default when listen
+# is a loopback address, since only something on this box can reach it then.
+# trust_proxy = true
 
 [web]
 # The nsite to serve: an naddr, or an npub for that author's root site.
@@ -66,3 +70,39 @@ map_size = 274877906944
 [blossom]
 # Bytes one blob may be.
 max_blob_size = 104857600
+
+# A blind Concord AV broker (CORD-07 §2): it hands out seats in voice and
+# video calls on LiveKit servers you run, at /.well-known/concord/av. Off
+# until a node is listed below; needs public_url, since clients sign their
+# requests over it. It never learns who is calling or which Community a call
+# belongs to, and the media it carries is end-to-end encrypted.
+#
+# Being blind, it's open to anyone: it's bounded by the rate limit here,
+# short-lived tokens, and LiveKit's room.max_participants. See
+# deploy/livekit.yaml for a LiveKit config to start from.
+[av]
+# Seconds a token lasts. Clients keep one for a whole call. At most 86400.
+token_ttl = 21600
+# Seconds a request's signature may be from now, either way.
+max_skew = 60
+# Seconds a request's id is remembered to refuse it a second time. At least
+# 240, and at least twice max_skew.
+replay_ttl = 240
+# Token requests one client may make a minute, by IPv4 address or IPv6 /64.
+rate_limit_per_minute = 60
+# Seconds between health checks of each node.
+health_interval = 15
+
+# One LiveKit server. List several to share calls between them: each call
+# goes to one, picked from its room's name, so they need nothing shared.
+# [[av.nodes]]
+# What clients connect to: a bare wss:// origin, never ending in /rtc, which
+# the LiveKit SDK adds itself. To serve it from armada's own domain, have
+# the reverse proxy send /rtc and /rtc/* to LiveKit.
+# url = "wss://sfu.example.com"
+# Where armada reaches its server API for health checks. Defaults to url
+# with https:// for wss://.
+# api_url = "http://127.0.0.1:7880"
+# Its credentials, from `docker run --rm livekit/livekit-server generate-keys`.
+# api_key = "APIxxxxxxxxxxxx"
+# api_secret = "..."

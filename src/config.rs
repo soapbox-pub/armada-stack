@@ -42,9 +42,16 @@ pub struct Config {
     /// own beneath this, and blobs live in one store they all use. Relative to
     /// the config file's directory; unset, [`Environment::default_storage_dir`].
     pub storage_dir: Option<PathBuf>,
+    /// Whether a reverse proxy of the operator's sits in front of armada, so
+    /// the client's address is the rightmost `X-Forwarded-For` entry — the
+    /// one that proxy appended — rather than the socket peer. Unset, it's on
+    /// when `listen` is a loopback address, since then nothing but a local
+    /// proxy can reach armada at all.
+    pub trust_proxy: Option<bool>,
     pub web: WebConfig,
     pub relay: RelayConfig,
     pub blossom: BlossomConfig,
+    pub av: AvConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -102,15 +109,71 @@ pub struct BlossomConfig {
     pub max_blob_size: u64,
 }
 
+/// A blind Concord AV broker (CORD-07 §2), handing out seats on LiveKit
+/// servers run alongside. Off unless at least one node is configured.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AvConfig {
+    /// The LiveKit servers rooms are placed on. Each is an independent
+    /// deployment; a room's name picks which one it lands on.
+    pub nodes: Vec<AvNode>,
+    /// Seconds a LiveKit token lasts. Clients use one for a whole call and
+    /// never fetch another, so it must outlive a long call.
+    pub token_ttl: u64,
+    /// Seconds a grant's `created_at` may be from now, either way.
+    pub max_skew: u64,
+    /// Seconds a grant's id is remembered, to refuse it a second time. At
+    /// least 240 (§2), and at least twice `max_skew`.
+    pub replay_ttl: u64,
+    /// Token requests one client may make a minute, by IPv4 address or
+    /// IPv6 /64.
+    pub rate_limit_per_minute: u32,
+    /// Seconds between health checks of each node.
+    pub health_interval: u64,
+}
+
+/// One LiveKit server.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AvNode {
+    /// The `wss://` URL clients connect to: a bare origin, since the LiveKit
+    /// SDK appends `/rtc` itself.
+    pub url: String,
+    /// Where its server API is reached, for health checks: by default `url`
+    /// with `https://` for `wss://`. Set it to reach a node on the same box
+    /// or network directly, like `http://127.0.0.1:7880`.
+    pub api_url: Option<String>,
+    pub api_key: String,
+    pub api_secret: String,
+}
+
+/// The longest an AV token may last. It's a bearer credential for a seat.
+pub const MAX_AV_TOKEN_TTL: u64 = 24 * 60 * 60;
+
 impl Default for Config {
     fn default() -> Self {
         Config {
             listen: ([127, 0, 0, 1], 8080).into(),
             public_url: None,
             storage_dir: None,
+            trust_proxy: None,
             web: WebConfig::default(),
             relay: RelayConfig::default(),
             blossom: BlossomConfig::default(),
+            av: AvConfig::default(),
+        }
+    }
+}
+
+impl Default for AvConfig {
+    fn default() -> Self {
+        AvConfig {
+            nodes: Vec::new(),
+            token_ttl: 6 * 60 * 60,
+            max_skew: 60,
+            replay_ttl: 240,
+            rate_limit_per_minute: 60,
+            health_interval: 15,
         }
     }
 }
@@ -253,6 +316,11 @@ impl Config {
         Ok(Some(url))
     }
 
+    /// Whether to believe `X-Forwarded-For`; see [`Config::trust_proxy`].
+    pub fn trusts_proxy(&self) -> bool {
+        self.trust_proxy.unwrap_or_else(|| self.listen.ip().is_loopback())
+    }
+
     #[cfg(test)]
     pub fn parse(text: &str) -> Result<Config> {
         let config: Config = toml::from_str(text)?;
@@ -288,7 +356,77 @@ impl Config {
         if self.blossom.max_blob_size < crate::blossom::sniff::MIN_SIZE {
             bail!("blossom.max_blob_size is smaller than any encrypted blob could be.");
         }
+        self.validate_av()?;
         Ok(())
+    }
+
+    fn validate_av(&self) -> Result<()> {
+        let av = &self.av;
+        if av.nodes.is_empty() {
+            return Ok(());
+        }
+        // Grants are signed over the full URL the client reached, so it has
+        // to be known rather than taken from headers a client could forge.
+        if self.public_url.is_none() {
+            bail!("public_url has to be set to offer AV: clients sign their grants over it.");
+        }
+        if av.token_ttl == 0 || av.max_skew == 0 || av.rate_limit_per_minute == 0 || av.health_interval == 0 {
+            bail!("av.token_ttl, av.max_skew, av.rate_limit_per_minute, and av.health_interval have to be at least 1.");
+        }
+        if av.token_ttl > MAX_AV_TOKEN_TTL {
+            bail!("av.token_ttl can be at most {MAX_AV_TOKEN_TTL} (24 hours): a token is a bearer credential.");
+        }
+        // An id forgotten while its grant is still fresh could be replayed.
+        if av.replay_ttl < 240 || av.replay_ttl < 2 * av.max_skew {
+            bail!("av.replay_ttl has to be at least 240 (CORD-07 §2), and at least twice av.max_skew.");
+        }
+        let mut urls = std::collections::HashSet::new();
+        for node in &av.nodes {
+            let url = node.client_url()?;
+            node.api_url()?;
+            if node.api_key.is_empty() || node.api_secret.is_empty() {
+                bail!("av.nodes: {url} needs an api_key and an api_secret.");
+            }
+            // The URL is a node's identity: it keys its health and its rank.
+            if !urls.insert(url.clone()) {
+                bail!("av.nodes: {url} is listed twice.");
+            }
+        }
+        Ok(())
+    }
+}
+
+impl AvNode {
+    /// `url`, checked, without a trailing slash.
+    pub fn client_url(&self) -> Result<String> {
+        let value = self.url.trim().trim_end_matches('/');
+        let url = url::Url::parse(value).with_context(|| format!("av.nodes: not a valid URL: {}", self.url))?;
+        if url.scheme() != "wss" && url.scheme() != "ws" {
+            bail!("av.nodes: a node's url has to start with wss:// or ws://: {}", self.url);
+        }
+        if url.path().ends_with("/rtc") {
+            bail!("av.nodes: a node's url can't end in /rtc, which the LiveKit SDK appends itself: {}", self.url);
+        }
+        Ok(value.to_string())
+    }
+
+    /// The base of the node's server API, without a trailing slash.
+    pub fn api_url(&self) -> Result<String> {
+        let value = match &self.api_url {
+            Some(api_url) => api_url.trim().trim_end_matches('/').to_string(),
+            None => {
+                let client = self.client_url()?;
+                match client.strip_prefix("wss://") {
+                    Some(rest) => format!("https://{rest}"),
+                    None => format!("http://{}", client.trim_start_matches("ws://")),
+                }
+            }
+        };
+        let url = url::Url::parse(&value).with_context(|| format!("av.nodes: not a valid api_url: {value}"))?;
+        if url.scheme() != "https" && url.scheme() != "http" {
+            bail!("av.nodes: an api_url has to start with https:// or http://: {value}");
+        }
+        Ok(value)
     }
 }
 
@@ -371,6 +509,48 @@ mod tests {
         let config = Config::parse("public_url = \"https://Armada.Example.com/\"").unwrap();
         assert_eq!(config.public_url().unwrap().unwrap().host_str(), Some("armada.example.com"));
         assert!(Config::load(Some(Path::new("/nonexistent/armada.toml")), &Environment::default()).is_err());
+    }
+
+    const NODE: &str = "[[av.nodes]]\nurl = \"wss://sfu.example.com/\"\napi_key = \"k\"\napi_secret = \"s\"\n";
+
+    #[test]
+    fn av() {
+        // Off by default, and needing nothing then.
+        assert!(Config::parse("").unwrap().av.nodes.is_empty());
+
+        let config = Config::parse(&format!("public_url = \"https://armada.example.com\"\n{NODE}")).unwrap();
+        let node = &config.av.nodes[0];
+        assert_eq!(node.client_url().unwrap(), "wss://sfu.example.com");
+        assert_eq!(node.api_url().unwrap(), "https://sfu.example.com");
+
+        let local = "[[av.nodes]]\nurl = \"ws://localhost:7880\"\napi_url = \"http://127.0.0.1:7880/\"\napi_key = \"k\"\napi_secret = \"s\"\n";
+        let config = Config::parse(&format!("public_url = \"https://armada.example.com\"\n{local}")).unwrap();
+        assert_eq!(config.av.nodes[0].api_url().unwrap(), "http://127.0.0.1:7880");
+
+        // Grants are signed over the public URL, so it can't be guessed at.
+        assert!(Config::parse(NODE).is_err());
+        let with = |extra: &str| Config::parse(&format!("public_url = \"https://armada.example.com\"\n[av]\n{extra}\n{NODE}"));
+        assert!(with("replay_ttl = 239").is_err());
+        assert!(with("max_skew = 200").is_err());
+        assert!(with("max_skew = 120").is_ok());
+        assert!(with("token_ttl = 86401").is_err());
+        assert!(with("token_ttl = 0").is_err());
+        assert!(with("rate_limit_per_minute = 0").is_err());
+
+        let node = |url: &str| format!("public_url = \"https://a.example.com\"\n[[av.nodes]]\nurl = \"{url}\"\napi_key = \"k\"\napi_secret = \"s\"\n");
+        assert!(Config::parse(&node("https://sfu.example.com")).is_err());
+        assert!(Config::parse(&node("wss://sfu.example.com/rtc")).is_err());
+        let twice = format!("public_url = \"https://a.example.com\"\n{NODE}{NODE}");
+        assert!(Config::parse(&twice).unwrap_err().to_string().contains("listed twice"));
+        assert!(Config::parse("public_url = \"https://a.example.com\"\n[[av.nodes]]\nurl = \"wss://sfu.example.com\"\napi_key = \"k\"\napi_secret = \"\"").is_err());
+    }
+
+    #[test]
+    fn trusts_a_proxy_only_in_front_of_loopback() {
+        assert!(Config::parse("").unwrap().trusts_proxy());
+        assert!(!Config::parse("listen = \"0.0.0.0:8080\"").unwrap().trusts_proxy());
+        assert!(Config::parse("listen = \"0.0.0.0:8080\"\ntrust_proxy = true").unwrap().trusts_proxy());
+        assert!(!Config::parse("trust_proxy = false").unwrap().trusts_proxy());
     }
 
     fn user(home: &str) -> Environment {
