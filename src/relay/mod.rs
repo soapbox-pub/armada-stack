@@ -25,13 +25,11 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use anyhow::Result;
-use axum::Router;
 use axum::extract::FromRequestParts;
 use axum::extract::Request;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::response::{IntoResponse, Response};
-use http::{HeaderMap, StatusCode, header};
-use tokio::net::TcpListener;
+use http::{HeaderMap, Method, header};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
@@ -41,6 +39,7 @@ use monitors::Hub;
 use store::Store;
 use writer::Writer;
 
+#[derive(Clone)]
 pub struct Relay {
     shared: Arc<Shared>,
 }
@@ -61,7 +60,8 @@ struct Shared {
 }
 
 impl Relay {
-    pub fn open(config: &RelayConfig, storage: &Storage) -> Result<Relay> {
+    /// Open the relay's store. Every connection closes once `cancel` fires.
+    pub fn open(config: &RelayConfig, storage: &Storage, cancel: &CancellationToken) -> Result<Relay> {
         let store = Arc::new(Store::open(&storage.service_dir("relay")?, config.map_size as usize)?);
         let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
         let hub = Hub::spawn((cores / 2).clamp(1, 8));
@@ -75,43 +75,44 @@ impl Relay {
                 queries: Arc::new(Semaphore::new(cores)),
                 verifiers: Arc::new(Semaphore::new(cores)),
                 next_conn: AtomicU64::new(1),
-                cancel: CancellationToken::new(),
+                cancel: cancel.child_token(),
             }),
         })
     }
 
-    pub fn router(&self) -> Router {
-        let shared = self.shared.clone();
-        Router::new().fallback(move |request: Request| handle(shared.clone(), request))
+    #[cfg(test)]
+    pub fn router(&self) -> axum::Router {
+        let relay = self.clone();
+        axum::Router::new().fallback(move |request: Request| async move { relay.handle(request).await })
     }
 
-    /// Serve on `listener` until `cancel` fires.
-    pub async fn run(self, listener: TcpListener, cancel: CancellationToken) -> Result<()> {
-        let connections = self.shared.cancel.clone();
-        let stop = cancel.clone();
-        tokio::spawn(async move {
-            stop.cancelled().await;
-            connections.cancel();
-        });
-        axum::serve(listener, self.router()).with_graceful_shutdown(cancel.cancelled_owned()).await?;
-        Ok(())
+    /// A WebSocket upgrade, or a NIP-11 request.
+    pub async fn handle(&self, request: Request) -> Response {
+        let shared = self.shared.clone();
+        let (mut parts, _) = request.into_parts();
+        match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
+            Ok(upgrade) => {
+                let max = shared.config.max_message_length;
+                upgrade.max_message_size(max).max_frame_size(max).on_upgrade(move |socket| conn::serve(shared, socket)).into_response()
+            }
+            Err(_) if wants_nip11(&parts.headers) => {
+                let headers = [(header::CONTENT_TYPE, "application/nostr+json"), (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+                (headers, info(&shared.config).to_string()).into_response()
+            }
+            Err(rejection) => rejection.into_response(),
+        }
     }
 }
 
-async fn handle(shared: Arc<Shared>, request: Request) -> Response {
-    let (mut parts, _) = request.into_parts();
-
-    if let Ok(upgrade) = WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
-        let max = shared.config.max_message_length;
-        return upgrade.max_message_size(max).max_frame_size(max).on_upgrade(move |socket| conn::serve(shared, socket)).into_response();
+/// Whether a request is the relay's: a WebSocket upgrade or a NIP-11
+/// request, to `/`. Anything else there is the web app's.
+pub fn wants(method: &Method, path: &str, headers: &HeaderMap) -> bool {
+    if path != "/" {
+        return false;
     }
-
-    if wants_nip11(&parts.headers) {
-        let headers = [(header::CONTENT_TYPE, "application/nostr+json"), (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
-        return (headers, info(&shared.config).to_string()).into_response();
-    }
-
-    (StatusCode::OK, "This is a Nostr relay. Connect to it with a Nostr client.\n").into_response()
+    // HTTP/1.1's `Upgrade: websocket`, or HTTP/2's extended CONNECT.
+    let upgrade = headers.get(header::UPGRADE).and_then(|v| v.to_str().ok()).is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
+    upgrade || *method == Method::CONNECT || wants_nip11(headers)
 }
 
 fn wants_nip11(headers: &HeaderMap) -> bool {

@@ -22,14 +22,12 @@ pub mod sniff;
 use std::sync::Arc;
 
 use anyhow::Result;
-use axum::Router;
 use axum::body::Body;
 use axum::extract::Request;
 use http::header::{self, HeaderMap, HeaderValue};
 use http::{Method, Response, StatusCode};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use crate::blobs::{BlobStore, DownloadError, DownloadReason, Staged};
@@ -61,6 +59,7 @@ const MAX_MIRROR_REQUEST: usize = 16 * 1024;
 
 type Reply = Response<Body>;
 
+#[derive(Clone)]
 pub struct Blossom {
     server: Arc<Server>,
 }
@@ -79,7 +78,10 @@ struct Server {
 }
 
 impl Blossom {
-    pub fn open(config: &BlossomConfig, storage: &Storage) -> Result<Blossom> {
+    /// Open the server's index and store. `public_url` is the origin clients
+    /// reach it at, if configured; mirrors in progress are abandoned once
+    /// `cancel` fires.
+    pub fn open(config: &BlossomConfig, public_url: Option<url::Url>, storage: &Storage, cancel: &CancellationToken) -> Result<Blossom> {
         let db = BlossomDb::open(storage)?;
         let blobs = storage.blob_store("blossom/blobs");
         blobs.clear_temp();
@@ -87,30 +89,30 @@ impl Blossom {
             server: Arc::new(Server {
                 db,
                 blobs,
-                public_url: config.public_url()?,
+                public_url,
                 max_blob_size: config.max_blob_size,
                 commit: Arc::new(Mutex::new(())),
-                cancel: CancellationToken::new(),
+                cancel: cancel.child_token(),
             }),
         })
     }
 
-    pub fn router(&self) -> Router {
-        let server = self.server.clone();
-        Router::new().fallback(move |request: Request| async move { server.handle(request).await })
+    #[cfg(test)]
+    pub fn router(&self) -> axum::Router {
+        let blossom = self.clone();
+        axum::Router::new().fallback(move |request: Request| async move { blossom.handle(request).await })
     }
 
-    /// Serve on `listener` until `cancel` fires.
-    pub async fn run(self, listener: TcpListener, cancel: CancellationToken) -> Result<()> {
-        let mirrors = self.server.cancel.clone();
-        let stop = cancel.clone();
-        tokio::spawn(async move {
-            stop.cancelled().await;
-            mirrors.cancel();
-        });
-        axum::serve(listener, self.router()).with_graceful_shutdown(cancel.cancelled_owned()).await?;
-        Ok(())
+    pub async fn handle(&self, request: Request) -> Reply {
+        self.server.handle(request).await
     }
+}
+
+/// Whether a path is one of the Blossom server's endpoints, whatever the
+/// method. It shares an origin with the web app, whose shell would
+/// otherwise answer every one of these.
+pub fn wants(path: &str) -> bool {
+    matches!(path, "/upload" | "/mirror" | "/media" | "/report") || path.starts_with("/list/") || blob_path(path).is_some()
 }
 
 /// A blob descriptor (BUD-02).
@@ -155,13 +157,6 @@ impl Server {
 
         let path = request.uri().path().to_string();
         match path.as_str() {
-            "/" => match method {
-                Method::GET | Method::HEAD => text(
-                    StatusCode::OK,
-                    "This is a Blossom server. It only accepts encrypted blobs, and serves every blob as application/octet-stream.\n",
-                ),
-                _ => not_allowed("GET, HEAD"),
-            },
             "/upload" => match method {
                 Method::PUT => self.upload(request).await,
                 Method::HEAD => self.check_upload(request.headers()),
@@ -536,14 +531,6 @@ fn preflight() -> Reply {
 
 fn header_str(headers: &HeaderMap, name: impl header::AsHeaderName) -> Option<&str> {
     headers.get(name).and_then(|v| v.to_str().ok())
-}
-
-fn text(status: StatusCode, body: &'static str) -> Reply {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-        .body(Body::from(body))
-        .expect("response")
 }
 
 /// An error, with its reason in `X-Reason` (BUD-01) and the body both.

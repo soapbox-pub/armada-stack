@@ -26,9 +26,18 @@ const SYSTEM_STORAGE_DIR: &str = "/var/lib/armada";
 /// Armada's official nsite, published by Team Soapbox.
 pub const DEFAULT_NSITE: &str = "naddr1qvzqqqyf8qpzq7q6z5ns2hm5c8msyv83qwzxpxe52j8c4d4q5m92wsp9sflelkh9qqrxzundv9jxz0nw9gl";
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    /// Where every service is served from. They share one origin: the web
+    /// app has the paths, the relay WebSocket upgrades and NIP-11 requests
+    /// to `/`, and the Blossom server its own endpoints (see [`crate::routes`]).
+    pub listen: SocketAddr,
+    /// The origin clients reach armada at, like `https://armada.example.com`:
+    /// what Blossom blob URLs are built on, and the domain `server` tags in
+    /// Blossom tokens must name. Unset, it's taken from each request's `Host`
+    /// and `X-Forwarded-Proto`.
+    pub public_url: Option<String>,
     /// Shared by every service: each keeps its database in a directory of its
     /// own beneath this, and blobs live in one store they all use. Relative to
     /// the config file's directory; unset, [`Environment::default_storage_dir`].
@@ -41,7 +50,6 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WebConfig {
-    pub listen: SocketAddr,
     /// The nsite to serve: an `naddr` (kind 35128 or 15128), or an `npub` for
     /// that author's root site.
     pub nsite: String,
@@ -64,7 +72,6 @@ pub struct WebConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RelayConfig {
-    pub listen: SocketAddr,
     /// Bytes one WebSocket message from a client may be.
     pub max_message_length: usize,
     /// Subscriptions one connection may have open at once.
@@ -91,20 +98,26 @@ pub struct RelayConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BlossomConfig {
-    pub listen: SocketAddr,
-    /// The origin clients reach the server at, like
-    /// `https://blossom.example.com`: what blob URLs are built on, and the
-    /// domain `server` tags in tokens must name. Unset, it's taken from each
-    /// request's `Host` and `X-Forwarded-Proto`.
-    pub public_url: Option<String>,
     /// Bytes one blob may be.
     pub max_blob_size: u64,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            listen: ([127, 0, 0, 1], 8080).into(),
+            public_url: None,
+            storage_dir: None,
+            web: WebConfig::default(),
+            relay: RelayConfig::default(),
+            blossom: BlossomConfig::default(),
+        }
+    }
 }
 
 impl Default for WebConfig {
     fn default() -> Self {
         WebConfig {
-            listen: ([127, 0, 0, 1], 8080).into(),
             nsite: DEFAULT_NSITE.into(),
             auto_update: true,
             relays: vec!["wss://relay.ditto.pub".into(), "wss://relay.dreamith.to".into()],
@@ -123,7 +136,6 @@ impl Default for WebConfig {
 impl Default for RelayConfig {
     fn default() -> Self {
         RelayConfig {
-            listen: ([127, 0, 0, 1], 7777).into(),
             max_message_length: 128 << 10,
             max_subscriptions: 32,
             max_filters: 16,
@@ -139,23 +151,7 @@ impl Default for RelayConfig {
 
 impl Default for BlossomConfig {
     fn default() -> Self {
-        BlossomConfig { listen: ([127, 0, 0, 1], 24242).into(), public_url: None, max_blob_size: 100 << 20 }
-    }
-}
-
-impl BlossomConfig {
-    /// `public_url` parsed. Checked when the config is loaded: an http(s)
-    /// origin with nothing after it, since Blossom serves from the root.
-    pub fn public_url(&self) -> Result<Option<url::Url>> {
-        let Some(value) = &self.public_url else { return Ok(None) };
-        let url = url::Url::parse(value.trim()).with_context(|| format!("blossom.public_url: not a valid URL: {value}"))?;
-        if url.scheme() != "https" && url.scheme() != "http" {
-            bail!("blossom.public_url has to start with https:// or http://: {value}");
-        }
-        if url.host_str().is_none() || url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
-            bail!("blossom.public_url has to be an origin alone, like https://blossom.example.com: {value}");
-        }
-        Ok(Some(url))
+        BlossomConfig { max_blob_size: 100 << 20 }
     }
 }
 
@@ -243,6 +239,20 @@ impl Config {
         toml::from_str(&text).with_context(|| format!("{} is not a valid config file", path.display()))
     }
 
+    /// `public_url` parsed. Checked when the config is loaded: an http(s)
+    /// origin with nothing after it, since everything is served from the root.
+    pub fn public_url(&self) -> Result<Option<url::Url>> {
+        let Some(value) = &self.public_url else { return Ok(None) };
+        let url = url::Url::parse(value.trim()).with_context(|| format!("public_url: not a valid URL: {value}"))?;
+        if url.scheme() != "https" && url.scheme() != "http" {
+            bail!("public_url has to start with https:// or http://: {value}");
+        }
+        if url.host_str().is_none() || url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
+            bail!("public_url has to be an origin alone, like https://armada.example.com: {value}");
+        }
+        Ok(Some(url))
+    }
+
     #[cfg(test)]
     pub fn parse(text: &str) -> Result<Config> {
         let config: Config = toml::from_str(text)?;
@@ -274,18 +284,9 @@ impl Config {
         if relay.map_size < 1 << 24 || usize::try_from(relay.map_size).is_err() {
             bail!("relay.map_size has to be at least 16 MiB, and fit in this machine's address space.");
         }
-        self.blossom.public_url()?;
+        self.public_url()?;
         if self.blossom.max_blob_size < crate::blossom::sniff::MIN_SIZE {
             bail!("blossom.max_blob_size is smaller than any encrypted blob could be.");
-        }
-
-        let listeners = [("web", self.web.listen), ("relay", self.relay.listen), ("blossom", self.blossom.listen)];
-        for (i, (a, address)) in listeners.iter().enumerate() {
-            for (b, other) in &listeners[i + 1..] {
-                if address == other && address.port() != 0 {
-                    bail!("{a}.listen and {b}.listen are both {address}. Give each service its own port.");
-                }
-            }
         }
         Ok(())
     }
@@ -325,9 +326,8 @@ mod tests {
     #[test]
     fn defaults() {
         let config = Config::parse("").unwrap();
-        assert_eq!(config.web.listen.port(), 8080);
-        assert_eq!(config.relay.listen.port(), 7777);
-        assert_eq!(config.blossom.listen.port(), 24242);
+        assert_eq!(config.listen.port(), 8080);
+        assert_eq!(config.public_url().unwrap(), None);
         assert!(config.web.auto_update);
         assert_eq!(config.web.relay_urls(), ["wss://relay.ditto.pub", "wss://relay.dreamith.to"]);
 
@@ -342,6 +342,7 @@ mod tests {
         let config = Config::parse(
             r#"
             storage_dir = "/srv/armada"
+            listen = "0.0.0.0:80"
             [web]
             auto_update = false
             relays = ["ws://localhost:7777/"]
@@ -351,22 +352,24 @@ mod tests {
         assert_eq!(config.storage_dir.as_deref(), Some(Path::new("/srv/armada")));
         assert!(!config.web.auto_update);
         assert_eq!(config.web.relay_urls(), ["ws://localhost:7777"]);
-        assert_eq!(config.web.listen.port(), 8080);
+        assert_eq!(config.listen.port(), 80);
     }
 
     #[test]
     fn refuses_mistakes() {
         assert!(Config::parse("[web]\nnsite = \"nope\"").is_err());
         assert!(Config::parse("[web]\nrelays = [\"https://relay.example.com\"]").is_err());
-        assert!(Config::parse("[web]\nlisten = \"127.0.0.1:7777\"").is_err());
+        // Each service had a port of its own once; now they share one.
+        assert!(Config::parse("[web]\nlisten = \"127.0.0.1:8080\"").is_err());
+        assert!(Config::parse("[blossom]\npublic_url = \"https://example.com\"").is_err());
         assert!(Config::parse("[web]\ntypo = 1").is_err());
-        assert!(Config::parse("[blossom]\npublic_url = \"ftp://example.com\"").is_err());
-        assert!(Config::parse("[blossom]\npublic_url = \"https://example.com/blossom\"").is_err());
+        assert!(Config::parse("public_url = \"ftp://example.com\"").is_err());
+        assert!(Config::parse("public_url = \"https://example.com/armada\"").is_err());
         assert!(Config::parse("[blossom]\nmax_blob_size = 0").is_err());
         assert!(Config::parse("[relay]\nmax_limit = 0").is_err());
         assert!(Config::parse("[relay]\nmap_size = 1024").is_err());
-        let config = Config::parse("[blossom]\npublic_url = \"https://Blossom.Example.com/\"").unwrap();
-        assert_eq!(config.blossom.public_url().unwrap().unwrap().host_str(), Some("blossom.example.com"));
+        let config = Config::parse("public_url = \"https://Armada.Example.com/\"").unwrap();
+        assert_eq!(config.public_url().unwrap().unwrap().host_str(), Some("armada.example.com"));
         assert!(Config::load(Some(Path::new("/nonexistent/armada.toml")), &Environment::default()).is_err());
     }
 

@@ -6,6 +6,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
+use axum::Router;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
@@ -26,12 +27,13 @@ struct Harness {
 impl Harness {
     async fn new(config: RelayConfig) -> Harness {
         let dir = tempfile::tempdir().unwrap();
-        let relay = Relay::open(&config, &Storage::allowing_private(dir.path())).unwrap();
-        let router = relay.router();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("ws://{}", listener.local_addr().unwrap());
         let cancel = CancellationToken::new();
-        tokio::spawn(relay.run(listener, cancel.clone()));
+        let relay = Relay::open(&config, &Storage::allowing_private(dir.path()), &cancel).unwrap();
+        let router = relay.router();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let served = router.clone();
+        tokio::spawn(async move { axum::serve(listener, served).await });
         Harness { _dir: dir, url, relay: router, _cancel: cancel.drop_guard() }
     }
 

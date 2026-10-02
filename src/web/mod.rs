@@ -2,8 +2,8 @@
 //!
 //! npanel trimmed to a single site. One nsite, named in the config, is
 //! followed on Nostr, its blobs downloaded into the shared store, and served
-//! from there. No dashboard, no API, no host routing: every request is for
-//! that one site.
+//! from there. No dashboard, no API, no host routing: every request that
+//! isn't the relay's or the Blossom server's is for that one site.
 
 mod csp;
 mod db;
@@ -18,10 +18,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use arc_swap::ArcSwapOption;
-use axum::Router;
-use axum::extract::Request;
 use http::HeaderValue;
-use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::WebConfig;
@@ -86,17 +84,14 @@ impl Web {
         Ok(Web { server, worker })
     }
 
-    pub fn router(&self) -> Router {
+    #[cfg(test)]
+    pub fn router(&self) -> axum::Router {
         let server = self.server.clone();
-        Router::new().fallback(move |request: Request| async move { server.serve(request).await })
+        axum::Router::new().fallback(move |request: axum::extract::Request| async move { server.serve(request).await })
     }
 
-    /// Serve on `listener` and keep the site in sync, until `cancel` fires.
-    pub async fn run(self, listener: TcpListener, cancel: CancellationToken) -> Result<()> {
-        let router = self.router();
-        let sync = tokio::spawn(self.worker.run(cancel.clone()));
-        axum::serve(listener, router).with_graceful_shutdown(cancel.cancelled_owned()).await?;
-        let _ = sync.await;
-        Ok(())
+    /// Keep the site in sync until `cancel` fires, and hand back what serves it.
+    pub fn start(self, cancel: CancellationToken) -> (Arc<SiteServer>, JoinHandle<()>) {
+        (self.server, tokio::spawn(self.worker.run(cancel)))
     }
 }

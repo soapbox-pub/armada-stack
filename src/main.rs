@@ -1,5 +1,5 @@
 //! `armada`: a self-hosted Armada in one binary — its web app, a relay, and
-//! a Blossom server, each on its own port, sharing one storage directory.
+//! a Blossom server, all on one origin and sharing one storage directory.
 
 mod blobs;
 mod blossom;
@@ -10,11 +10,11 @@ mod net;
 mod nostr;
 mod nsite;
 mod relay;
+mod routes;
 mod storage;
 mod util;
 mod web;
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -55,18 +55,17 @@ async fn main() -> Result<()> {
     let storage = Storage::open(&storage_dir)?;
     tracing::info!(storage = %storage.root().display(), "storage opened");
 
-    // Bound before anything starts, so a port already in use stops the whole
-    // stack at once rather than leaving two of three services running.
-    let web_listener = bind("web", config.web.listen).await?;
-    let relay_listener = bind("relay", config.relay.listen).await?;
-    let blossom_listener = bind("blossom", config.blossom.listen).await?;
-
-    let nostr = Arc::new(NostrService::new(config.web.relay_urls()));
-    let web = web::Web::open(&config.web, &storage, nostr).await?;
-    let blossom = blossom::Blossom::open(&config.blossom, &storage)?;
-    let relay = relay::Relay::open(&config.relay, &storage)?;
+    // Bound before anything starts, so a port already in use stops at once
+    // rather than after the site has started downloading.
+    let listener = TcpListener::bind(config.listen).await.with_context(|| format!("Could not listen on {}", config.listen))?;
+    tracing::info!(address = %listener.local_addr()?, "listening");
 
     let cancel = CancellationToken::new();
+    let nostr = Arc::new(NostrService::new(config.web.relay_urls()));
+    let web = web::Web::open(&config.web, &storage, nostr).await?;
+    let blossom = blossom::Blossom::open(&config.blossom, config.public_url()?, &storage, &cancel)?;
+    let relay = relay::Relay::open(&config.relay, &storage, &cancel)?;
+
     tokio::spawn({
         let cancel = cancel.clone();
         async move {
@@ -76,28 +75,14 @@ async fn main() -> Result<()> {
         }
     });
 
-    let (web, relay, blossom) = tokio::join!(
-        stop_all_on_exit(web.run(web_listener, cancel.clone()), &cancel),
-        stop_all_on_exit(relay.run(relay_listener, cancel.clone()), &cancel),
-        stop_all_on_exit(blossom.run(blossom_listener, cancel.clone()), &cancel),
-    );
-    web.context("web")?;
-    relay.context("relay")?;
-    blossom.context("blossom")?;
-    Ok(())
-}
-
-/// Run a service, and take the rest of the stack down with it if it stops.
-async fn stop_all_on_exit(service: impl Future<Output = Result<()>>, cancel: &CancellationToken) -> Result<()> {
-    let result = service.await;
+    let (web, sync) = web.start(cancel.clone());
+    let router = routes::router(routes::Services { web, relay, blossom });
+    let served = axum::serve(listener, router).with_graceful_shutdown(cancel.clone().cancelled_owned()).await;
+    // However serving ended, the rest stops with it.
     cancel.cancel();
-    result
-}
-
-async fn bind(service: &str, address: SocketAddr) -> Result<TcpListener> {
-    let listener = TcpListener::bind(address).await.with_context(|| format!("The {service} service could not listen on {address}"))?;
-    tracing::info!(service, address = %listener.local_addr()?, "listening");
-    Ok(listener)
+    let _ = sync.await;
+    served.context("serving")?;
+    Ok(())
 }
 
 /// Human-readable logs by default; `LOG_FORMAT=json` for one JSON object per

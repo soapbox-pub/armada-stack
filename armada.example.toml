@@ -11,8 +11,18 @@
 # to $XDG_DATA_HOME/armada (~/.local/share/armada) for anyone else.
 # storage_dir = "/var/lib/armada"
 
-[web]
+# Where everything is served from, on one origin: the web app at its own
+# paths, the relay at / (WebSocket upgrades and NIP-11 requests), and the
+# Blossom server at /upload, /mirror and /<sha256>. Point one reverse proxy
+# at it, and use https://armada.example.com/ as both the relay (wss://) and
+# the Blossom server.
 listen = "127.0.0.1:8080"
+# The origin clients reach armada at. Blossom blob URLs are built on it, and
+# Blossom tokens scoped with `server` tags must name its domain. Unset, it's
+# taken from each request's Host and X-Forwarded-Proto headers.
+# public_url = "https://armada.example.com"
+
+[web]
 # The nsite to serve: an naddr, or an npub for that author's root site.
 # The default is Armada's official site, published by Team Soapbox.
 nsite = "naddr1qvzqqqyf8qpzq7q6z5ns2hm5c8msyv83qwzxpxe52j8c4d4q5m92wsp9sflelkh9qqrxzundv9jxz0nw9gl"
@@ -32,7 +42,6 @@ max_site_size = 1073741824
 # A Nostr relay (NIP-01, 09, 11, 40) anyone may read from and publish to,
 # within these limits. They're advertised in its NIP-11 document.
 [relay]
-listen = "127.0.0.1:7777"
 # Bytes one message from a client may be.
 max_message_length = 131072
 # Subscriptions one connection may have open, and filters one REQ may have.
@@ -55,10 +64,5 @@ map_size = 274877906944
 # them back as application/octet-stream. Anyone with a valid upload token
 # may upload.
 [blossom]
-listen = "127.0.0.1:24242"
-# The origin clients reach this server at. Blob URLs are built on it, and
-# tokens scoped with `server` tags must name its domain. Unset, it's taken
-# from each request's Host and X-Forwarded-Proto headers.
-# public_url = "https://blossom.example.com"
 # Bytes one blob may be.
 max_blob_size = 104857600

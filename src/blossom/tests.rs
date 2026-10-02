@@ -5,6 +5,8 @@ use http::{HeaderMap, Request, StatusCode};
 use http_body_util::BodyExt;
 use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
+use axum::Router;
+use tokio::net::TcpListener;
 use tower::ServiceExt;
 
 use super::auth::tests::{header, token};
@@ -26,12 +28,9 @@ impl Harness {
     fn new() -> Harness {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::allowing_private(dir.path());
-        let config = BlossomConfig {
-            public_url: Some("https://blossom.example.com".into()),
-            max_blob_size: MAX,
-            ..BlossomConfig::default()
-        };
-        let blossom = Blossom::open(&config, &storage).unwrap();
+        let config = BlossomConfig { max_blob_size: MAX };
+        let public_url = url::Url::parse("https://blossom.example.com").ok();
+        let blossom = Blossom::open(&config, public_url, &storage, &CancellationToken::new()).unwrap();
         Harness { _dir: dir, storage, blossom }
     }
 
