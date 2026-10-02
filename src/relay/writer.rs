@@ -3,8 +3,9 @@
 //! LMDB allows a single writer anyway, so rather than have connections take
 //! turns, they queue verified events here and this thread commits whatever
 //! has piled up in one transaction: under load, one fsync covers many
-//! events. Once a batch is durable it answers each event's `OK` and hands it
-//! to the [monitors](super::monitors) for live subscriptions.
+//! events. Once a batch is durable it answers each event's `OK` and queues
+//! the batch for the [monitors](super::monitors), whose threads match it
+//! against live subscriptions while this one moves on to the next commit.
 //!
 //! Ephemeral events take the same path, minus the store, so they're relayed
 //! in the order they arrived relative to stored ones.
@@ -13,9 +14,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
-
-use super::monitors::{Link, Monitors, Outbound};
+use super::monitors::{Hub, Link, Live, Outbound};
 use super::record::{self, EventView};
 use super::store::{Outcome, Store};
 use crate::util::now;
@@ -43,11 +42,11 @@ pub struct Writer {
 
 impl Writer {
     /// Start the thread. It runs until every `Writer` is dropped.
-    pub fn spawn(store: Arc<Store>, monitors: Arc<Mutex<Monitors>>) -> Writer {
+    pub fn spawn(store: Arc<Store>, hub: Hub) -> Writer {
         let (tx, rx) = sync_channel(QUEUE);
         std::thread::Builder::new()
             .name("relay-writer".into())
-            .spawn(move || run(&store, &monitors, rx))
+            .spawn(move || run(&store, &hub, rx))
             .expect("a thread for the relay's writer");
         Writer { tx }
     }
@@ -60,7 +59,7 @@ impl Writer {
     }
 }
 
-fn run(store: &Store, monitors: &Mutex<Monitors>, rx: Receiver<Submission>) {
+fn run(store: &Store, hub: &Hub, rx: Receiver<Submission>) {
     let mut next_sweep = Instant::now();
     loop {
         if Instant::now() >= next_sweep {
@@ -79,11 +78,11 @@ fn run(store: &Store, monitors: &Mutex<Monitors>, rx: Receiver<Submission>) {
                 Err(_) => break,
             }
         }
-        write(store, monitors, batch);
+        write(store, hub, batch);
     }
 }
 
-fn write(store: &Store, monitors: &Mutex<Monitors>, batch: Vec<Submission>) {
+fn write(store: &Store, hub: &Hub, batch: Vec<Submission>) {
     let outcomes = match store_batch(store, &batch) {
         Ok(outcomes) => outcomes,
         Err(error) => {
@@ -96,10 +95,9 @@ fn write(store: &Store, monitors: &Mutex<Monitors>, batch: Vec<Submission>) {
         }
     };
 
-    let monitors = monitors.lock();
-    for (submission, outcome) in batch.iter().zip(outcomes) {
-        let view = EventView::new(&submission.record).expect("a record");
-        let id = hex::encode(view.id());
+    let mut live = Vec::new();
+    for (submission, outcome) in batch.into_iter().zip(outcomes) {
+        let id = hex::encode(EventView::new(&submission.record).expect("a record").id());
         let (accepted, message, seq) = match outcome {
             None => (true, "", None),
             Some(Outcome::Stored(seq)) => (true, "", Some(seq)),
@@ -109,9 +107,10 @@ fn write(store: &Store, monitors: &Mutex<Monitors>, batch: Vec<Submission>) {
         };
         submission.reply.send(Outbound::Text(ok(&id, accepted, message)));
         if outcome.is_none() || seq.is_some() {
-            monitors.broadcast(&view, seq);
+            live.push(Live::new(submission.record, seq));
         }
     }
+    hub.broadcast(live);
 }
 
 /// Store a batch in one transaction. `None` for ephemeral events, which
@@ -161,12 +160,12 @@ mod tests {
     async fn stores_then_answers_and_broadcasts() {
         let (_dir, store) = open();
         let store = Arc::new(store);
-        let monitors = Arc::new(Mutex::new(Monitors::default()));
-        let writer = Writer::spawn(store.clone(), monitors.clone());
+        let hub = Hub::spawn(1);
+        let writer = Writer::spawn(store.clone(), hub.clone());
 
         let (link, mut rx, _) = Link::new(16);
-        monitors.lock().connect(1, link.clone());
-        monitors.lock().subscribe(1, "s".into(), vec![Filter::parse(&serde_json::json!({})).unwrap()]);
+        hub.connect(1, link.clone()).await;
+        hub.subscribe(1, "s".into(), vec![Filter::parse(&serde_json::json!({})).unwrap()]).await.await.unwrap();
 
         let note = Event::sign(ALICE, 100, 1, vec![], "hi");
         let ephemeral = Event::sign(ALICE, 100, 20_001, vec![], "typing");

@@ -1,5 +1,6 @@
 //! The relay end to end, over real WebSockets.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -120,6 +121,59 @@ async fn stores_queries_and_streams() {
     alice.publish(&note(ALICE, "third")).await;
     bob.quiet().await;
     assert_eq!(bob.query("again", &[json!({"limit": 2})]).await.len(), 2);
+}
+
+/// Subscriptions opened while events stream in each get every event exactly
+/// once, whether from their query or live.
+#[tokio::test]
+async fn hands_off_from_query_to_live_without_gaps_or_repeats() {
+    const EVENTS: usize = 300;
+    const SUBS: usize = 20;
+    let harness = Harness::new(RelayConfig { events_per_minute: 0, ..RelayConfig::default() }).await;
+    let mut alice = harness.client().await;
+    let bob = harness.client().await;
+
+    let publisher = tokio::spawn(async move {
+        let mut ids = Vec::new();
+        for i in 0..EVENTS {
+            let event = note(ALICE, &i.to_string());
+            assert_eq!(alice.publish(&event).await[2], true);
+            ids.push(event.id);
+        }
+        ids
+    });
+
+    let (mut tx, mut rx) = bob.socket.split();
+    let opener = tokio::spawn(async move {
+        for i in 0..SUBS {
+            let req = json!(["REQ", format!("s{i}"), {"kinds": [1]}]);
+            tx.send(Message::Text(req.to_string().into())).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(3)).await;
+        }
+        tx
+    });
+
+    let mut seen: HashMap<String, Vec<String>> = HashMap::new();
+    let complete = |seen: &HashMap<String, Vec<String>>| seen.len() == SUBS && seen.values().all(|ids| ids.len() >= EVENTS);
+    while !complete(&seen) {
+        let message = tokio::time::timeout(Duration::from_secs(10), rx.next()).await.expect("every event in time");
+        let Message::Text(text) = message.unwrap().unwrap() else { continue };
+        let message: Value = serde_json::from_str(&text).unwrap();
+        let sub = message[1].as_str().unwrap().to_string();
+        let ids = seen.entry(sub).or_default();
+        if message[0] == "EVENT" {
+            ids.push(message[2]["id"].as_str().unwrap().to_string());
+        }
+    }
+    let _tx = opener.await.unwrap();
+    let mut published = publisher.await.unwrap();
+    published.sort();
+    for (sub, mut ids) in seen {
+        ids.sort();
+        assert_eq!(ids, published, "{sub}");
+    }
+    let extra = tokio::time::timeout(Duration::from_millis(200), rx.next()).await;
+    assert!(extra.is_err(), "unexpected {extra:?}");
 }
 
 #[tokio::test]

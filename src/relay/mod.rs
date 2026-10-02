@@ -8,7 +8,8 @@
 //! - [`query`] answers filters from whichever index its key counts say is
 //!   cheapest.
 //! - [`writer`] commits events in batches on a thread of its own, then hands
-//!   them to [`monitors`], a reverse index of live subscriptions.
+//!   them to [`monitors`]: threads that each keep a reverse index of their
+//!   share of the live subscriptions.
 //! - [`conn`] speaks the protocol to each client.
 
 mod conn;
@@ -30,14 +31,13 @@ use axum::extract::Request;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::response::{IntoResponse, Response};
 use http::{HeaderMap, StatusCode, header};
-use parking_lot::Mutex;
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::RelayConfig;
 use crate::storage::Storage;
-use monitors::Monitors;
+use monitors::Hub;
 use store::Store;
 use writer::Writer;
 
@@ -49,7 +49,7 @@ pub struct Relay {
 struct Shared {
     config: RelayConfig,
     store: Arc<Store>,
-    monitors: Arc<Mutex<Monitors>>,
+    hub: Hub,
     writer: Writer,
     /// Queries running at once, at most one per core.
     queries: Arc<Semaphore>,
@@ -61,14 +61,14 @@ struct Shared {
 impl Relay {
     pub fn open(config: &RelayConfig, storage: &Storage) -> Result<Relay> {
         let store = Arc::new(Store::open(&storage.service_dir("relay")?, config.map_size as usize)?);
-        let monitors = Arc::new(Mutex::new(Monitors::default()));
-        let writer = Writer::spawn(store.clone(), monitors.clone());
         let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let hub = Hub::spawn((cores / 2).clamp(1, 8));
+        let writer = Writer::spawn(store.clone(), hub.clone());
         Ok(Relay {
             shared: Arc::new(Shared {
                 config: config.clone(),
                 store,
-                monitors,
+                hub,
                 writer,
                 queries: Arc::new(Semaphore::new(cores)),
                 next_conn: AtomicU64::new(1),

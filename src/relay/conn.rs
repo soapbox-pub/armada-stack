@@ -4,10 +4,14 @@
 //! the writer only ever sees valid ones. Queries run on the blocking pool,
 //! a few at a time.
 //!
-//! A REQ's subscription goes live *before* its query reads the store, and
-//! the events that arrive for it meanwhile wait until the query's EOSE. Then
-//! any the query already saw (by sequence number) are dropped, so nothing
-//! is missed between the two and nothing is sent twice.
+//! A REQ's subscription goes live *before* its query reads the store: the
+//! query waits until its monitor shard confirms it's installed, so every
+//! event committed after the query's snapshot reaches the subscription. The
+//! events that arrive for it meanwhile wait until the query's EOSE. Live
+//! events the query already saw (by sequence number) are dropped, then and
+//! after — a shard can deliver an event committed just before the snapshot
+//! well after EOSE — so nothing is missed between the two and nothing is
+//! sent twice.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -48,6 +52,8 @@ struct Sub {
     json: String,
     /// Live events held until the query's EOSE.
     pending: Option<Vec<(Option<u64>, Arc<str>)>>,
+    /// The query's snapshot: stored events below this were sent with it.
+    floor: u64,
 }
 
 struct Session {
@@ -65,7 +71,7 @@ pub async fn serve(shared: Arc<Shared>, socket: WebSocket) {
     let id = shared.next_conn.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (link, mut rx, overflow) = Link::new(OUTBOUND);
     let (sink, mut stream) = socket.split();
-    shared.monitors.lock().connect(id, link.clone());
+    shared.hub.connect(id, link.clone()).await;
     let tokens = TokenBucket::new(shared.config.events_per_minute);
     let cancel = shared.cancel.clone();
     let mut session = Session { shared, id, link, sink, subs: HashMap::new(), tokens };
@@ -95,7 +101,7 @@ pub async fn serve(shared: Arc<Shared>, socket: WebSocket) {
         }
     }
 
-    session.shared.monitors.lock().disconnect(id);
+    session.shared.hub.disconnect(id).await;
     let _ = session.sink.close().await;
 }
 
@@ -122,7 +128,7 @@ impl Session {
             Some("CLOSE") => {
                 if let Some(sub) = message.get(1).and_then(Value::as_str) {
                     self.subs.remove(sub);
-                    self.shared.monitors.lock().unsubscribe(self.id, sub);
+                    self.shared.hub.unsubscribe(self.id, sub).await;
                 }
                 Ok(())
             }
@@ -216,7 +222,7 @@ impl Session {
             Ok(filters) => filters,
             Err(error) => {
                 self.subs.remove(&sub);
-                self.shared.monitors.lock().unsubscribe(self.id, &sub);
+                self.shared.hub.unsubscribe(self.id, &sub).await;
                 return self.closed(&sub, &error).await;
             }
         };
@@ -226,13 +232,16 @@ impl Session {
 
         let name: Arc<str> = sub.as_str().into();
         let json = serde_json::to_string(&sub).expect("strings serialize");
-        self.subs.insert(sub, Sub { name: name.clone(), json, pending: Some(Vec::new()) });
-        // Live first, then the query: see the module docs.
-        self.shared.monitors.lock().subscribe(self.id, name.clone(), filters.clone());
+        self.subs.insert(sub, Sub { name: name.clone(), json, pending: Some(Vec::new()), floor: 0 });
+        // Live first, then the query: see the module docs. Queued from here
+        // rather than the query's task, so a later CLOSE or REQ of the same id
+        // reaches the shard after it.
+        let installed = self.shared.hub.subscribe(self.id, name.clone(), filters.clone()).await;
 
         let shared = self.shared.clone();
         queries.spawn(async move {
             let results = async {
+                installed.await?;
                 let _permit = shared.queries.clone().acquire_owned().await?;
                 let store = shared.store.clone();
                 let max_limit = shared.config.max_limit;
@@ -251,11 +260,12 @@ impl Session {
             Err(error) => {
                 tracing::error!(%error, "a query failed");
                 self.subs.remove(&*name);
-                self.shared.monitors.lock().unsubscribe(self.id, &name);
+                self.shared.hub.unsubscribe(self.id, &name).await;
                 return self.closed(&name, "error: could not run the query").await;
             }
         };
         let pending = sub.pending.take().unwrap_or_default();
+        sub.floor = results.next_seq;
         let sub_json = sub.json.clone();
 
         for json in &results.events {
@@ -281,6 +291,7 @@ impl Session {
                         pending.push((seq, json));
                         Ok(())
                     }
+                    None if seq.is_some_and(|seq| seq < state.floor) => Ok(()),
                     None => {
                         let message = event_message(&state.json, &json);
                         self.send(message).await
