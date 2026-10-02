@@ -1,0 +1,32 @@
+# armada configuration. Every setting is optional; these are the defaults.
+# Read from /etc/armada/armada.toml, or the file passed with --config.
+
+# Where every service keeps its data: web/, relay/ and blossom/ each hold an
+# LMDB database, and blobs/ the files they share.
+storage_dir = "/var/lib/armada"
+
+[web]
+listen = "127.0.0.1:8080"
+# The nsite to serve: an naddr, or an npub for that author's root site.
+# The default is Armada's official site, published by Team Soapbox.
+nsite = "naddr1qvzqqqyf8qpzq7q6z5ns2hm5c8msyv83qwzxpxe52j8c4d4q5m92wsp9sflelkh9qqrxzundv9jxz0nw9gl"
+# Follow new versions as they're published. Off, the first version
+# downloaded is served for good.
+auto_update = true
+# Relays to look for the site on, alongside its author's own.
+relays = ["wss://relay.ditto.pub", "wss://relay.dreamith.to"]
+# Blossom servers to try after the ones the site and its author name.
+blossom_servers = ["https://blossom.ditto.pub/", "https://blossom.dreamith.to/", "https://blossom.primal.net/"]
+# Serve /index.html for paths the site has no file for, as Armada's router expects.
+spa = true
+# Seconds between full checks for a new version.
+resync_interval = 600
+# Bytes one file, and one version of the site, may be.
+max_file_size = 104857600
+max_site_size = 1073741824
+
+[relay]
+listen = "127.0.0.1:7777"
+
+[blossom]
+listen = "127.0.0.1:24242"
