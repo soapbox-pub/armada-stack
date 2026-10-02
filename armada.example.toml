@@ -119,11 +119,14 @@ health_interval = 15
 # goes to one, picked from its room's name, so they need nothing shared.
 # [[av.nodes]]
 # What clients connect to: a bare wss:// origin, never ending in /rtc, which
-# the LiveKit SDK adds itself. To serve it from armada's own domain, have
-# the reverse proxy send /rtc and /rtc/* to LiveKit.
-# url = "wss://sfu.example.com"
-# Where armada reaches its server API for health checks. Defaults to url
-# with https:// for wss://.
+# the LiveKit SDK adds itself. Make it armada's own origin, like
+# wss://armada.example.com, and armada forwards /rtc and /rtc/* to the node
+# at api_url, so it needs no domain or certificate of its own. One node can
+# be on armada's origin; others need domains of their own.
+# url = "wss://armada.example.com"
+# Where armada reaches its server API for health checks, and forwards
+# signaling to for a node on its own origin, which has to set it. Defaults
+# to url with https:// for wss://.
 # api_url = "http://127.0.0.1:7880"
 # Its credentials, from `docker run --rm livekit/livekit-server generate-keys`.
 # api_key = "APIxxxxxxxxxxxx"

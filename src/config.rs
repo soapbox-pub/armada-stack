@@ -451,9 +451,20 @@ impl Config {
             bail!("av.replay_ttl has to be at least 240 (CORD-07 §2), and at least twice av.max_skew.");
         }
         let mut urls = std::collections::HashSet::new();
+        let public_url = self.public_url()?.expect("checked above");
+        let mut local = false;
         for node in &av.nodes {
             let url = node.client_url()?;
             node.api_url()?;
+            // Served on armada's own origin, with /rtc forwarded to it.
+            if node.is_on(&public_url) {
+                if std::mem::replace(&mut local, true) {
+                    bail!("av.nodes: only one node can be on armada's own origin, {url}.");
+                }
+                if !node.api_url.as_deref().is_some_and(|api_url| api_url.trim().starts_with("http://")) {
+                    bail!("av.nodes: {url} is armada's own origin, so its signaling is forwarded to the node: it needs an http:// api_url to forward to, like http://127.0.0.1:7880.");
+                }
+            }
             if node.api_key.is_empty() || node.api_secret.is_empty() {
                 bail!("av.nodes: {url} needs an api_key and an api_secret.");
             }
@@ -478,6 +489,15 @@ impl AvNode {
             bail!("av.nodes: a node's url can't end in /rtc, which the LiveKit SDK appends itself: {}", self.url);
         }
         Ok(value.to_string())
+    }
+
+    /// Whether clients reach the node on `origin`, the `ws(s)://` form of
+    /// armada's public URL, so armada forwards its signaling.
+    pub fn is_on(&self, origin: &url::Url) -> bool {
+        let Ok(url) = self.client_url() else { return false };
+        let Ok(mut url) = url::Url::parse(&url) else { return false };
+        let scheme = if url.scheme() == "wss" { "https" } else { "http" };
+        url.set_scheme(scheme).is_ok() && url.path() == "/" && url.origin() == origin.origin()
     }
 
     /// The base of the node's server API, without a trailing slash.
@@ -614,6 +634,32 @@ mod tests {
         let twice = format!("public_url = \"https://a.example.com\"\n{NODE}{NODE}");
         assert!(Config::parse(&twice).unwrap_err().to_string().contains("listed twice"));
         assert!(Config::parse("public_url = \"https://a.example.com\"\n[[av.nodes]]\nurl = \"wss://sfu.example.com\"\napi_key = \"k\"\napi_secret = \"\"").is_err());
+    }
+
+    #[test]
+    fn av_on_armadas_own_origin() {
+        let node = |url: &str, api_url: Option<&str>| {
+            let api_url = api_url.map(|api_url| format!("api_url = \"{api_url}\"\n")).unwrap_or_default();
+            format!("[[av.nodes]]\nurl = \"{url}\"\n{api_url}api_key = \"k\"\napi_secret = \"s\"\n")
+        };
+        let parse = |nodes: &[String]| Config::parse(&format!("public_url = \"https://armada.example.com\"\n{}", nodes.concat()));
+        let local = node("wss://armada.example.com/", Some("http://127.0.0.1:7880"));
+        let config = parse(std::slice::from_ref(&local)).unwrap();
+        let public_url = config.public_url().unwrap().unwrap();
+        assert!(config.av.nodes[0].is_on(&public_url));
+        assert!(parse(&[local.clone(), node("wss://sfu.example.com", None)]).is_ok());
+
+        // Forwarded to its API, which can't be left to default to armada itself.
+        assert!(parse(&[node("wss://armada.example.com", None)]).is_err());
+        assert!(parse(&[node("wss://armada.example.com", Some("https://sfu.internal"))]).is_err());
+        assert!(parse(&[local.clone(), node("wss://armada.example.com", Some("http://127.0.0.1:7881"))]).is_err());
+        // Another port, scheme, or path is another place.
+        let elsewhere = Config::parse(&format!("public_url = \"https://armada.example.com\"\n{}", node("wss://armada.example.com:7880", None))).unwrap();
+        assert!(!elsewhere.av.nodes[0].is_on(&public_url));
+        let elsewhere = Config::parse(&format!("public_url = \"https://armada.example.com\"\n{}", node("ws://armada.example.com", None))).unwrap();
+        assert!(!elsewhere.av.nodes[0].is_on(&public_url));
+        let elsewhere = Config::parse(&format!("public_url = \"https://armada.example.com\"\n{}", node("wss://armada.example.com/sfu", None))).unwrap();
+        assert!(!elsewhere.av.nodes[0].is_on(&public_url));
     }
 
     #[test]

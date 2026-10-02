@@ -24,6 +24,7 @@ mod fleet;
 mod grant;
 mod livekit;
 mod ratelimit;
+pub mod signaling;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -56,6 +57,8 @@ type Reply = Response<Body>;
 #[derive(Clone)]
 pub struct Av {
     broker: Arc<Broker>,
+    /// Forwards `/rtc` to the node on armada's own origin, if there is one.
+    signaling: Option<Arc<signaling::Signaling>>,
 }
 
 struct Broker {
@@ -98,7 +101,10 @@ impl Av {
         }
         let nodes = av.nodes.iter().map(Node::from_config).collect::<Result<Vec<_>>>()?;
         let public_url = config.public_url()?.expect("validated: public_url is set when AV is on");
+        let local = av.nodes.iter().find(|node| node.is_on(&public_url));
+        let signaling = local.map(|node| signaling::Signaling::new(&node.api_url().expect("validated"), config.trusts_proxy())).transpose()?;
         Ok(Some(Av {
+            signaling: signaling.map(Arc::new),
             broker: Arc::new(Broker {
                 fleet: Fleet::new(nodes),
                 base_url: format!("{}{PATH}/", public_url.origin().ascii_serialization()),
@@ -119,6 +125,12 @@ impl Av {
 
     pub fn handle(&self, request: Request) -> Reply {
         with_headers(self.broker.route(request))
+    }
+
+    /// The forwarder for LiveKit's signaling, if a node is on armada's own
+    /// origin.
+    pub fn signaling(&self) -> Option<&signaling::Signaling> {
+        self.signaling.as_deref()
     }
 }
 

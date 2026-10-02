@@ -8,7 +8,9 @@
 //!    any method, CORS preflights included: the Blossom server.
 //! 3. `/.well-known/concord/av` and beneath it: the AV broker, or a 404 if
 //!    there isn't one.
-//! 4. Everything else: the web app, whose shell answers any path it lacks a
+//! 4. `/rtc` and beneath it, if an AV node is on this origin: forwarded to
+//!    that node, LiveKit's signaling.
+//! 5. Everything else: the web app, whose shell answers any path it lacks a
 //!    file for — which is why it comes last.
 //!
 //! Each service sets its own response headers, so a blob keeps its sandbox
@@ -52,6 +54,8 @@ async fn dispatch(services: &Services, request: Request) -> Response {
             Some(av) => av.handle(request).into_response(),
             None => av::not_offered().into_response(),
         }
+    } else if let Some(signaling) = services.av.as_ref().and_then(Av::signaling).filter(|_| av::signaling::wants(path)) {
+        signaling.handle(request).await
     } else {
         services.web.serve(request).await.into_response()
     }

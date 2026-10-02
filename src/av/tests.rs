@@ -257,3 +257,114 @@ async fn checks_grants_against_the_public_url_not_the_host() {
     assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
     assert_eq!(reply.body["error"], "grant `u` tag does not match this request");
 }
+
+/// A stand-in for a LiveKit node's HTTP server: `/rtc` a WebSocket that
+/// first says what it was asked with, then echoes; `/rtc/validate` the same
+/// as text; anything else a mark that it was reached.
+async fn fake_node() -> SocketAddr {
+    use axum::extract::ws::{Message, WebSocketUpgrade};
+
+    fn described(request: &http::request::Parts) -> String {
+        let header = |name: &str| request.headers.get(name).and_then(|value| value.to_str().ok()).unwrap_or("-").to_string();
+        format!("{} {} {}", request.uri, header("x-forwarded-for"), header("host"))
+    }
+
+    let router = axum::Router::new()
+        .route(
+            "/rtc",
+            axum::routing::get(|upgrade: WebSocketUpgrade, request: http::request::Parts| async move {
+                let description = described(&request);
+                upgrade.protocols(["livekit"]).on_upgrade(move |mut socket| async move {
+                    socket.send(Message::Text(description.into())).await.unwrap();
+                    while let Some(Ok(message)) = socket.recv().await {
+                        if socket.send(message).await.is_err() {
+                            break;
+                        }
+                    }
+                })
+            }),
+        )
+        .route("/rtc/validate", axum::routing::get(|request: http::request::Parts| async move { described(&request) }))
+        .fallback(|| async { (StatusCode::IM_A_TEAPOT, "reached") });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await });
+    address
+}
+
+/// armada, with an AV node on its own origin.
+async fn armada_with_local_node(node: SocketAddr, extra: &str) -> SocketAddr {
+    let config = Config::parse(&format!(
+        "public_url = \"{ORIGIN}\"\n{extra}\n[[av.nodes]]\nurl = \"wss://armada.example.com\"\napi_url = \"http://{node}\"\napi_key = \"k\"\napi_secret = \"s\"\n"
+    ))
+    .unwrap();
+    let av = Av::new(&config).unwrap().unwrap();
+    let router = axum::Router::new().fallback(move |request: Request| {
+        let av = av.clone();
+        async move {
+            match av.signaling().filter(|_| signaling::wants(request.uri().path())) {
+                Some(signaling) => signaling.handle(request).await,
+                None => empty(StatusCode::NOT_FOUND),
+            }
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await });
+    address
+}
+
+#[test]
+fn forwards_only_signaling() {
+    assert!(signaling::wants("/rtc"));
+    assert!(signaling::wants("/rtc/validate"));
+    assert!(signaling::wants("/rtc/v1"));
+    assert!(!signaling::wants("/rtcx"));
+    assert!(!signaling::wants("/twirp/livekit.RoomService/ListRooms"));
+    // Only a node on armada's own origin is forwarded to.
+    assert!(broker("").signaling().is_none());
+}
+
+#[tokio::test]
+async fn forwards_signaling_to_the_node_on_its_own_origin() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+
+    let node = fake_node().await;
+    let armada = armada_with_local_node(node, "trust_proxy = false").await;
+
+    // The WebSocket, joined byte for byte: the node picks the subprotocol.
+    let mut request = format!("ws://{armada}/rtc?access_token=abc").into_client_request().unwrap();
+    request.headers_mut().insert("sec-websocket-protocol", HeaderValue::from_static("livekit"));
+    request.headers_mut().insert("x-forwarded-for", HeaderValue::from_static("6.6.6.6"));
+    let (mut socket, response) = tokio_tungstenite::connect_async(request).await.unwrap();
+    assert_eq!(response.headers()["sec-websocket-protocol"], "livekit");
+    let first = socket.next().await.unwrap().unwrap().into_text().unwrap();
+    // A client's own X-Forwarded-For isn't believed, with no proxy in front.
+    assert_eq!(first.as_str(), format!("/rtc?access_token=abc 127.0.0.1 {armada}"));
+    socket.send(Message::Binary(vec![1, 2, 3].into())).await.unwrap();
+    assert_eq!(socket.next().await.unwrap().unwrap(), Message::Binary(vec![1, 2, 3].into()));
+    socket.close(None).await.unwrap();
+
+    // Plain requests too. Behind a trusted proxy, what it forwarded is kept.
+    let http = reqwest::Client::new();
+    let armada = armada_with_local_node(node, "").await;
+    let reply = http.get(format!("http://{armada}/rtc/validate?access_token=abc")).header("x-forwarded-for", "6.6.6.6").send().await.unwrap();
+    assert_eq!(reply.status(), StatusCode::OK);
+    assert_eq!(reply.text().await.unwrap(), format!("/rtc/validate?access_token=abc 6.6.6.6, 127.0.0.1 {armada}"));
+
+    // Never the server API.
+    let reply = http.get(format!("http://{armada}/twirp/livekit.RoomService/ListRooms")).send().await.unwrap();
+    assert_eq!(reply.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn reports_a_node_that_is_down() {
+    let closed = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap()
+    };
+    let armada = armada_with_local_node(closed, "").await;
+    let reply = reqwest::get(format!("http://{armada}/rtc/validate")).await.unwrap();
+    assert_eq!(reply.status(), StatusCode::BAD_GATEWAY);
+}

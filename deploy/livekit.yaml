@@ -8,9 +8,10 @@
 # port mapping adds a cost to every packet.
 port: 7880
 
-# Signaling and the server API on loopback only. The reverse proxy sends
-# wss://<domain>/rtc here, and armada checks health over 127.0.0.1, so
-# nothing needs 7880 from outside. Don't route /twirp publicly: nothing
+# Signaling and the server API on loopback only. With the node's url set to
+# armada's own origin and api_url to http://127.0.0.1:7880, armada forwards
+# wss://<domain>/rtc here and checks health over 127.0.0.1, so nothing needs
+# 7880 from outside. Don't route /twirp publicly: nothing
 # needs it, and it would only offer the API credentials up for guessing.
 # Media binds its own sockets, below, and has to be reachable.
 bind_addresses:
