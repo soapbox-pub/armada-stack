@@ -87,8 +87,6 @@ pub struct WebConfig {
     pub auto_update: bool,
     /// Relays to look for the site's manifest on, alongside its author's own.
     pub relays: Vec<String>,
-    /// Blossom servers to try after the ones the manifest and its author name.
-    pub blossom_servers: Vec<String>,
     /// Seconds between full re-fetches of the manifest, which catch anything
     /// the live subscription missed.
     pub resync_interval: u64,
@@ -206,11 +204,6 @@ impl Default for WebConfig {
             nsite: DEFAULT_NSITE.into(),
             auto_update: true,
             relays: vec!["wss://relay.ditto.pub".into(), "wss://relay.dreamith.to".into()],
-            blossom_servers: vec![
-                "https://blossom.ditto.pub/".into(),
-                "https://blossom.dreamith.to/".into(),
-                "https://blossom.primal.net/".into(),
-            ],
             resync_interval: 600,
             max_file_size: 100 << 20,
             max_site_size: 1 << 30,
@@ -372,12 +365,6 @@ impl Config {
         self.web.address()?;
         for relay in &self.web.relays {
             parse_relay_url(relay)?;
-        }
-        for server in &self.web.blossom_servers {
-            let url = url::Url::parse(server).with_context(|| format!("web.blossom_servers: not a valid URL: {server}"))?;
-            if url.scheme() != "https" && url.scheme() != "http" {
-                bail!("web.blossom_servers: a Blossom server URL has to start with https:// or http://: {server}");
-            }
         }
         if self.web.resync_interval == 0 {
             bail!("web.resync_interval has to be at least 1 second.");

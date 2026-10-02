@@ -39,7 +39,7 @@ pub trait NostrSource: Send + Sync {
     fn fetch_manifest<'a>(&'a self, address: &'a NsiteAddress, cancel: &'a CancellationToken) -> BoxFuture<'a, Option<Event>>;
 
     /// Blossom servers to try for a site's blobs, best first.
-    fn blob_sources<'a>(&'a self, manifest: &'a Event, fallbacks: &'a [String], cancel: &'a CancellationToken) -> BoxFuture<'a, Vec<String>>;
+    fn blob_sources<'a>(&'a self, manifest: &'a Event, cancel: &'a CancellationToken) -> BoxFuture<'a, Vec<String>>;
 
     /// Stream new versions of a site until `cancel` fires.
     fn subscribe<'a>(&'a self, address: &'a NsiteAddress, cancel: CancellationToken) -> BoxFuture<'a, mpsc::Receiver<Event>>;
@@ -122,13 +122,11 @@ impl NostrSource for NostrService {
         })
     }
 
-    fn blob_sources<'a>(&'a self, manifest: &'a Event, fallbacks: &'a [String], cancel: &'a CancellationToken) -> BoxFuture<'a, Vec<String>> {
+    fn blob_sources<'a>(&'a self, manifest: &'a Event, cancel: &'a CancellationToken) -> BoxFuture<'a, Vec<String>> {
         Box::pin(async move {
             let author_servers = self.author_servers(&manifest.pubkey, cancel).await;
             let named = server_tags(manifest).into_iter().chain(author_servers).filter_map(|server| normalize_server(&server));
-            // The operator's fallbacks are not the author's to crowd out.
-            let named = dedupe(named).into_iter().take(MAX_AUTHOR_SERVERS);
-            dedupe(named.chain(fallbacks.iter().filter_map(|server| normalize_server(server))))
+            dedupe(named).into_iter().take(MAX_AUTHOR_SERVERS).collect()
         })
     }
 

@@ -73,7 +73,6 @@ impl Web {
             nostr,
             settings: SyncSettings {
                 auto_update: config.auto_update,
-                fallback_servers: config.blossom_servers.clone(),
                 resync_interval: Duration::from_secs(config.resync_interval),
                 max_file_size: config.max_file_size,
                 max_site_size: config.max_site_size,

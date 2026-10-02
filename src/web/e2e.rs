@@ -39,7 +39,7 @@ impl NostrSource for FakeNostr {
         Box::pin(async move { self.manifests.lock().iter().filter(|e| address.matches(e)).max_by_key(|e| e.created_at).cloned() })
     }
 
-    fn blob_sources<'a>(&'a self, _: &'a Event, _: &'a [String], _: &'a CancellationToken) -> BoxFuture<'a, Vec<String>> {
+    fn blob_sources<'a>(&'a self, _: &'a Event, _: &'a CancellationToken) -> BoxFuture<'a, Vec<String>> {
         Box::pin(async move { vec![self.server.clone()] })
     }
 

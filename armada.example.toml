@@ -27,7 +27,6 @@ http_listen = "[::]:80"
 nsite = "naddr1qvzqqqyf8qpzq7q6z5ns2hm5c8msyv83qwzxpxe52j8c4d4q5m92wsp9sflelkh9qqrxzundv9jxz0nw9gl"
 auto_update = true
 relays = ["wss://relay.ditto.pub", "wss://relay.dreamith.to"]
-blossom_servers = ["https://blossom.ditto.pub/", "https://blossom.dreamith.to/", "https://blossom.primal.net/"]
 resync_interval = 600
 max_file_size = 104857600
 max_site_size = 1073741824

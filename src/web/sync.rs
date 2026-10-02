@@ -49,7 +49,6 @@ const MAX_SITE_FILES: usize = 50_000;
 
 pub struct SyncSettings {
     pub auto_update: bool,
-    pub fallback_servers: Vec<String>,
     pub resync_interval: Duration,
     pub max_file_size: u64,
     pub max_site_size: u64,
@@ -211,9 +210,9 @@ impl SyncWorker {
         }
 
         if !missing.is_empty() {
-            let servers = self.nostr.blob_sources(event, &self.settings.fallback_servers, cancel).await;
+            let servers = self.nostr.blob_sources(event, cancel).await;
             if servers.is_empty() {
-                anyhow::bail!("No Blossom servers to download from: the manifest names none, its author has no kind 10063 list, and web.blossom_servers is empty.");
+                anyhow::bail!("No Blossom servers to download from: the manifest names none, and its author has no kind 10063 list.");
             }
             self.download_all(missing, &servers, &compressible, max_size - stored, cancel).await?;
         }
