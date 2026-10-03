@@ -14,7 +14,7 @@ use std::io::Write;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 use bytes::Bytes;
@@ -472,6 +472,35 @@ impl BlobStore {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
             _ => Ok(()),
         }
+    }
+
+    /// Every blob stored, with when it was written. Compressed copies go with
+    /// their blob, so aren't listed; nor is anything else in the directory.
+    pub fn list(&self) -> Result<Vec<(BlobHash, SystemTime)>> {
+        let mut blobs = Vec::new();
+        let entries = |dir: &Path| -> Result<Vec<std::fs::DirEntry>> {
+            match std::fs::read_dir(dir) {
+                Ok(entries) => Ok(entries.collect::<std::io::Result<_>>()?),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+                Err(error) => Err(error.into()),
+            }
+        };
+        let fanned = |entry: &std::fs::DirEntry| entry.file_type().is_ok_and(|kind| kind.is_dir()) && entry.file_name().len() == 2;
+        for first in entries(&self.inner.dir)?.iter().filter(|entry| fanned(entry)) {
+            for second in entries(&first.path())?.iter().filter(|entry| fanned(entry)) {
+                for file in entries(&second.path())? {
+                    let Some(sha256) = file.file_name().to_str().and_then(BlobHash::parse) else { continue };
+                    if file.path() != self.path(sha256) {
+                        continue;
+                    }
+                    let metadata = file.metadata()?;
+                    if metadata.is_file() {
+                        blobs.push((sha256, metadata.modified()?));
+                    }
+                }
+            }
+        }
+        Ok(blobs)
     }
 
     /// Fetch a URL, following redirects one at a time, so each hop is vetted

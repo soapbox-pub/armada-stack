@@ -9,12 +9,13 @@
 //!
 //! A version goes live only once every one of its blobs is on disk, and then
 //! all at once, so the site is never served half-updated. It goes live with
-//! the versions kept before it merged beneath (see [`super::site`]). With `auto_update`
+//! the versions kept before it merged beneath (see [`super::site`]), and
+//! then the blobs no kept version uses are deleted (see [`super::prune`]). With `auto_update`
 //! off the worker stops as soon as anything is live.
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 use arc_swap::ArcSwapOption;
@@ -25,6 +26,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::db::{Status, Version, WebDb};
+use super::prune::prune;
 use super::site::Site;
 use crate::blobs::BlobStore;
 use crate::hash::BlobHash;
@@ -230,9 +232,23 @@ impl SyncWorker {
 
         let id = event.id.clone();
         self.db(move |db| db.promote(&id, keep)).await?;
-        self.live.store(Some(Arc::new(site)));
+        let site = Arc::new(site);
+        self.live.store(Some(site.clone()));
         tracing::info!(event_id = event.id, created_at = event.created_at, "version live");
+        self.prune(site).await;
         Ok(())
+    }
+
+    /// Delete the blobs nothing kept uses any more. Never fatal: what's left
+    /// is only disk.
+    async fn prune(&self, live: Arc<Site>) {
+        let (db, blobs) = (self.db.clone(), self.blobs.clone());
+        match tokio::task::spawn_blocking(move || prune(&db, &blobs, &live, SystemTime::now())).await {
+            Ok(Ok(pruned)) if pruned.blobs > 0 => tracing::info!(blobs = pruned.blobs, bytes = pruned.bytes, "pruned blobs no kept version uses"),
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "could not prune blobs"),
+            Err(error) => tracing::warn!(%error, "could not prune blobs"),
+        }
     }
 
     /// Download missing blobs with bounded concurrency. Nothing new starts

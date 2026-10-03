@@ -11,6 +11,7 @@ mod db;
 mod e2e;
 pub mod env;
 mod inject;
+mod prune;
 pub mod serve;
 mod site;
 mod sync;
