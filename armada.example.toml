@@ -31,6 +31,9 @@ relays = ["wss://relay.ditto.pub", "wss://relay.dreamith.to"]
 resync_interval = 600
 max_file_size = 104857600
 max_site_size = 1073741824
+# Versions kept, the served one included. A page loaded from an earlier one
+# goes on finding the scripts it names, while that version is kept.
+keep_versions = 60
 
 # What the web app is told through window.ENV, at /_armada/env.js, by the
 # names Armada reads. Unset, armada's own relay (also a home for new

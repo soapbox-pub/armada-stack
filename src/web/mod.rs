@@ -46,10 +46,11 @@ impl Web {
         let db = WebDb::open(storage)?;
         let blobs = storage.blobs.clone();
 
-        let (current, loader) = (db.clone(), blobs.clone());
+        let (current, loader, keep) = (db.clone(), blobs.clone(), config.keep_versions);
         let live = tokio::task::spawn_blocking(move || -> Result<Option<Site>> {
             let Some(version) = current.current()? else { return Ok(None) };
-            match Site::load(&version.event, &loader) {
+            let earlier: Vec<_> = current.chain(&version.event.id, keep)?.into_iter().skip(1).map(|version| version.event).collect();
+            match Site::load(&version.event, &earlier, &loader) {
                 Ok(site) => Ok(Some(site)),
                 Err(missing) => {
                     // Someone cleared the store. The sync worker downloads it again.
@@ -80,6 +81,7 @@ impl Web {
                 resync_interval: Duration::from_secs(config.resync_interval),
                 max_file_size: config.max_file_size,
                 max_site_size: config.max_site_size,
+                keep_versions: config.keep_versions,
                 retry_backoff: Duration::from_secs(5),
             },
             live,

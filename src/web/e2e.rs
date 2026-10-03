@@ -97,9 +97,13 @@ impl Harness {
 
     /// Start the web service, as `main` would, over this harness's storage.
     async fn start(&self, manifests: Vec<Event>, auto_update: bool) -> Running {
+        self.start_keeping(manifests, auto_update, WebConfig::default().keep_versions).await
+    }
+
+    async fn start_keeping(&self, manifests: Vec<Event>, auto_update: bool, keep_versions: usize) -> Running {
         let (tx, rx) = mpsc::channel(8);
         let nostr = Arc::new(FakeNostr { manifests: Mutex::new(manifests), updates: Mutex::new(Some(rx)), server: self.server.clone() });
-        let config = WebConfig { nsite: self.address.naddr(), auto_update, ..WebConfig::default() };
+        let config = WebConfig { nsite: self.address.naddr(), auto_update, keep_versions, ..WebConfig::default() };
         let mut web = Web::open(&config, Default::default(), &Storage::allowing_private(self.dir.path()), nostr).await.unwrap();
         web.worker.settings.retry_backoff = Duration::from_millis(10);
 
@@ -214,32 +218,44 @@ async fn a_published_site_is_downloaded_and_served() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_new_version_replaces_the_old_and_survives_a_restart() {
+async fn new_versions_go_live_over_the_kept_ones_and_survive_a_restart() {
     let harness = Harness::new().await;
     let now = crate::util::now();
-    let first = harness.publish(now - 120, &[("/index.html", "first")]);
-    let web = harness.start(vec![first.clone()], true).await;
+    let first = harness.publish(now - 180, &[("/index.html", "first"), ("/assets/first.js", "1")]);
+    let web = harness.start_keeping(vec![first.clone()], true, 2).await;
     eventually("the first version going live", async || web.get("/", &[]).await.2 == b"first").await;
     // A site with no policy of its own gets the default.
     assert_eq!(web.get("/", &[]).await.1["content-security-policy"], super::csp::DEFAULT_CSP);
 
     // Published while subscribed: it goes live without waiting for a resync.
-    let second = harness.publish(now - 60, &[("/index.html", "second")]);
+    let second = harness.publish(now - 120, &[("/index.html", "second"), ("/assets/second.js", "2")]);
     web.updates.send(second.clone()).await.unwrap();
     eventually("the second version going live", async || web.get("/", &[]).await.2 == b"second").await;
-    // The first is forgotten once the second is live.
+    // The first is kept, and what it alone has is still served beneath the second.
+    assert!(web.db.get(&first.id).unwrap().is_some());
+    assert_eq!(web.get("/assets/first.js", &[]).await.2, b"1");
+    assert_eq!(web.get("/assets/second.js", &[]).await.2, b"2");
+
+    // Past keep_versions, the oldest is forgotten, and its files with it.
+    let third = harness.publish(now - 60, &[("/index.html", "third")]);
+    web.updates.send(third.clone()).await.unwrap();
+    eventually("the third version going live", async || web.get("/", &[]).await.2 == b"third").await;
     assert!(web.db.get(&first.id).unwrap().is_none());
+    assert_ne!(web.get("/assets/first.js", &[]).await.2, b"1");
+    assert_eq!(web.get("/assets/second.js", &[]).await.2, b"2");
 
     // An older version turning up late changes nothing.
     web.updates.send(first.clone()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(web.get("/", &[]).await.2, b"second");
+    assert_eq!(web.get("/", &[]).await.2, b"third");
     web.stop().await;
 
-    // Restarted with the network gone, it serves what it had at once.
+    // Restarted with the network gone, it serves what it had at once,
+    // merged as it was.
     harness.blobs.lock().clear();
-    let web = harness.start(vec![], true).await;
-    assert_eq!(web.get("/", &[]).await.2, b"second");
+    let web = harness.start_keeping(vec![], true, 2).await;
+    assert_eq!(web.get("/", &[]).await.2, b"third");
+    assert_eq!(web.get("/assets/second.js", &[]).await.2, b"2");
     web.stop().await;
 }
 

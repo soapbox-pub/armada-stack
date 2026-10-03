@@ -1,5 +1,10 @@
-//! The version being served, held in memory, and how a request path finds a
-//! file in it.
+//! The version being served, with the versions before it merged beneath,
+//! held in memory, and how a request path finds a file in it.
+//!
+//! Merged as npanel merges a host's deployments: a path is served from the
+//! newest version that has it. Armada's chunks are named by their content,
+//! and a page already open goes on asking for the names of the version it
+//! was loaded from, which are just the files the next version drops.
 
 use std::collections::HashMap;
 
@@ -21,9 +26,10 @@ pub struct File {
     pub variants: Variants,
 }
 
-/// One version of the site, every file of it on disk. Immutable: a new
-/// version is a new `Site`, swapped in whole.
+/// One version of the site and those merged beneath it, every file of them
+/// on disk. Immutable: a new version is a new `Site`, swapped in whole.
 pub struct Site {
+    /// The version being served.
     pub event_id: String,
     pub files: HashMap<String, File>,
     /// The `Last-Modified` every response carries: when the version was
@@ -44,23 +50,32 @@ pub struct Resolved<'a> {
 }
 
 impl Site {
-    /// The site a manifest describes, if every blob it lists is stored.
-    /// Otherwise the first missing hash.
-    pub fn load(event: &Event, blobs: &BlobStore) -> Result<Site, BlobHash> {
-        let mut files = HashMap::new();
-        for (path, sha256) in manifest_paths(event) {
-            let variants = blobs.variants(sha256).ok_or(sha256)?;
-            let mut file = File { sha256, variants };
-            if matches!(&*lowercase_extname(&path), ".html" | ".htm") {
-                file = with_env(&path, file, blobs);
+    /// The site `served` describes, with the files of `earlier` versions,
+    /// newest first, beneath it, if every blob `served` lists is stored.
+    /// Otherwise the first missing hash. An earlier version missing a blob is
+    /// left out.
+    pub fn load(served: &Event, earlier: &[Event], blobs: &BlobStore) -> Result<Site, BlobHash> {
+        let mut files = version_files(served, blobs)?;
+        for event in earlier {
+            match version_files(event, blobs) {
+                Ok(older) => {
+                    for (path, file) in older {
+                        files.entry(path).or_insert(file);
+                    }
+                }
+                Err(missing) => tracing::warn!(event_id = event.id, sha256 = %missing, "an earlier version is missing blobs; its files aren't merged"),
             }
-            files.insert(path, file);
+        }
+        for (path, file) in &mut files {
+            if matches!(&*lowercase_extname(path), ".html" | ".htm") {
+                *file = with_env(path, *file, blobs);
+            }
         }
         let index = files.get("/index.html").map(|file| blobs.read_text(file.sha256, MAX_HTML_BYTES));
         Ok(Site {
-            event_id: event.id.clone(),
+            event_id: served.id.clone(),
             files,
-            last_modified: HeaderValue::from_str(&http_date(event.created_at)).expect("an HTTP date is a valid header"),
+            last_modified: HeaderValue::from_str(&http_date(served.created_at)).expect("an HTTP date is a valid header"),
             csp: site_policy(index.as_deref()),
         })
     }
@@ -90,6 +105,12 @@ impl Site {
             Some((Resolved { path, shell }, file))
         })
     }
+}
+
+/// The files a manifest lists, if every blob is stored. Otherwise the first
+/// missing hash.
+fn version_files(event: &Event, blobs: &BlobStore) -> Result<HashMap<String, File>, BlobHash> {
+    manifest_paths(event).into_iter().map(|(path, sha256)| Ok((path, File { sha256, variants: blobs.variants(sha256).ok_or(sha256)? }))).collect()
 }
 
 /// A page with the `window.ENV` script added, stored and compressed under a

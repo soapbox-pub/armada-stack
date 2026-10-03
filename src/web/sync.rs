@@ -8,7 +8,8 @@
 //! 3. A retry, with backoff, of a version whose deploy failed.
 //!
 //! A version goes live only once every one of its blobs is on disk, and then
-//! all at once, so the site is never served half-updated. With `auto_update`
+//! all at once, so the site is never served half-updated. It goes live with
+//! the versions kept before it merged beneath (see [`super::site`]). With `auto_update`
 //! off the worker stops as soon as anything is live.
 
 use std::collections::HashSet;
@@ -52,6 +53,8 @@ pub struct SyncSettings {
     pub resync_interval: Duration,
     pub max_file_size: u64,
     pub max_site_size: u64,
+    /// Versions kept, the served one included, and merged beneath it.
+    pub keep_versions: usize,
     /// Wait before a second attempt at a failed deploy. It doubles after that.
     pub retry_backoff: Duration,
 }
@@ -217,14 +220,16 @@ impl SyncWorker {
             self.download_all(missing, &servers, &compressible, max_size - stored, cancel).await?;
         }
 
+        let (id, keep) = (event.id.clone(), self.settings.keep_versions);
+        let earlier: Vec<Event> = self.db(move |db| db.chain(&id, keep)).await?.into_iter().skip(1).map(|version| version.event).collect();
         let blobs = self.blobs.clone();
         let manifest = event.clone();
-        let site = tokio::task::spawn_blocking(move || Site::load(&manifest, &blobs))
+        let site = tokio::task::spawn_blocking(move || Site::load(&manifest, &earlier, &blobs))
             .await?
             .map_err(|sha| anyhow::anyhow!("Blob {sha} went missing from storage during the deploy."))?;
 
         let id = event.id.clone();
-        self.db(move |db| db.promote(&id)).await?;
+        self.db(move |db| db.promote(&id, keep)).await?;
         self.live.store(Some(Arc::new(site)));
         tracing::info!(event_id = event.id, created_at = event.created_at, "version live");
         Ok(())

@@ -96,6 +96,10 @@ pub struct WebConfig {
     pub max_file_size: u64,
     /// Bytes one version of the site may be, all files together.
     pub max_site_size: u64,
+    /// Versions of the site kept, the served one included. Their files are
+    /// merged under the served version's, so a page loaded from an earlier
+    /// one can still fetch the chunks it names.
+    pub keep_versions: usize,
     /// Settings handed to the web app as `window.ENV`, by the names Armada
     /// reads (`CONFIG_NAMES` in its `src/build/buildConfig.ts`). Each one
     /// replaces what armada would otherwise say for that name, and an empty
@@ -230,6 +234,7 @@ impl Default for WebConfig {
             resync_interval: 600,
             max_file_size: 100 << 20,
             max_site_size: 1 << 30,
+            keep_versions: 60,
             env: BTreeMap::new(),
         }
     }
@@ -395,6 +400,9 @@ impl Config {
         }
         if self.web.resync_interval == 0 {
             bail!("web.resync_interval has to be at least 1 second.");
+        }
+        if self.web.keep_versions == 0 {
+            bail!("web.keep_versions has to be at least 1: the version being served.");
         }
         for name in self.web.env.keys() {
             if !crate::web::env::valid_name(name) {
@@ -614,6 +622,7 @@ mod tests {
         assert!(Config::parse("[web]\nlisten = \"127.0.0.1:8080\"").is_err());
         assert!(Config::parse("[blossom]\npublic_url = \"https://example.com\"").is_err());
         assert!(Config::parse("[web]\ntypo = 1").is_err());
+        assert!(Config::parse("[web]\nkeep_versions = 0").is_err());
         assert!(Config::parse("[web.env]\n\"APP-RELAYS\" = \"x\"").is_err());
         assert!(Config::parse("[web.env]\nAPP_RELAYS = 1").is_err());
         assert_eq!(Config::parse("[web.env]\nAPP_RELAYS = \"\"").unwrap().web.env["APP_RELAYS"], "");
