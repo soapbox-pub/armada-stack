@@ -13,7 +13,6 @@ pub struct BlobHash([u8; 32]);
 
 impl BlobHash {
     /// The hash of some bytes.
-    #[cfg(test)]
     pub fn of(bytes: &[u8]) -> BlobHash {
         use sha2::{Digest, Sha256};
         BlobHash(Sha256::digest(bytes).into())

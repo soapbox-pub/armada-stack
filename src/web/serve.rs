@@ -15,6 +15,7 @@ use http::header::{self, HeaderMap, HeaderValue};
 use http::{Method, Request, Response, StatusCode};
 
 use super::csp::DEFAULT_CSP;
+use super::env::{ClientEnv, ENV_PATH};
 use super::site::Site;
 use crate::blobs::{BlobStore, Encoding, Variants};
 use crate::hash::BlobHash;
@@ -34,6 +35,8 @@ pub struct SiteServer {
     pub blobs: BlobStore,
     /// The site's `X-Nsite-Addr`.
     pub naddr: HeaderValue,
+    /// What [`ENV_PATH`] says.
+    pub env: ClientEnv,
 }
 
 type Reply = Response<Body>;
@@ -71,6 +74,12 @@ impl SiteServer {
                 .header(header::ALLOW, "GET, HEAD")
                 .body(Body::from("This site only serves GET and HEAD requests."))
                 .expect("response");
+        }
+
+        // Before the site: it's armada's, and the app wants it even while
+        // there's no site to load it.
+        if path == ENV_PATH {
+            return self.env_script(method, request);
         }
 
         let Some(site) = site else {
@@ -164,6 +173,22 @@ impl SiteServer {
             None => bytes,
         };
         builder.status(status).body(Body::from(body)).expect("response")
+    }
+
+    /// [`ENV_PATH`]: written per request, so it's revalidated every time,
+    /// which its `ETag` makes cheap.
+    fn env_script(&self, method: &Method, request: &HeaderMap) -> Reply {
+        let script = self.env.script(request);
+        let etag = format!("\"{}\"", BlobHash::of(script.as_bytes()));
+        let builder = Response::builder()
+            .header(header::CONTENT_TYPE, "text/javascript; charset=utf-8")
+            .header(header::CACHE_CONTROL, "no-cache")
+            .header(header::ETAG, &etag);
+        if matches_etag(header_str(request, header::IF_NONE_MATCH), &etag) {
+            return builder.status(StatusCode::NOT_MODIFIED).body(Body::empty()).expect("response");
+        }
+        let builder = builder.status(StatusCode::OK).header(header::CONTENT_LENGTH, script.len());
+        builder.body(if method == Method::HEAD { Body::empty() } else { Body::from(script) }).expect("response")
     }
 
     /// A blob's bytes for a response body. A kept mapping answers right

@@ -10,6 +10,7 @@
 //! `/var/lib/armada`; anyone else in `$XDG_DATA_HOME/armada`
 //! (`~/.local/share/armada`), which they can write to.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
@@ -95,6 +96,12 @@ pub struct WebConfig {
     pub max_file_size: u64,
     /// Bytes one version of the site may be, all files together.
     pub max_site_size: u64,
+    /// Settings handed to the web app as `window.ENV`, by the names Armada
+    /// reads (`CONFIG_NAMES` in its `src/build/buildConfig.ts`). Each one
+    /// replaces what armada would otherwise say for that name, and an empty
+    /// string is a value too: Armada reads it as "none" for most lists.
+    /// See [`crate::web::env`].
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -223,6 +230,7 @@ impl Default for WebConfig {
             resync_interval: 600,
             max_file_size: 100 << 20,
             max_site_size: 1 << 30,
+            env: BTreeMap::new(),
         }
     }
 }
@@ -387,6 +395,11 @@ impl Config {
         }
         if self.web.resync_interval == 0 {
             bail!("web.resync_interval has to be at least 1 second.");
+        }
+        for name in self.web.env.keys() {
+            if !crate::web::env::valid_name(name) {
+                bail!("web.env: {name:?} isn't a name Armada could read; names are letters, digits and underscores, not starting with a digit.");
+            }
         }
         let relay = &self.relay;
         if relay.max_message_length < 1024 {
@@ -601,6 +614,9 @@ mod tests {
         assert!(Config::parse("[web]\nlisten = \"127.0.0.1:8080\"").is_err());
         assert!(Config::parse("[blossom]\npublic_url = \"https://example.com\"").is_err());
         assert!(Config::parse("[web]\ntypo = 1").is_err());
+        assert!(Config::parse("[web.env]\n\"APP-RELAYS\" = \"x\"").is_err());
+        assert!(Config::parse("[web.env]\nAPP_RELAYS = 1").is_err());
+        assert_eq!(Config::parse("[web.env]\nAPP_RELAYS = \"\"").unwrap().web.env["APP_RELAYS"], "");
         assert!(Config::parse("public_url = \"ftp://example.com\"").is_err());
         assert!(Config::parse("public_url = \"https://example.com/armada\"").is_err());
         assert!(Config::parse("[blossom]\nmax_blob_size = 0").is_err());

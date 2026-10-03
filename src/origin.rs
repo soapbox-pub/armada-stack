@@ -22,6 +22,15 @@ impl Origin {
     fn of(url: &url::Url) -> Origin {
         Origin { base: url.origin().ascii_serialization(), host: url.host_str().map(str::to_ascii_lowercase) }
     }
+
+    /// The same origin with `wss`/`ws` for its scheme, for the relay.
+    pub fn websocket(&self) -> String {
+        match self.base.split_once("://") {
+            Some(("https", rest)) => format!("wss://{rest}"),
+            Some((_, rest)) => format!("ws://{rest}"),
+            None => self.base.clone(),
+        }
+    }
 }
 
 /// The origin to hand clients for armada's own services: `public_url`, or
@@ -109,6 +118,7 @@ mod tests {
     fn public_hosts_are_https() {
         let origin = public_origin(None, &host("Armada.Example.com")).unwrap();
         assert_eq!(origin, Origin { base: "https://armada.example.com".into(), host: Some("armada.example.com".into()) });
+        assert_eq!(origin.websocket(), "wss://armada.example.com");
         // Even when the proxy says otherwise: it's the proxy's leg, not the client's.
         let mut headers = host("armada.example.com:8443");
         headers.insert("x-forwarded-proto", "http".parse().unwrap());
@@ -128,6 +138,8 @@ mod tests {
         let url = url::Url::parse("https://armada.example.com").unwrap();
         let origin = public_origin(Some(&url), &host("other.example.org")).unwrap();
         assert_eq!(origin.base, "https://armada.example.com");
+        let url = url::Url::parse("http://localhost:8080").unwrap();
+        assert_eq!(public_origin(Some(&url), &HeaderMap::new()).unwrap().websocket(), "ws://localhost:8080");
     }
 
     #[test]

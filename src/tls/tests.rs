@@ -120,6 +120,7 @@ fn stack(dir: &std::path::Path, cancel: &CancellationToken) -> Router {
         live: Default::default(),
         blobs: storage.blobs.clone(),
         naddr: http::HeaderValue::from_static("naddr"),
+        env: Default::default(),
     });
     let relay = crate::relay::Relay::open(&config.relay, None, false, &storage, cancel).unwrap();
     let blossom = crate::blossom::Blossom::open(&config.blossom, None, false, &storage, cancel).unwrap();

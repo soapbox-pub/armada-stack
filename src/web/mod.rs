@@ -9,6 +9,7 @@ mod csp;
 mod db;
 #[cfg(test)]
 mod e2e;
+pub mod env;
 pub mod serve;
 mod site;
 mod sync;
@@ -26,6 +27,7 @@ use crate::config::WebConfig;
 use crate::nostr::service::NostrSource;
 use crate::storage::Storage;
 use db::WebDb;
+use env::ClientEnv;
 use serve::SiteServer;
 use site::Site;
 use sync::{SyncSettings, SyncWorker};
@@ -38,7 +40,7 @@ pub struct Web {
 impl Web {
     /// Open the web service's database and put the version it last served
     /// back on the air, before any relay has been asked anything.
-    pub async fn open(config: &WebConfig, storage: &Storage, nostr: Arc<dyn NostrSource>) -> Result<Web> {
+    pub async fn open(config: &WebConfig, env: ClientEnv, storage: &Storage, nostr: Arc<dyn NostrSource>) -> Result<Web> {
         let address = config.address()?;
         let db = WebDb::open(storage)?;
         let blobs = storage.blobs.clone();
@@ -65,6 +67,7 @@ impl Web {
             live: live.clone(),
             blobs: blobs.clone(),
             naddr: HeaderValue::from_str(&address.naddr()).expect("an naddr is a valid header"),
+            env,
         });
         let worker = SyncWorker {
             address,

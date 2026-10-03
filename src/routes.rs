@@ -97,6 +97,7 @@ mod tests {
             live: Default::default(),
             blobs: storage.blobs.clone(),
             naddr: http::HeaderValue::from_static("naddr"),
+            env: Default::default(),
         });
         let relay = Relay::open(&config.relay, None, false, &storage, &cancel).unwrap();
         let blossom = Blossom::open(&config.blossom, None, false, &storage, &cancel).unwrap();
@@ -182,6 +183,26 @@ mod tests {
         }
         let (status, _, _) = harness.send(Method::GET, "/.well-known/concord/avatar", &[]).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn the_env_script_answers_before_there_is_a_site() {
+        let harness = harness();
+        let (status, headers, body) = harness.send(Method::GET, "/_armada/env.js", &[("host", "armada.example.com")]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["content-type"], "text/javascript; charset=utf-8");
+        assert_eq!(headers["cache-control"], "no-cache");
+        assert!(body.starts_with("self.ENV = {"), "{body}");
+        assert!(body.contains(r#""APP_RELAYS":"wss://armada.example.com,"#), "{body}");
+
+        let etag = headers["etag"].to_str().unwrap().to_string();
+        let (status, _, body) = harness.send(Method::GET, "/_armada/env.js", &[("host", "armada.example.com"), ("if-none-match", &etag)]).await;
+        assert_eq!(status, StatusCode::NOT_MODIFIED);
+        assert!(body.is_empty());
+        // Another host is another script.
+        let (status, _, body) = harness.send(Method::GET, "/_armada/env.js", &[("host", "localhost:8080"), ("if-none-match", &etag)]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "self.ENV = {};\n");
     }
 
     #[tokio::test]

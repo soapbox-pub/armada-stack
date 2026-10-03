@@ -100,7 +100,7 @@ impl Harness {
         let (tx, rx) = mpsc::channel(8);
         let nostr = Arc::new(FakeNostr { manifests: Mutex::new(manifests), updates: Mutex::new(Some(rx)), server: self.server.clone() });
         let config = WebConfig { nsite: self.address.naddr(), auto_update, ..WebConfig::default() };
-        let mut web = Web::open(&config, &Storage::allowing_private(self.dir.path()), nostr).await.unwrap();
+        let mut web = Web::open(&config, Default::default(), &Storage::allowing_private(self.dir.path()), nostr).await.unwrap();
         web.worker.settings.retry_backoff = Duration::from_millis(10);
 
         let router = web.router();
