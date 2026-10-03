@@ -14,7 +14,7 @@
 //! derive. Calls are end-to-end encrypted, so the SFU forwards ciphertext.
 //!
 //! So it's an open service by design: anyone can mint a keypair and call it
-//! a room. Abuse is bounded by [`ratelimit`], by LiveKit's own
+//! a room. Abuse is bounded by a [rate limit](crate::ratelimit), by LiveKit's own
 //! `max_participants`, and by short-lived tokens — never by checking who's
 //! calling, which would end the blindness.
 //!
@@ -23,16 +23,14 @@
 mod fleet;
 mod grant;
 mod livekit;
-mod ratelimit;
 pub mod signaling;
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use axum::body::Body;
-use axum::extract::{ConnectInfo, Request};
+use axum::extract::Request;
 use http::header::{self, HeaderMap, HeaderValue};
 use http::{Method, Response, StatusCode};
 use parking_lot::Mutex;
@@ -40,10 +38,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
 use crate::nostr::event::is_hex64;
+use crate::ratelimit::{self, RateLimiter};
 use crate::util::{now, random_hex};
 use fleet::{Fleet, Node};
 use grant::ReplaySet;
-use ratelimit::RateLimiter;
 
 /// Where §2 puts the broker.
 const PATH: &str = "/.well-known/concord/av";
@@ -112,7 +110,7 @@ impl Av {
                 token_ttl: av.token_ttl,
                 max_skew: av.max_skew as i64,
                 replays: Mutex::new(ReplaySet::new(Duration::from_secs(av.replay_ttl), MAX_REPLAY_IDS)),
-                limiter: Mutex::new(RateLimiter::new(av.rate_limit_per_minute, Duration::from_secs(60), MAX_RATE_LIMITED)),
+                limiter: Mutex::new(RateLimiter::new(av.rate_limit_per_minute.into(), Duration::from_secs(60), MAX_RATE_LIMITED)),
             }),
         }))
     }
@@ -172,12 +170,12 @@ impl Broker {
             return error(StatusCode::NOT_FOUND, "invalid room name");
         }
 
-        let Some(address) = self.client_address(&request) else {
+        let Some(key) = ratelimit::client_key(request.headers(), request.extensions(), self.trust_proxy) else {
             // Without one there's nothing to limit by, and a shared bucket
             // would let any such caller exhaust it for the rest.
             return error(StatusCode::BAD_REQUEST, "cannot determine peer address");
         };
-        if let Err(retry_after) = self.limiter.lock().admit(&ratelimit::key(&address), Instant::now()) {
+        if let Err(retry_after) = self.limiter.lock().admit(&key, Instant::now()) {
             let mut reply = error(StatusCode::TOO_MANY_REQUESTS, "rate limited");
             reply.headers_mut().insert(header::RETRY_AFTER, retry_after.into());
             return reply;
@@ -205,21 +203,6 @@ impl Broker {
         let identity = random_hex(16);
         let token = livekit::join_token(node, room, &identity, self.token_ttl, now());
         json(StatusCode::OK, &serde_json::json!({ "token": token, "url": node.url, "identity": identity }))
-    }
-
-    /// The client's address. Behind a trusted proxy that's the rightmost
-    /// `X-Forwarded-For` entry, the one the proxy appended: everything left
-    /// of it came from the client, which could otherwise rotate its rate
-    /// limit key at will.
-    fn client_address(&self, request: &Request) -> Option<String> {
-        if self.trust_proxy {
-            let forwarded = request.headers().get_all("x-forwarded-for").iter().next_back();
-            let last = forwarded.and_then(|value| value.to_str().ok()).and_then(|value| value.rsplit(',').next()).map(str::trim);
-            if let Some(last) = last.filter(|last| !last.is_empty()) {
-                return Some(last.to_string());
-            }
-        }
-        request.extensions().get::<ConnectInfo<SocketAddr>>().map(|ConnectInfo(peer)| peer.ip().to_string())
     }
 }
 

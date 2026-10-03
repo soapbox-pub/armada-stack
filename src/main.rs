@@ -11,6 +11,7 @@ mod mime;
 mod net;
 mod nostr;
 mod nsite;
+mod ratelimit;
 mod relay;
 mod routes;
 mod storage;

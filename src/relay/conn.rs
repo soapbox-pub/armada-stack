@@ -42,6 +42,7 @@ use super::record;
 use super::writer::{Submission, ok};
 use crate::nostr::Event;
 use crate::nostr::event::is_hex64;
+use crate::ratelimit::TokenBucket;
 use crate::util::now;
 
 /// Messages waiting to go out to one client, beyond which it's dropped.
@@ -91,7 +92,7 @@ pub async fn serve(shared: Arc<Shared>, socket: WebSocket, authority: Arc<str>) 
     let (sink, mut stream) = socket.split();
     let keys = SharedKeys::default();
     shared.hub.connect(id, link.clone(), keys.clone()).await;
-    let tokens = TokenBucket::new(shared.config.events_per_minute);
+    let tokens = TokenBucket::new(shared.config.events_per_minute, Instant::now());
     let cancel = shared.cancel.clone();
     let challenge = hex::encode(rand::random::<[u8; 16]>());
     let mut session = Session { shared, id, link, sink, subs: HashMap::new(), tokens, authority, challenge, keys };
@@ -216,7 +217,7 @@ impl Session {
         if event.tags.iter().any(|tag| tag.len() == 1 && tag[0] == "-") && !self.keys().contains(&key(&event.pubkey)) {
             return Err("auth-required: only its author may publish this event".into());
         }
-        if !self.tokens.take() {
+        if !self.tokens.take(Instant::now()) {
             return Err("rate-limited: slow down".into());
         }
         Ok(())
@@ -411,33 +412,4 @@ fn event_message(sub_json: &str, event_json: &str) -> String {
     out.push_str(event_json);
     out.push(']');
     out
-}
-
-/// Allows `per_minute` events a minute, in bursts of up to as many.
-struct TokenBucket {
-    per_minute: u32,
-    tokens: f64,
-    last: Instant,
-}
-
-impl TokenBucket {
-    fn new(per_minute: u32) -> TokenBucket {
-        TokenBucket { per_minute, tokens: f64::from(per_minute), last: Instant::now() }
-    }
-
-    fn take(&mut self) -> bool {
-        if self.per_minute == 0 {
-            return true;
-        }
-        let now = Instant::now();
-        let refill = now.duration_since(self.last).as_secs_f64() * f64::from(self.per_minute) / 60.0;
-        self.tokens = (self.tokens + refill).min(f64::from(self.per_minute));
-        self.last = now;
-        if self.tokens >= 1.0 {
-            self.tokens -= 1.0;
-            true
-        } else {
-            false
-        }
-    }
 }
