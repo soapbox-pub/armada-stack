@@ -11,6 +11,12 @@
 //! a new user gets both. `[web.env]` replaces any of them by name — say
 //! `APP_RELAYS = "wss://armada.example.com"` for this relay alone — and
 //! sets anything else Armada reads.
+//!
+//! These are defaults for a new install, not settings: once a user's synced
+//! settings arrive, their lists win, and what this armada seeded travels to
+//! their other devices. That's intended. So is `PUBLIC_WEB_ORIGIN` being this
+//! armada's own URL: it's its own deployment, so a link to armada.buzz is a
+//! link elsewhere.
 
 use std::collections::BTreeMap;
 
@@ -60,6 +66,7 @@ impl ClientEnv {
             ("APP_RELAYS".to_string(), join(origin.websocket(), ARMADA_RELAYS)),
             ("APP_BLOSSOM_SERVERS".to_string(), join(blossom.clone(), ARMADA_BLOSSOM_SERVERS)),
             ("PREFERRED_BLOSSOM_SERVER".to_string(), blossom),
+            // This armada, not armada.buzz, on purpose: see the module docs.
             ("PUBLIC_WEB_ORIGIN".to_string(), origin.base.clone()),
         ]);
         if self.av {
