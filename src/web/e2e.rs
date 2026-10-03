@@ -194,7 +194,7 @@ async fn a_published_site_is_downloaded_and_served() {
     let (status, headers, body) = web.get("/assets/app.js", &[("range", "bytes=0-6")]).await;
     assert_eq!(status, StatusCode::PARTIAL_CONTENT);
     assert_eq!(headers["content-range"], format!("bytes 0-6/{}", script.len()));
-    assert_eq!(headers["cache-control"], "public, max-age=3600, must-revalidate");
+    assert_eq!(headers["cache-control"], "public, max-age=31536000, immutable");
     assert_eq!(body, b"console");
 
     // Any path the site has no file for gets the app, dots and all.

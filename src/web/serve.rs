@@ -16,16 +16,18 @@ use http::{Method, Request, Response, StatusCode};
 
 use super::csp::{DEFAULT_CSP, denies_framing};
 use super::env::{ClientEnv, ENV_PATH};
-use super::site::Site;
+use super::site::{ASSETS, Site};
 use crate::blobs::{BlobStore, Encoding, Variants};
 use crate::hash::BlobHash;
 use crate::mime::content_type;
 use crate::util::lowercase_extname;
 
 /// Documents revalidate every time, which the `ETag` makes cheap; assets are
-/// only ever fetched by a document that revalidated first, so they get an hour.
+/// only ever fetched by a document that revalidated first, so they get an
+/// hour. What's under [`ASSETS`] is named by its content, so never changes.
 const CACHE_CONTROL: &str = "public, no-cache";
 const ASSET_CACHE_CONTROL: &str = "public, max-age=3600, must-revalidate";
+const HASHED_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 
 /// How long a browser may reuse a preflight result, in seconds.
 const PREFLIGHT_MAX_AGE: &str = "86400";
@@ -355,6 +357,9 @@ pub fn parse_range(header: Option<&str>, size: u64) -> Range {
 
 /// How long a file may be cached, by what kind of file it is.
 pub fn cache_control(path: &str) -> &'static str {
+    if path.starts_with(ASSETS) {
+        return HASHED_CACHE_CONTROL;
+    }
     match &*lowercase_extname(path) {
         ".html" | ".htm" | ".xhtml" | ".json" | ".webmanifest" | ".xml" | ".txt" | ".md" | "" => CACHE_CONTROL,
         _ => ASSET_CACHE_CONTROL,
@@ -423,6 +428,8 @@ mod tests {
     fn caches() {
         assert_eq!(cache_control("/index.html"), CACHE_CONTROL);
         assert_eq!(cache_control("/.well-known/apple-app-site-association"), CACHE_CONTROL);
-        assert_eq!(cache_control("/assets/app-1234.js"), ASSET_CACHE_CONTROL);
+        assert_eq!(cache_control("/assets/app-1234.js"), HASHED_CACHE_CONTROL);
+        assert_eq!(cache_control("/assets/logo.svg"), HASHED_CACHE_CONTROL);
+        assert_eq!(cache_control("/sw.js"), ASSET_CACHE_CONTROL);
     }
 }
