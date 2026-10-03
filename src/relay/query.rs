@@ -64,7 +64,7 @@ fn run_filter<'t>(store: &Store, txn: &'t Txn, filter: &Filter, keys: &Keys, lim
     if let Some(ids) = &filter.ids {
         for id in ids {
             let Some(seq) = store.seq_of(txn, id)? else { continue };
-            if let Some(view) = store.load(txn, seq)?.filter(|view| filter.matches(view) && !view.is_expired(now) && policy::visible(view, keys)) {
+            if let Some(view) = store.load(txn, seq)?.filter(|view| filter.matches(view) && !view.is_expired(now) && policy::visible(view, filter, keys)) {
                 found.push((seq, view));
             }
         }
@@ -206,7 +206,7 @@ fn scan<'t>(store: &Store, txn: &'t Txn, filter: &Filter, plan: &Plan, keys: &Ke
 
         let seq = stamp_seq(&stamp);
         let Some(view) = store.load(txn, seq)? else { continue };
-        if (plan.exact || filter.matches(&view)) && !view.is_expired(now) && policy::visible(&view, keys) {
+        if (plan.exact || filter.matches(&view)) && !view.is_expired(now) && policy::visible(&view, filter, keys) {
             found.push((seq, view));
         }
     }

@@ -429,13 +429,15 @@ async fn shows_gift_wraps_only_to_their_author_and_recipient() {
     assert!(stranger.recv().await[2].as_str().unwrap().starts_with("auth-required:"));
     // Authenticated as someone else, neither.
     stranger.auth(CAROL).await;
-    stranger.send(json!(["REQ", "s", {"kinds": [1059], "authors": [bob]}])).await;
-    assert!(stranger.recv().await[2].as_str().unwrap().starts_with("auth-required:"));
     stranger.send(json!(["REQ", "s", {"kinds": [1059]}])).await;
     assert!(stranger.recv().await[2].as_str().unwrap().starts_with("restricted:"));
-    // Filters without kinds, and lookups by id, just don't find it.
-    assert!(stranger.query("all", &[json!({})]).await.is_empty());
+    // Filters without kinds, and lookups by id, just don't find it, even
+    // beside a filter that names its author.
+    assert!(stranger.query("all", &[json!({}), json!({"kinds": [1059], "authors": [crate::nostr::event::public_key(CAROL)]})]).await.is_empty());
+    assert!(stranger.query("all", &[json!({"authors": [bob]})]).await.is_empty());
     assert!(stranger.query("id", &[json!({"ids": [first.id]})]).await.is_empty());
+    assert!(stranger.query("id", &[json!({"ids": [first.id]}), json!({"kinds": [1059], "authors": [alice]})]).await.is_empty());
+    assert!(stranger.query("p", &[json!({"kinds": [1059], "authors": [alice], "#p": [alice]})]).await.is_empty());
 
     // Its recipient, by #p, and its author, by authors.
     recipient.auth(ALICE).await;
@@ -462,6 +464,52 @@ async fn shows_gift_wraps_only_to_their_author_and_recipient() {
     let typing = wrap(BOB, policy::EPHEMERAL_GIFT_WRAP, ALICE, 0);
     assert_eq!(sender.publish(&typing).await[2], true);
     assert_eq!(recipient.query("typing", &[json!({"kinds": [21059], "#p": [alice]})]).await, [typing]);
+}
+
+/// A gift wrap's author is a throwaway key or a Concord stream address, so
+/// naming it is enough to read its wraps: that's how a Concord member reads
+/// a Control Plane only staff can sign, never authenticating as its key.
+#[tokio::test]
+async fn shows_gift_wraps_to_filters_naming_their_author() {
+    let harness = Harness::new(RelayConfig::default()).await;
+    let (alice, bob) = (crate::nostr::event::public_key(ALICE), crate::nostr::event::public_key(BOB));
+    let mut sender = harness.client().await;
+    let mut reader = harness.client().await;
+    let mut other = harness.client().await;
+
+    let first = wrap(BOB, policy::GIFT_WRAP, ALICE, 100);
+    sender.publish(&first).await;
+    let typing = wrap(BOB, policy::EPHEMERAL_GIFT_WRAP, ALICE, 0);
+    sender.publish(&typing).await;
+
+    // Without authenticating at all.
+    assert_eq!(reader.query("plane", &[json!({"kinds": [1059], "authors": [bob]})]).await, std::slice::from_ref(&first));
+    assert_eq!(reader.query("both", &[json!({"kinds": [1059, 21059], "authors": [bob]})]).await, [typing.clone(), first.clone()]);
+    assert_eq!(reader.query("id", &[json!({"ids": [first.id], "authors": [bob]})]).await, std::slice::from_ref(&first));
+    // But not alongside a kind that does need it.
+    reader.send(json!(["REQ", "s", {"kinds": [1059, 30078], "authors": [bob]}])).await;
+    assert!(reader.recv().await[2].as_str().unwrap().starts_with("auth-required:"));
+    // Nor NIP-46, whose author is someone's signer.
+    reader.send(json!(["REQ", "s", {"kinds": [24133], "authors": [bob]}])).await;
+    assert!(reader.recv().await[2].as_str().unwrap().starts_with("auth-required:"));
+
+    // Live, only to the filter that named it: another subscription of the
+    // same connection, and others' subscriptions, get nothing.
+    for sub in ["plane", "both", "id"] {
+        reader.send(json!(["CLOSE", sub])).await;
+    }
+    reader.send(json!(["REQ", "live", {"kinds": [1059], "authors": [bob], "since": now()}, {"kinds": [0]}])).await;
+    assert_eq!(reader.recv().await, json!(["EOSE", "live"]));
+    reader.send(json!(["REQ", "everything", {}])).await;
+    assert_eq!(reader.recv().await[0], "EOSE");
+    other.send(json!(["REQ", "elsewhere", {"kinds": [1059], "authors": [alice]}])).await;
+    assert_eq!(other.recv().await, json!(["EOSE", "elsewhere"]));
+    let second = wrap(BOB, policy::GIFT_WRAP, ALICE, 0);
+    sender.publish(&second).await;
+    let delivered = reader.recv().await;
+    assert_eq!((&delivered[1], &delivered[2]["id"]), (&json!("live"), &json!(second.id)));
+    reader.quiet().await;
+    other.quiet().await;
 }
 
 #[tokio::test]

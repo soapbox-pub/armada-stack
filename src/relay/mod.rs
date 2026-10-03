@@ -6,7 +6,8 @@
 //! limits in [`RelayConfig`] — per connection, and per client address
 //! ([`clients`]) — and read them, but for gift wraps, NIP-46
 //! messages, app data, and deletion requests: only connections
-//! authenticated as their author (or their recipient) see those.
+//! authenticated as their author (or their recipient) see those, or for
+//! gift wraps, filters that name their author.
 //!
 //! - [`store`] keeps events in LMDB as compact [`record`]s, with
 //!   duplicate-sorted indexes (over [`lmdb`], since heed can't seek within

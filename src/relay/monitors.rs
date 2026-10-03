@@ -337,7 +337,7 @@ impl Monitors {
                 continue;
             }
             let Some(connection) = self.conns.get(&installed.conn) else { continue };
-            if private && !policy::visible(event, &connection.keys.read().expect("the keys lock")) {
+            if private && !policy::visible(event, &installed.filter, &connection.keys.read().expect("the keys lock")) {
                 continue;
             }
             sent.insert(installed.sub_key);
