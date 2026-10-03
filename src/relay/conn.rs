@@ -147,6 +147,10 @@ impl Session {
             Some("EVENT") => self.on_event(message.get(1)).await,
             Some("REQ") => self.on_req(&message, queries).await,
             Some("AUTH") => self.on_auth(message.get(1)).await,
+            Some("COUNT") => match message.get(1).and_then(Value::as_str) {
+                Some(sub) => self.closed(sub, "unsupported: COUNT isn't supported").await,
+                None => self.notice("invalid: COUNT needs a subscription id").await,
+            },
             Some("CLOSE") => {
                 if let Some(sub) = message.get(1).and_then(Value::as_str) {
                     self.subs.remove(sub);

@@ -280,7 +280,9 @@ async fn refuses_what_it_should() {
     client.send(json!(["AUTH", "x"])).await;
     assert_eq!(client.recv().await, json!(["NOTICE", "invalid: AUTH takes an event"]));
     client.send(json!(["COUNT", "x", {}])).await;
-    assert_eq!(client.recv().await, json!(["NOTICE", "unsupported: COUNT messages"]));
+    assert_eq!(client.recv().await, json!(["CLOSED", "x", "unsupported: COUNT isn't supported"]));
+    client.send(json!(["NEG-OPEN", "x", {}, ""])).await;
+    assert_eq!(client.recv().await, json!(["NOTICE", "unsupported: NEG-OPEN messages"]));
 }
 
 #[tokio::test]
