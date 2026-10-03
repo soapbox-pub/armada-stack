@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use super::monitors::{Hub, Link, Live, Outbound};
 use super::record::EventView;
-use super::store::{Outcome, Store};
+use super::store::{Outcome, SWEEP_BATCH, Store};
 use crate::util::now;
 
 /// Events that may wait for the writer. Past this, publishers are told the
@@ -26,8 +26,11 @@ const QUEUE: usize = 8192;
 /// The most events committed together.
 const MAX_BATCH: usize = 1024;
 
-/// How often expired events are swept out.
-const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+/// How often expired events are swept out. A sweep that finds more than it
+/// may remove at once goes again after the next batch of writes instead,
+/// until it catches up: ephemeral wraps all expire within minutes, and a
+/// busy relay makes plenty.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 
 /// A verified event, encoded, and where to send its `OK`.
 pub struct Submission {
@@ -63,8 +66,8 @@ fn run(store: &Store, hub: &Hub, rx: Receiver<Submission>) {
     let mut next_sweep = Instant::now();
     loop {
         if Instant::now() >= next_sweep {
-            sweep(store);
-            next_sweep = Instant::now() + SWEEP_INTERVAL;
+            let behind = sweep(store);
+            next_sweep = if behind { Instant::now() } else { Instant::now() + SWEEP_INTERVAL };
         }
         let first = match rx.recv_timeout(next_sweep.saturating_duration_since(Instant::now())) {
             Ok(submission) => submission,
@@ -120,7 +123,8 @@ fn store_batch(store: &Store, batch: &[Submission]) -> super::lmdb::Result<Vec<O
     Ok(outcomes)
 }
 
-fn sweep(store: &Store) {
+/// Remove a batch of expired events. Returns whether there may be more.
+fn sweep(store: &Store) -> bool {
     let result = (|| {
         let mut txn = store.write()?;
         let removed = store.sweep_expired(&mut txn, now())?;
@@ -130,9 +134,15 @@ fn sweep(store: &Store) {
         Ok::<_, super::lmdb::Error>(removed)
     })();
     match result {
-        Ok(0) => {}
-        Ok(removed) => tracing::debug!(removed, "swept expired events"),
-        Err(error) => tracing::error!(%error, "could not sweep expired events"),
+        Ok(0) => false,
+        Ok(removed) => {
+            tracing::debug!(removed, "swept expired events");
+            removed == SWEEP_BATCH
+        }
+        Err(error) => {
+            tracing::error!(%error, "could not sweep expired events");
+            false
+        }
     }
 }
 
@@ -182,5 +192,26 @@ mod tests {
 
         let txn = store.read().unwrap();
         assert_eq!(store.len(&txn).unwrap(), 2);
+    }
+
+    /// A backlog of more than one sweep's worth goes in one go, not one
+    /// batch per interval.
+    #[tokio::test]
+    async fn sweeps_a_backlog_without_waiting() {
+        let (_dir, store) = open();
+        let mut txn = store.write().unwrap();
+        for i in 0..SWEEP_BATCH * 2 + 10 {
+            let event = Event::sign(ALICE, 100, 1, tags(&[&["expiration", "1000"]]), &i.to_string());
+            store.insert(&mut txn, &record::encode(&event)).unwrap();
+        }
+        txn.commit().unwrap();
+        let store = Arc::new(store);
+        let _writer = Writer::spawn(store.clone(), Hub::spawn(1));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while store.len(&store.read().unwrap()).unwrap() > 0 {
+            assert!(Instant::now() < deadline, "the backlog wasn't swept in time");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 }

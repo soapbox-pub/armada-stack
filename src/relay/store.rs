@@ -71,7 +71,7 @@ const ID_PREFIX: usize = 8;
 
 /// How many expired events one sweep removes, so it never holds the writer
 /// long.
-const SWEEP_BATCH: usize = 1000;
+pub const SWEEP_BATCH: usize = 1000;
 
 pub fn stamp(created_at: u32, seq: u64) -> Stamp {
     let mut out = [0; STAMP_LEN];
