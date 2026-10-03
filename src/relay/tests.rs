@@ -166,6 +166,29 @@ async fn stores_queries_and_streams() {
     assert_eq!(bob.query("again", &[json!({"limit": 2})]).await.len(), 2);
 }
 
+/// NIP-50 isn't done here, but a search beside plain filters doesn't stop
+/// them being answered: it just finds nothing.
+#[tokio::test]
+async fn answers_the_rest_of_a_req_with_a_search() {
+    let harness = Harness::new(RelayConfig::default()).await;
+    let mut client = harness.client().await;
+    let status = note(ALICE, "searchable");
+    client.publish(&status).await;
+
+    let filters = [json!({"kinds": [STATUS]}), json!({"kinds": [STATUS], "search": "searchable"})];
+    assert_eq!(client.query("both", &filters).await, std::slice::from_ref(&status));
+    assert!(client.query("alone", &[json!({"search": "searchable"})]).await.is_empty());
+    client.send(json!(["CLOSE", "both"])).await;
+    client.send(json!(["CLOSE", "alone"])).await;
+    client.send(json!(["REQ", "s", {"search": 1}])).await;
+    assert_eq!(client.recv().await, json!(["CLOSED", "s", "invalid: search must be a string"]));
+
+    // Nor does it see live events.
+    client.query("live", &[json!({"search": "later"})]).await;
+    client.publish(&note(ALICE, "later")).await;
+    client.quiet().await;
+}
+
 /// Subscriptions opened while events stream in each get every event exactly
 /// once, whether from their query or live.
 #[tokio::test]
@@ -286,8 +309,8 @@ async fn refuses_what_it_should() {
 
     client.send(json!(["REQ", "s", {}, {}, {}])).await;
     assert_eq!(client.recv().await, json!(["CLOSED", "s", "invalid: too many filters"]));
-    client.send(json!(["REQ", "s", {"search": "x"}])).await;
-    assert_eq!(client.recv().await, json!(["CLOSED", "s", "unsupported: filter field search"]));
+    client.send(json!(["REQ", "s", {"#title": ["x"]}])).await;
+    assert_eq!(client.recv().await, json!(["CLOSED", "s", "unsupported: filter field #title"]));
 
     client.query("a", &[json!({"kinds": [STATUS]})]).await;
     client.query("b", &[json!({"kinds": [STATUS]})]).await;

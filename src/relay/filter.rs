@@ -33,6 +33,7 @@ impl Filter {
     pub fn parse(value: &Value) -> Result<Filter, String> {
         let Value::Object(fields) = value else { return Err("invalid: a filter must be an object".into()) };
         let mut filter = Filter { until: u32::MAX, ..Filter::default() };
+        let mut search = false;
 
         for (name, value) in fields {
             match name.as_str() {
@@ -49,6 +50,16 @@ impl Filter {
                 "since" => filter.since = timestamp(name, value)?,
                 "until" => filter.until = timestamp(name, value)?,
                 "limit" => filter.limit = Some(value.as_u64().ok_or("invalid: limit must be a non-negative integer")?),
+                // NIP-50, which this relay doesn't do. The filter matches
+                // nothing rather than being refused: clients send one beside
+                // plain filters in the same REQ, and refusing it would close
+                // those too.
+                "search" => {
+                    if !value.is_string() {
+                        return Err("invalid: search must be a string".into());
+                    }
+                    search = true;
+                }
                 _ => {
                     let letter = match name.as_bytes() {
                         &[b'#', letter] if letter.is_ascii_alphabetic() => letter,
@@ -70,7 +81,8 @@ impl Filter {
         }
 
         filter.tags.sort_unstable_by_key(|(letter, _)| *letter);
-        filter.never = filter.ids.as_ref().is_some_and(Vec::is_empty)
+        filter.never = search
+            || filter.ids.as_ref().is_some_and(Vec::is_empty)
             || filter.authors.as_ref().is_some_and(Vec::is_empty)
             || filter.kinds.as_ref().is_some_and(Vec::is_empty)
             || filter.tags.iter().any(|(_, values)| values.is_empty())
@@ -181,7 +193,7 @@ mod tests {
     #[test]
     fn matches_nothing_when_a_field_is_empty() {
         let event = Event::sign(BOB, 100, 1, vec![], "");
-        for filter in [json!({"ids": []}), json!({"kinds": [70000]}), json!({"#t": []}), json!({"since": 5, "until": 4})] {
+        for filter in [json!({"ids": []}), json!({"kinds": [70000]}), json!({"#t": []}), json!({"search": "bob"}), json!({"since": 5, "until": 4})] {
             assert!(Filter::parse(&filter).unwrap().never, "{filter}");
             assert!(!matches(filter, &event));
         }
@@ -189,7 +201,7 @@ mod tests {
 
     #[test]
     fn refuses_malformed_filters() {
-        for filter in [json!([]), json!({"ids": ["abc"]}), json!({"kinds": ["1"]}), json!({"search": "x"}), json!({"limit": -1}), json!({"#t": [1]})] {
+        for filter in [json!([]), json!({"ids": ["abc"]}), json!({"kinds": ["1"]}), json!({"search": 1}), json!({"limit": -1}), json!({"#t": [1]})] {
             assert!(Filter::parse(&filter).is_err(), "{filter}");
         }
         let filter = Filter::parse(&json!({"since": -5, "until": 1u64 << 40})).unwrap();
