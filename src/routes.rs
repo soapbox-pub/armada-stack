@@ -98,7 +98,7 @@ mod tests {
             blobs: storage.blobs.clone(),
             naddr: http::HeaderValue::from_static("naddr"),
         });
-        let relay = Relay::open(&config.relay, None, &storage, &cancel).unwrap();
+        let relay = Relay::open(&config.relay, None, false, &storage, &cancel).unwrap();
         let blossom = Blossom::open(&config.blossom, None, &storage, &cancel).unwrap();
         let router = router(Services { web, relay, blossom, av: None });
         Harness { _dir: dir, router, _cancel: cancel.drop_guard() }
@@ -188,7 +188,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}/", listener.local_addr().unwrap());
         let router = harness.router.clone();
-        tokio::spawn(async move { axum::serve(listener, router).await });
+        tokio::spawn(async move { axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await });
 
         let (mut socket, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
         let challenge = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();

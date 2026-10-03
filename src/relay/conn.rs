@@ -34,6 +34,7 @@ use serde_json::Value;
 use tokio::task::JoinSet;
 
 use super::Shared;
+use super::clients::Slot;
 use super::filter::Filter;
 use super::monitors::{ConnId, Link, Outbound, SharedKeys};
 use super::policy::{self, Keys};
@@ -78,6 +79,9 @@ struct Session {
     sink: Sink,
     subs: HashMap<String, Sub>,
     tokens: TokenBucket,
+    /// This connection, counted against its client's address, whose event
+    /// budget it shares.
+    slot: Slot,
     /// What this relay is called, as [`policy::authority`] puts it.
     authority: Arc<str>,
     challenge: String,
@@ -86,7 +90,7 @@ struct Session {
 
 type QueryDone = (Arc<str>, anyhow::Result<Results>);
 
-pub async fn serve(shared: Arc<Shared>, socket: WebSocket, authority: Arc<str>) {
+pub async fn serve(shared: Arc<Shared>, socket: WebSocket, authority: Arc<str>, slot: Slot) {
     let id = shared.next_conn.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (link, mut rx, overflow) = Link::new(OUTBOUND);
     let (sink, mut stream) = socket.split();
@@ -95,7 +99,7 @@ pub async fn serve(shared: Arc<Shared>, socket: WebSocket, authority: Arc<str>) 
     let tokens = TokenBucket::new(shared.config.events_per_minute, Instant::now());
     let cancel = shared.cancel.clone();
     let challenge = hex::encode(rand::random::<[u8; 16]>());
-    let mut session = Session { shared, id, link, sink, subs: HashMap::new(), tokens, authority, challenge, keys };
+    let mut session = Session { shared, id, link, sink, subs: HashMap::new(), tokens, slot, authority, challenge, keys };
     let mut queries: JoinSet<QueryDone> = JoinSet::new();
 
     // The challenge, before anything else: see the module docs.
@@ -217,7 +221,8 @@ impl Session {
         if event.tags.iter().any(|tag| tag.len() == 1 && tag[0] == "-") && !self.keys().contains(&key(&event.pubkey)) {
             return Err("auth-required: only its author may publish this event".into());
         }
-        if !self.tokens.take(Instant::now()) {
+        let instant = Instant::now();
+        if !self.tokens.take(instant) || !self.slot.take_event(instant) {
             return Err("rate-limited: slow down".into());
         }
         Ok(())

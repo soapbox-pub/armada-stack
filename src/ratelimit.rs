@@ -156,6 +156,12 @@ impl TokenBucket {
         }
     }
 
+    /// Whether it has refilled, so forgetting it would give nothing away.
+    pub fn is_full(&mut self, now: Instant) -> bool {
+        self.refill(now);
+        self.tokens >= f64::from(self.per_minute)
+    }
+
     fn refill(&mut self, now: Instant) {
         let refill = now.saturating_duration_since(self.last).as_secs_f64() * f64::from(self.per_minute) / 60.0;
         self.tokens = (self.tokens + refill).min(f64::from(self.per_minute));
@@ -228,7 +234,9 @@ mod tests {
             assert!(bucket.take(start));
         }
         assert!(!bucket.take(start));
+        assert!(!bucket.is_full(start));
         assert!(bucket.take(start + Duration::from_secs(1)));
+        assert!(bucket.is_full(start + Duration::from_secs(61)));
         assert!(TokenBucket::new(0, start).take(start));
     }
 

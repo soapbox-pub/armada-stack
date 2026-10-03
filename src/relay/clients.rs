@@ -1,0 +1,170 @@
+//! What each client address has open, and has published lately, across
+//! all its connections. The per-connection limits in [`RelayConfig`] mean
+//! nothing to a client that opens another socket; these do.
+//!
+//! An address, as [`crate::ratelimit::key`] puts it, is held only while it
+//! has a connection open or a budget still refilling.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Instant;
+
+use parking_lot::Mutex;
+
+use crate::config::RelayConfig;
+use crate::ratelimit::TokenBucket;
+
+/// Addresses held before the first sweep for ones with nothing left to
+/// remember.
+const SWEEP_FLOOR: usize = 1024;
+
+pub struct Clients {
+    max_connections: usize,
+    events_per_minute: u32,
+    table: Mutex<Table>,
+}
+
+struct Table {
+    clients: HashMap<String, Client>,
+    /// The size at which to next sweep: twice what survived the last one, so
+    /// sweeping costs nothing much per connection.
+    sweep_at: usize,
+}
+
+struct Client {
+    connections: usize,
+    events: TokenBucket,
+}
+
+impl Client {
+    /// Holds nothing that forgetting it would give away.
+    fn is_idle(&mut self, now: Instant) -> bool {
+        self.connections == 0 && self.events.is_full(now)
+    }
+}
+
+/// One open connection from `key`, counted until it's dropped.
+pub struct Slot {
+    clients: Arc<Clients>,
+    key: String,
+}
+
+impl Clients {
+    pub fn new(config: &RelayConfig) -> Arc<Clients> {
+        Arc::new(Clients {
+            max_connections: config.max_connections_per_ip,
+            events_per_minute: config.events_per_minute_per_ip,
+            table: Mutex::new(Table { clients: HashMap::new(), sweep_at: SWEEP_FLOOR }),
+        })
+    }
+
+    /// Count a connection from the client keyed `key`, or `None` if it has
+    /// as many open as it may.
+    pub fn connect(self: &Arc<Self>, key: String, now: Instant) -> Option<Slot> {
+        let mut table = self.table.lock();
+        if table.clients.len() >= table.sweep_at {
+            table.clients.retain(|_, client| !client.is_idle(now));
+            table.sweep_at = (table.clients.len() * 2).max(SWEEP_FLOOR);
+        }
+        let client = table.clients.entry(key.clone()).or_insert_with(|| Client { connections: 0, events: TokenBucket::new(self.events_per_minute, now) });
+        if self.max_connections != 0 && client.connections >= self.max_connections {
+            return None;
+        }
+        client.connections += 1;
+        Some(Slot { clients: self.clone(), key })
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.table.lock().clients.len()
+    }
+}
+
+impl Slot {
+    /// Spend one of the client's events, shared by all its connections.
+    pub fn take_event(&self, now: Instant) -> bool {
+        let mut table = self.clients.table.lock();
+        table.clients.get_mut(&self.key).is_none_or(|client| client.events.take(now))
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let now = Instant::now();
+        let mut table = self.clients.table.lock();
+        if let Some(client) = table.clients.get_mut(&self.key) {
+            client.connections -= 1;
+            if client.is_idle(now) {
+                table.clients.remove(&self.key);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    fn table(max_connections: usize, events_per_minute: u32) -> Arc<Clients> {
+        Clients::new(&RelayConfig { max_connections_per_ip: max_connections, events_per_minute_per_ip: events_per_minute, ..RelayConfig::default() })
+    }
+
+    #[test]
+    fn caps_connections_per_client() {
+        let clients = table(2, 60);
+        let now = Instant::now();
+        let a = clients.connect("a".into(), now).unwrap();
+        let _b = clients.connect("a".into(), now).unwrap();
+        assert!(clients.connect("a".into(), now).is_none());
+        // Others aren't charged for it.
+        assert!(clients.connect("b".into(), now).is_some());
+        drop(a);
+        assert!(clients.connect("a".into(), now).is_some());
+        assert!(table(0, 60).connect("a".into(), now).is_some());
+    }
+
+    #[test]
+    fn shares_one_event_budget() {
+        let clients = table(0, 3);
+        let now = Instant::now();
+        let a = clients.connect("a".into(), now).unwrap();
+        let b = clients.connect("a".into(), now).unwrap();
+        assert!(a.take_event(now) && a.take_event(now) && b.take_event(now));
+        assert!(!b.take_event(now));
+        assert!(!a.take_event(now));
+    }
+
+    #[test]
+    fn remembers_a_spent_budget_after_disconnecting() {
+        let clients = table(0, 1);
+        let now = Instant::now();
+        let slot = clients.connect("a".into(), now).unwrap();
+        assert!(slot.take_event(now));
+        drop(slot);
+        // Reconnecting doesn't refill it.
+        let slot = clients.connect("a".into(), now).unwrap();
+        assert!(!slot.take_event(now));
+        drop(slot);
+        assert_eq!(clients.len(), 1);
+
+        // An untouched budget is forgotten with the last connection.
+        drop(clients.connect("b".into(), now).unwrap());
+        assert_eq!(clients.len(), 1);
+    }
+
+    #[test]
+    fn sweeps_idle_clients() {
+        let clients = table(0, 1);
+        let start = Instant::now();
+        for n in 0..SWEEP_FLOOR {
+            let slot = clients.connect(n.to_string(), start).unwrap();
+            assert!(slot.take_event(start));
+        }
+        assert_eq!(clients.len(), SWEEP_FLOOR);
+        // Once their budgets refill, the next arrival sweeps them away.
+        let _slot = clients.connect("new".into(), start + Duration::from_secs(61)).unwrap();
+        assert_eq!(clients.len(), 1);
+    }
+}

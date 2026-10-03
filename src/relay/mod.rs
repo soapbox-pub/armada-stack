@@ -3,7 +3,8 @@
 //!
 //! It takes the kinds Armada uses and nothing else, each checked against
 //! rules of its own ([`policy`]). Anyone may publish them, within the
-//! limits in [`RelayConfig`], and read them, but for gift wraps, NIP-46
+//! limits in [`RelayConfig`] — per connection, and per client address
+//! ([`clients`]) — and read them, but for gift wraps, NIP-46
 //! messages, app data, and deletion requests: only connections
 //! authenticated as their author (or their recipient) see those.
 //!
@@ -17,6 +18,7 @@
 //!   share of the live subscriptions.
 //! - [`conn`] speaks the protocol to each client.
 
+mod clients;
 mod conn;
 mod filter;
 mod lmdb;
@@ -30,18 +32,21 @@ mod writer;
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::time::Instant;
 
 use anyhow::Result;
 use axum::extract::FromRequestParts;
 use axum::extract::Request;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::response::{IntoResponse, Response};
-use http::{HeaderMap, Method, header};
+use http::{HeaderMap, Method, StatusCode, header};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::RelayConfig;
+use crate::ratelimit;
 use crate::storage::Storage;
+use clients::Clients;
 use monitors::Hub;
 use store::Store;
 use writer::Writer;
@@ -57,6 +62,9 @@ struct Shared {
     /// The [`policy::authority`] of `public_url`, if it's set. Otherwise
     /// each connection's comes from its request.
     authority: Option<Arc<str>>,
+    /// Whether to believe `X-Forwarded-For`; see [`crate::config::Config::trust_proxy`].
+    trust_proxy: bool,
+    clients: Arc<Clients>,
     store: Arc<Store>,
     hub: Hub,
     writer: Writer,
@@ -72,7 +80,7 @@ struct Shared {
 impl Relay {
     /// Open the relay's store. Every connection closes once `cancel` fires.
     /// `public_url` is where clients reach it, as they name it in AUTH.
-    pub fn open(config: &RelayConfig, public_url: Option<url::Url>, storage: &Storage, cancel: &CancellationToken) -> Result<Relay> {
+    pub fn open(config: &RelayConfig, public_url: Option<url::Url>, trust_proxy: bool, storage: &Storage, cancel: &CancellationToken) -> Result<Relay> {
         let store = Arc::new(Store::open(&storage.service_dir("relay")?, config.map_size as usize)?);
         let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
         let hub = Hub::spawn((cores / 2).clamp(1, 8));
@@ -81,6 +89,8 @@ impl Relay {
             shared: Arc::new(Shared {
                 config: config.clone(),
                 authority: public_url.and_then(|url| policy::authority(url.as_str())).map(Arc::from),
+                trust_proxy,
+                clients: Clients::new(config),
                 store,
                 hub,
                 writer,
@@ -104,9 +114,17 @@ impl Relay {
         let (mut parts, _) = request.into_parts();
         match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
             Ok(upgrade) => {
+                let Some(key) = ratelimit::client_key(&parts.headers, &parts.extensions, shared.trust_proxy) else {
+                    // Without one there's nothing to limit by, and a shared
+                    // count would let any such client exhaust it for the rest.
+                    return (StatusCode::BAD_REQUEST, "cannot determine peer address").into_response();
+                };
+                let Some(slot) = shared.clients.connect(key, Instant::now()) else {
+                    return (StatusCode::TOO_MANY_REQUESTS, "too many connections from this address").into_response();
+                };
                 let max = shared.config.max_message_length;
                 let authority = shared.authority.clone().unwrap_or_else(|| request_authority(&parts).into());
-                upgrade.max_message_size(max).max_frame_size(max).on_upgrade(move |socket| conn::serve(shared, socket, authority)).into_response()
+                upgrade.max_message_size(max).max_frame_size(max).on_upgrade(move |socket| conn::serve(shared, socket, authority, slot)).into_response()
             }
             Err(_) if wants_nip11(&parts.headers) => {
                 let headers = [(header::CONTENT_TYPE, "application/nostr+json"), (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];

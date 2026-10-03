@@ -28,25 +28,46 @@ struct Harness {
 
 impl Harness {
     async fn new(config: RelayConfig) -> Harness {
+        Self::trusting(config, false).await
+    }
+
+    /// One whose relay believes `X-Forwarded-For` if `trust_proxy`.
+    async fn trusting(config: RelayConfig, trust_proxy: bool) -> Harness {
         let dir = tempfile::tempdir().unwrap();
         let cancel = CancellationToken::new();
-        let relay = Relay::open(&config, None, &Storage::allowing_private(dir.path()), &cancel).unwrap();
+        let relay = Relay::open(&config, None, trust_proxy, &Storage::allowing_private(dir.path()), &cancel).unwrap();
         let router = relay.router();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
         let served = router.clone();
-        tokio::spawn(async move { axum::serve(listener, served).await });
+        tokio::spawn(async move { axum::serve(listener, served.into_make_service_with_connect_info::<std::net::SocketAddr>()).await });
         Harness { _dir: dir, url, relay: router, _cancel: cancel.drop_guard() }
     }
 
     /// A client, past the AUTH challenge the relay greets it with.
     async fn client(&self) -> Client {
-        let (socket, _) = tokio_tungstenite::connect_async(&self.url).await.unwrap();
+        self.client_via(None).await.unwrap()
+    }
+
+    /// A client whose request says it was forwarded for `forwarded`, or
+    /// the status it was refused with.
+    async fn client_via(&self, forwarded: Option<&str>) -> Result<Client, http::StatusCode> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        use tokio_tungstenite::tungstenite::Error;
+        let mut request = self.url.as_str().into_client_request().unwrap();
+        if let Some(forwarded) = forwarded {
+            request.headers_mut().insert("x-forwarded-for", forwarded.parse().unwrap());
+        }
+        let socket = match tokio_tungstenite::connect_async(request).await {
+            Ok((socket, _)) => socket,
+            Err(Error::Http(response)) => return Err(response.status()),
+            Err(error) => panic!("{error}"),
+        };
         let mut client = Client { socket, url: self.url.clone(), challenge: String::new() };
         let greeting = client.recv().await;
         assert_eq!(greeting[0], "AUTH", "{greeting}");
         client.challenge = greeting[1].as_str().unwrap().to_string();
-        client
+        Ok(client)
     }
 }
 
@@ -283,6 +304,69 @@ async fn refuses_what_it_should() {
     assert_eq!(client.recv().await, json!(["CLOSED", "x", "unsupported: COUNT isn't supported"]));
     client.send(json!(["NEG-OPEN", "x", {}, ""])).await;
     assert_eq!(client.recv().await, json!(["NOTICE", "unsupported: NEG-OPEN messages"]));
+}
+
+#[tokio::test]
+async fn caps_each_addresss_connections() {
+    let harness = Harness::new(RelayConfig { max_connections_per_ip: 2, ..RelayConfig::default() }).await;
+    let first = harness.client().await;
+    let _second = harness.client().await;
+    assert_eq!(harness.client_via(None).await.err(), Some(http::StatusCode::TOO_MANY_REQUESTS));
+    // A client's own X-Forwarded-For isn't believed, with no proxy in front.
+    assert_eq!(harness.client_via(Some("203.0.113.9")).await.err(), Some(http::StatusCode::TOO_MANY_REQUESTS));
+
+    // Closing one frees its place, once the relay notices.
+    drop(first);
+    let mut third = None;
+    for _ in 0..50 {
+        if let Ok(client) = harness.client_via(None).await {
+            third = Some(client);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(third.is_some(), "the closed connection's place was never freed");
+}
+
+#[tokio::test]
+async fn caps_each_client_behind_a_proxy() {
+    let harness = Harness::trusting(RelayConfig { max_connections_per_ip: 1, ..RelayConfig::default() }, true).await;
+    let _one = harness.client_via(Some("203.0.113.9")).await.unwrap();
+    assert_eq!(harness.client_via(Some("203.0.113.9")).await.err(), Some(http::StatusCode::TOO_MANY_REQUESTS));
+    // Only the entry the proxy appended counts.
+    assert_eq!(harness.client_via(Some("6.6.6.6, 203.0.113.9")).await.err(), Some(http::StatusCode::TOO_MANY_REQUESTS));
+    let _other = harness.client_via(Some("198.51.100.1")).await.unwrap();
+    // One IPv6 /64 is one client.
+    let _v6 = harness.client_via(Some("2001:db8::1")).await.unwrap();
+    assert_eq!(harness.client_via(Some("2001:db8::2")).await.err(), Some(http::StatusCode::TOO_MANY_REQUESTS));
+}
+
+#[tokio::test]
+async fn shares_an_event_budget_across_an_addresss_connections() {
+    let harness = Harness::new(RelayConfig { events_per_minute: 0, events_per_minute_per_ip: 3, ..RelayConfig::default() }).await;
+    let mut a = harness.client().await;
+    let mut b = harness.client().await;
+    assert_eq!(a.publish(&note(ALICE, "1")).await[2], true);
+    assert_eq!(a.publish(&note(ALICE, "2")).await[2], true);
+    assert_eq!(b.publish(&note(ALICE, "3")).await[2], true);
+    assert_eq!(b.publish(&note(ALICE, "4")).await[3], "rate-limited: slow down");
+    // A new connection doesn't bring a new budget.
+    let mut c = harness.client().await;
+    assert_eq!(c.publish(&note(ALICE, "5")).await[3], "rate-limited: slow down");
+}
+
+#[tokio::test]
+async fn refuses_a_client_with_no_address() {
+    let harness = Harness::new(RelayConfig::default()).await;
+    // Served without the peer's address, unlike any real server.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let router = harness.relay.clone();
+    tokio::spawn(async move { axum::serve(listener, router).await });
+    match tokio_tungstenite::connect_async(&url).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => assert_eq!(response.status(), http::StatusCode::BAD_REQUEST),
+        other => panic!("unexpected {other:?}"),
+    }
 }
 
 #[tokio::test]

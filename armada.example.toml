@@ -43,6 +43,9 @@ max_content_length = 1048576
 created_at_upper_limit = 900
 # Per connection. 0 for no limit.
 events_per_minute = 600
+# Per IPv4 address or IPv6 /64, across its connections. 0 for no limit.
+max_connections_per_ip = 50
+events_per_minute_per_ip = 1200
 # Per connection: Armada authenticates as each Concord stream key it reads.
 max_authed_keys = 2000
 # Reserved address space, not disk.
