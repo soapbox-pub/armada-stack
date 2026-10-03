@@ -3,6 +3,7 @@
 //!
 //! ```text
 //! flags      u8         bit 0: an expiration follows the fixed header
+//!                       bit 1: the content is base64, kept as its bytes
 //! id         [u8; 32]
 //! pubkey     [u8; 32]
 //! sig        [u8; 64]
@@ -12,18 +13,26 @@
 //! tags_len   varint     bytes of tags that follow
 //! tags       varint count, then per tag: varint count, then per element
 //!            varint (len << 1 | hex), then the bytes
-//! content    the rest, UTF-8
+//! content    the rest: UTF-8, or the bytes base64 content decodes to
 //! ```
 //!
 //! Ids, keys, and signatures are raw bytes rather than hex, and so is any
 //! tag element that is exactly 64 lowercase hex digits — event and pubkey
-//! references, mostly — flagged so it reads back as the same text. Nothing
-//! is kept twice: the JSON is written from the record when it's sent.
+//! references, mostly — flagged so it reads back as the same text. Content
+//! that is base64 is kept as the bytes it spells, a quarter smaller: that's
+//! every gift wrap's NIP-44 payload, which is most of what the relay holds.
+//! Either only applies when the text written back is exactly what was
+//! signed. Nothing is kept twice: the JSON is written from the record when
+//! it's sent.
+
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 
 use crate::nostr::Event;
 use crate::nostr::event::is_hex64;
 
 const FLAG_EXPIRATION: u8 = 1;
+const FLAG_BASE64: u8 = 2;
 const FIXED: usize = 1 + 32 + 32 + 64 + 4 + 2;
 
 /// Kinds whose latest version per author replaces the rest (NIP-01).
@@ -49,7 +58,8 @@ pub const GIFT_WRAP: u16 = 1059;
 pub fn encode(event: &Event) -> Vec<u8> {
     let mut out = Vec::with_capacity(FIXED + 8 + event.content.len() + event.tags.len() * 40);
     let expiration = expiration(event);
-    out.push(if expiration.is_some() { FLAG_EXPIRATION } else { 0 });
+    let base64 = decode_base64(&event.content);
+    out.push(if expiration.is_some() { FLAG_EXPIRATION } else { 0 } | if base64.is_some() { FLAG_BASE64 } else { 0 });
     push_hex(&mut out, &event.id);
     push_hex(&mut out, &event.pubkey);
     push_hex(&mut out, &event.sig);
@@ -75,8 +85,21 @@ pub fn encode(event: &Event) -> Vec<u8> {
     }
     put_varint(&mut out, tags.len() as u64);
     out.extend_from_slice(&tags);
-    out.extend_from_slice(event.content.as_bytes());
+    match base64 {
+        Some(bytes) => out.extend_from_slice(&bytes),
+        None => out.extend_from_slice(event.content.as_bytes()),
+    }
     out
+}
+
+/// The bytes `content` spells, if it's base64 that encodes back to exactly
+/// itself: padded, with no stray bits, and not empty.
+fn decode_base64(content: &str) -> Option<Vec<u8>> {
+    if content.is_empty() || content.len() % 4 != 0 {
+        return None;
+    }
+    let bytes = STANDARD.decode(content).ok()?;
+    (STANDARD.encode(&bytes) == content).then_some(bytes)
 }
 
 /// The NIP-40 expiration, if the event has one that will ever arrive.
@@ -119,7 +142,15 @@ pub struct EventView<'a> {
     fixed: &'a [u8; FIXED],
     expiration: Option<u32>,
     tags: &'a [u8],
-    content: &'a str,
+    content: Content<'a>,
+}
+
+/// An event's content, as stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Content<'a> {
+    Text(&'a str),
+    /// Base64, as the bytes it spells.
+    Base64(&'a [u8]),
 }
 
 impl<'a> EventView<'a> {
@@ -136,7 +167,8 @@ impl<'a> EventView<'a> {
         };
         let tags_len = usize::try_from(get_varint(&mut rest)?).ok()?;
         let tags = rest.get(..tags_len)?;
-        let content = std::str::from_utf8(&rest[tags_len..]).ok()?;
+        let content = &rest[tags_len..];
+        let content = if fixed[0] & FLAG_BASE64 != 0 { Content::Base64(content) } else { Content::Text(std::str::from_utf8(content).ok()?) };
         Some(EventView { fixed, expiration, tags, content })
     }
 
@@ -169,7 +201,7 @@ impl<'a> EventView<'a> {
     }
 
     #[cfg(test)]
-    pub fn content(&self) -> &'a str {
+    pub fn content(&self) -> Content<'a> {
         self.content
     }
 
@@ -203,7 +235,11 @@ impl<'a> EventView<'a> {
 
     /// The event as NIP-01 JSON.
     pub fn to_json(self) -> String {
-        let mut out = String::with_capacity(FIXED * 2 + self.content.len() + self.tags.len() * 2 + 96);
+        let content_len = match self.content {
+            Content::Text(text) => text.len(),
+            Content::Base64(bytes) => bytes.len().div_ceil(3) * 4,
+        };
+        let mut out = String::with_capacity(FIXED * 2 + content_len + self.tags.len() * 2 + 96);
         out.push_str("{\"id\":\"");
         push_hex_str(&mut out, self.id());
         out.push_str("\",\"pubkey\":\"");
@@ -234,7 +270,15 @@ impl<'a> EventView<'a> {
             out.push(']');
         }
         out.push_str("],\"content\":");
-        push_json_str(&mut out, self.content);
+        match self.content {
+            Content::Text(text) => push_json_str(&mut out, text),
+            Content::Base64(bytes) => {
+                // Nothing in base64 needs escaping.
+                out.push('"');
+                STANDARD.encode_string(bytes, &mut out);
+                out.push('"');
+            }
+        }
         out.push_str(",\"sig\":\"");
         push_hex_str(&mut out, self.sig());
         out.push_str("\"}");
@@ -399,7 +443,7 @@ mod tests {
         let record = encode(&event);
         let view = EventView::new(&record).unwrap();
         assert_eq!(view.kind(), 30_023);
-        assert_eq!(view.content(), event.content);
+        assert_eq!(view.content(), Content::Text(&event.content));
         assert_eq!(view.created_at(), 1_700_000_000);
         assert_eq!(view.expiration(), Some(1_800_000_000));
         assert!(view.is_expired(1_800_000_000) && !view.is_expired(1_799_999_999));
@@ -422,6 +466,29 @@ mod tests {
         let record = encode(&event);
         assert!(record.len() * 2 < json.len(), "{} vs {}", record.len(), json.len());
         assert_eq!(roundtrip(&event), event);
+    }
+
+    #[test]
+    fn keeps_base64_content_as_bytes() {
+        let wrap = crate::relay::nip44::payload(1000);
+        let event = Event::sign(SECRET, 1_700_000_000, 1059, vec![vec!["p".into(), "cd".repeat(32)]], &wrap);
+        let record = encode(&event);
+        let view = EventView::new(&record).unwrap();
+        assert_eq!(view.content(), Content::Base64(&STANDARD.decode(&wrap).unwrap()));
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(record.len() * 10 < json.len() * 7, "{} vs {}", record.len(), json.len());
+        let back = roundtrip(&event);
+        assert_eq!(back, event);
+        assert!(back.verify());
+
+        // Only base64 that reads back exactly as it was signed.
+        for content in ["", "aGk=", "aGk", "aGl=", "abc=", "YQ==", "YQ", "hi there", "AAAA\n", "😀😀😀😀"] {
+            let event = Event::sign(SECRET, 1_700_000_000, 1, vec![], content);
+            let record = encode(&event);
+            let base64 = matches!(EventView::new(&record).unwrap().content(), Content::Base64(_));
+            assert_eq!(base64, matches!(content, "aGk=" | "abc=" | "YQ=="), "{content:?}");
+            assert_eq!(roundtrip(&event), event, "{content:?}");
+        }
     }
 
     #[test]

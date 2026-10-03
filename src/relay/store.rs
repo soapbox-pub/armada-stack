@@ -42,7 +42,7 @@ use super::lmdb::{Db, DbFlags, Env, Result, RoTxn, RwTxn, Txn};
 use super::record::{self, DELETION, Element, EventView, GIFT_WRAP};
 
 /// Bumped when the layout changes incompatibly.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 pub const STAMP_LEN: usize = 10;
 pub type Stamp = [u8; STAMP_LEN];
