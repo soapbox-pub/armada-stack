@@ -7,7 +7,8 @@
 //! ([`clients`]) — and read them, but for gift wraps, NIP-46
 //! messages, app data, and deletion requests: only connections
 //! authenticated as their author (or their recipient) see those, or for
-//! gift wraps, filters that name their author.
+//! gift wraps, filters that name their author, and for NIP-46, filters
+//! that name either party.
 //!
 //! - [`store`] keeps events in LMDB as compact [`record`]s, with
 //!   duplicate-sorted indexes (over [`lmdb`], since heed can't seek within

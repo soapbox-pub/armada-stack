@@ -489,9 +489,6 @@ async fn shows_gift_wraps_to_filters_naming_their_author() {
     // But not alongside a kind that does need it.
     reader.send(json!(["REQ", "s", {"kinds": [1059, 30078], "authors": [bob]}])).await;
     assert!(reader.recv().await[2].as_str().unwrap().starts_with("auth-required:"));
-    // Nor NIP-46, whose author is someone's signer.
-    reader.send(json!(["REQ", "s", {"kinds": [24133], "authors": [bob]}])).await;
-    assert!(reader.recv().await[2].as_str().unwrap().starts_with("auth-required:"));
 
     // Live, only to the filter that named it: another subscription of the
     // same connection, and others' subscriptions, get nothing.
@@ -571,4 +568,43 @@ async fn describes_itself() {
     assert_eq!(info["supported_nips"], json!([1, 9, 11, 40, 42, 62, 70]));
     assert_eq!(info["limitation"]["restricted_writes"], true);
     assert_eq!(info["limitation"]["max_limit"], 500);
+}
+
+/// NIP-46 runs between a client's throwaway key and a remote signer, and
+/// neither authenticates: each finds what's meant for it by naming itself.
+#[tokio::test]
+async fn carries_nip46_between_parties_that_name_themselves() {
+    let harness = Harness::new(RelayConfig::default()).await;
+    let (app, signer) = (crate::nostr::event::public_key(ALICE), crate::nostr::event::public_key(BOB));
+    let mut client = harness.client().await;
+    let mut bunker = harness.client().await;
+    let mut stranger = harness.client().await;
+
+    client.send(json!(["REQ", "replies", {"kinds": [24133], "#p": [app]}])).await;
+    assert_eq!(client.recv().await, json!(["EOSE", "replies"]));
+    bunker.send(json!(["REQ", "requests", {"kinds": [24133], "#p": [signer]}])).await;
+    assert_eq!(bunker.recv().await, json!(["EOSE", "requests"]));
+    // Someone watching the signer's outbox, by its author.
+    stranger.send(json!(["REQ", "outbox", {"kinds": [24133], "authors": [signer]}])).await;
+    assert_eq!(stranger.recv().await, json!(["EOSE", "outbox"]));
+    // Asking for everyone's is still refused, and without kinds finds none.
+    stranger.send(json!(["REQ", "all", {"kinds": [24133]}])).await;
+    assert!(stranger.recv().await[2].as_str().unwrap().starts_with("auth-required:"));
+    stranger.send(json!(["REQ", "any", {}])).await;
+    assert_eq!(stranger.recv().await, json!(["EOSE", "any"]));
+
+    let request = wrap(ALICE, policy::NIP46, BOB, 0);
+    assert_eq!(client.publish(&request).await[2], true);
+    assert_eq!(bunker.recv().await[2]["id"], request.id);
+    let reply = wrap(BOB, policy::NIP46, ALICE, 0);
+    assert_eq!(bunker.publish(&reply).await[2], true);
+    assert_eq!(client.recv().await[2]["id"], reply.id);
+    let seen = stranger.recv().await;
+    assert_eq!((&seen[1], &seen[2]["id"]), (&json!("outbox"), &json!(reply.id)));
+    client.quiet().await;
+    bunker.quiet().await;
+    stranger.quiet().await;
+
+    // Kept briefly, for a party that reconnects.
+    assert_eq!(stranger.query("late", &[json!({"kinds": [24133], "#p": [signer]})]).await, [request]);
 }

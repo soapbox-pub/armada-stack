@@ -96,9 +96,7 @@ pub fn expiration(event: &Event, now: i64) -> Option<u32> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
     Anyone,
-    /// Connections authenticated as its author or its `p` recipient.
-    AuthorOrRecipient,
-    /// Like [`AuthorOrRecipient`](Access::AuthorOrRecipient), and also any
+    /// Connections authenticated as its author or its `p` recipient, or any
     /// filter that names its author. A gift wrap's author is a throwaway
     /// key or a Concord stream address, never someone's identity, so
     /// knowing it is the capability to read: Concord's Control Plane is
@@ -107,6 +105,13 @@ pub enum Access {
     /// `#p`, or for everyone's, still takes authenticating, since that's
     /// where who receives what would leak.
     NamedAuthorOrRecipient,
+    /// Connections authenticated as its author or its `p` recipient, or any
+    /// filter that names either. NIP-46's two parties are a client's
+    /// throwaway key and a remote signer, and neither authenticates to the
+    /// relays they talk through: Armada's pairing doesn't, and signers
+    /// can't be made to. The content is encrypted and kept minutes, so
+    /// what naming a signer's key shows is when it's asked to sign.
+    NamedParty,
     /// Connections authenticated as its author.
     Author,
 }
@@ -114,7 +119,7 @@ pub enum Access {
 pub fn access(kind: u16) -> Access {
     match kind {
         GIFT_WRAP | EPHEMERAL_GIFT_WRAP => Access::NamedAuthorOrRecipient,
-        NIP46 => Access::AuthorOrRecipient,
+        NIP46 => Access::NamedParty,
         // A deletion request says what its author once published, and for
         // a gift wrap, that they received it.
         APP_DATA | DELETION => Access::Author,
@@ -126,49 +131,68 @@ pub fn access(kind: u16) -> Access {
 pub type Keys = HashSet<[u8; 32]>;
 
 /// Whether a connection authenticated as `keys` may see an event that
-/// `filter` matched. Only that filter counts: an author named by another
+/// `filter` matched. Only that filter counts: a key named by another
 /// filter of the same REQ grants nothing here.
 pub fn visible(event: &EventView, filter: &Filter, keys: &Keys) -> bool {
     match access(event.kind()) {
         Access::Anyone => true,
         Access::Author => keys.contains(event.pubkey()),
-        Access::AuthorOrRecipient => authenticated(event, keys),
         Access::NamedAuthorOrRecipient => names_author(filter, event) || authenticated(event, keys),
+        Access::NamedParty => names_author(filter, event) || names_recipient(filter, event) || authenticated(event, keys),
     }
 }
 
 fn authenticated(event: &EventView, keys: &Keys) -> bool {
-    keys.contains(event.pubkey()) || event.indexed_tags().any(|tag| matches!(tag, (b'p', Element::Hex(recipient)) if keys.contains(recipient)))
+    keys.contains(event.pubkey()) || recipients(event).any(|recipient| keys.contains(recipient))
 }
 
 fn names_author(filter: &Filter, event: &EventView) -> bool {
     filter.authors.as_ref().is_some_and(|authors| authors.binary_search(event.pubkey()).is_ok())
 }
 
+fn names_recipient(filter: &Filter, event: &EventView) -> bool {
+    let Some((_, values)) = filter.tags.iter().find(|(letter, _)| *letter == b'p') else { return false };
+    recipients(event).any(|recipient| values.iter().any(|value| matches!(value.split_first(), Some((1, key)) if key == recipient)))
+}
+
+fn recipients<'a>(event: &'a EventView) -> impl Iterator<Item = &'a [u8; 32]> {
+    event.indexed_tags().filter_map(|tag| match tag {
+        (b'p', Element::Hex(recipient)) => Some(recipient),
+        _ => None,
+    })
+}
+
 /// Restrict a filter to what a connection authenticated as `keys` may
 /// read, before anything runs. A filter naming private kinds has to be
 /// scoped to authenticated `authors` (or `#p` recipients, where they may
-/// read), or for gift wraps, to any `authors` at all; otherwise it's
-/// refused: there's no reading someone else's gift wraps by asking for
-/// everyone's. One without `kinds` is narrowed to the kinds it may read
-/// by authenticating, so gift wraps are only ever found by asking for
-/// them. Lookups by id can't sweep the store, so pass. Whatever passes,
-/// each event is still checked with [`visible`] before it's sent.
+/// read), or to any `authors` at all for gift wraps, and any `authors` or
+/// `#p` for NIP-46; otherwise it's refused: there's no reading someone
+/// else's gift wraps by asking for everyone's. One without `kinds` is
+/// narrowed to the kinds it may read by authenticating, so those are only
+/// ever found by asking for them. Lookups by id can't sweep the store, so
+/// pass. Whatever passes, each event is still checked with [`visible`]
+/// before it's sent.
 pub fn scope(filter: &mut Filter, keys: &Keys) -> Result<(), String> {
     if filter.ids.is_some() {
         return Ok(());
     }
     let named = filter.authors.as_ref().is_some_and(|authors| !authors.is_empty());
     let authors = named && filter.authors.as_ref().is_some_and(|authors| authors.iter().all(|author| keys.contains(author)));
-    let recipients = filter.tags.iter().find(|(letter, _)| *letter == b'p').is_some_and(|(_, values)| {
-        !values.is_empty() && values.iter().all(|value| matches!(value.split_first(), Some((1, key)) if <&[u8; 32]>::try_from(key).is_ok_and(|key| keys.contains(key))))
-    });
+    let p = filter.tags.iter().find(|(letter, _)| *letter == b'p').map(|(_, values)| values).filter(|values| !values.is_empty());
+    let recipients = p.is_some_and(|values| values.iter().all(|value| matches!(value.split_first(), Some((1, key)) if <&[u8; 32]>::try_from(key).is_ok_and(|key| keys.contains(key)))));
     let authenticated = |kind: u16| match access(kind) {
         Access::Anyone => true,
         Access::Author => authors,
-        Access::AuthorOrRecipient | Access::NamedAuthorOrRecipient => authors || recipients,
+        Access::NamedAuthorOrRecipient | Access::NamedParty => authors || recipients,
     };
-    let readable = |kind: u16| authenticated(kind) || (access(kind) == Access::NamedAuthorOrRecipient && named);
+    let readable = |kind: u16| {
+        authenticated(kind)
+            || match access(kind) {
+                Access::NamedAuthorOrRecipient => named,
+                Access::NamedParty => named || p.is_some(),
+                Access::Anyone | Access::Author => false,
+            }
+    };
     match &mut filter.kinds {
         Some(kinds) if kinds.iter().all(|&kind| readable(kind)) => Ok(()),
         Some(_) => {
@@ -619,12 +643,18 @@ mod tests {
         assert!(scope(serde_json::json!({"kinds": [1059]}), &none).is_err());
         assert!(scope(serde_json::json!({"kinds": [1059], "authors": []}), &none).is_err());
         assert!(scope(serde_json::json!({"kinds": [1059, APP_DATA], "authors": [bob]}), &none).is_err());
-        assert!(scope(serde_json::json!({"kinds": [NIP46], "authors": [bob]}), &none).is_err());
+        // NIP-46, by either party.
+        assert!(scope(serde_json::json!({"kinds": [NIP46], "authors": [bob]}), &none).is_ok());
+        assert!(scope(serde_json::json!({"kinds": [NIP46], "#p": [bob]}), &none).is_ok());
+        assert!(scope(serde_json::json!({"kinds": [NIP46]}), &none).is_err());
+        assert!(scope(serde_json::json!({"kinds": [NIP46], "#p": []}), &none).is_err());
+        assert!(scope(serde_json::json!({"kinds": [1059], "#p": [bob]}), &none).is_err());
 
         // Without kinds, only what authenticating allows.
         let kinds = |value, keys| scope(value, keys).unwrap().kinds.unwrap();
         assert!(!kinds(serde_json::json!({"authors": [bob]}), &none).contains(&GIFT_WRAP));
         assert!(kinds(serde_json::json!({"authors": [alice]}), &me).contains(&GIFT_WRAP));
+        assert!(!kinds(serde_json::json!({"#p": [bob]}), &none).contains(&NIP46));
     }
 
     #[test]
