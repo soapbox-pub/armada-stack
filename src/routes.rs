@@ -98,7 +98,7 @@ mod tests {
             blobs: storage.blobs.clone(),
             naddr: http::HeaderValue::from_static("naddr"),
         });
-        let relay = Relay::open(&config.relay, &storage, &cancel).unwrap();
+        let relay = Relay::open(&config.relay, None, &storage, &cancel).unwrap();
         let blossom = Blossom::open(&config.blossom, None, &storage, &cancel).unwrap();
         let router = router(Services { web, relay, blossom, av: None });
         Harness { _dir: dir, router, _cancel: cancel.drop_guard() }

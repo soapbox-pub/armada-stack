@@ -28,7 +28,7 @@ impl Harness {
     async fn new(config: RelayConfig) -> Harness {
         let dir = tempfile::tempdir().unwrap();
         let cancel = CancellationToken::new();
-        let relay = Relay::open(&config, &Storage::allowing_private(dir.path()), &cancel).unwrap();
+        let relay = Relay::open(&config, None, &Storage::allowing_private(dir.path()), &cancel).unwrap();
         let router = relay.router();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
@@ -91,9 +91,13 @@ impl Client {
     }
 }
 
+/// A user status: public, free text, and addressed by its content here, so
+/// each is its own.
 fn note(secret: &str, content: &str) -> Event {
-    Event::sign(secret, now(), 1, vec![], content)
+    Event::sign(secret, now(), STATUS.into(), tags(&[&["d", content]]), content)
 }
+
+const STATUS: u16 = 30315;
 
 #[tokio::test]
 async fn stores_queries_and_streams() {
@@ -106,7 +110,7 @@ async fn stores_queries_and_streams() {
     assert_eq!(alice.publish(&first).await, json!(["OK", first.id, true, "duplicate: already have this event"]));
 
     // Stored events, then EOSE, then live ones.
-    assert_eq!(bob.query("feed", &[json!({"kinds": [1]})]).await, [first]);
+    assert_eq!(bob.query("feed", &[json!({"kinds": [STATUS]})]).await, [first]);
     let second = note(ALICE, "second");
     alice.publish(&second).await;
     let live = bob.recv().await;
@@ -148,7 +152,7 @@ async fn hands_off_from_query_to_live_without_gaps_or_repeats() {
     let (mut tx, mut rx) = bob.socket.split();
     let opener = tokio::spawn(async move {
         for i in 0..SUBS {
-            let req = json!(["REQ", format!("s{i}"), {"kinds": [1]}]);
+            let req = json!(["REQ", format!("s{i}"), {"kinds": [STATUS]}]);
             tx.send(Message::Text(req.to_string().into())).await.unwrap();
             tokio::time::sleep(Duration::from_millis(3)).await;
         }
@@ -179,26 +183,13 @@ async fn hands_off_from_query_to_live_without_gaps_or_repeats() {
 }
 
 #[tokio::test]
-async fn relays_ephemeral_events_without_storing_them() {
-    let harness = Harness::new(RelayConfig::default()).await;
-    let mut alice = harness.client().await;
-    let mut bob = harness.client().await;
-    bob.query("live", &[json!({"kinds": [20001]})]).await;
-
-    let typing = Event::sign(ALICE, now(), 20_001, vec![], "typing");
-    assert_eq!(alice.publish(&typing).await[2], true);
-    assert_eq!(bob.recv().await[2]["id"], typing.id);
-    assert!(bob.query("stored", &[json!({"kinds": [20001]})]).await.is_empty());
-}
-
-#[tokio::test]
 async fn honors_deletion_and_replacement() {
     let harness = Harness::new(RelayConfig::default()).await;
     let mut alice = harness.client().await;
     let at = now();
 
-    let profile = Event::sign(ALICE, at - 10, 0, vec![], "old");
-    let newer = Event::sign(ALICE, at, 0, vec![], "new");
+    let profile = Event::sign(ALICE, at - 10, 0, vec![], r#"{"name":"old"}"#);
+    let newer = Event::sign(ALICE, at, 0, vec![], r#"{"name":"new"}"#);
     alice.publish(&profile).await;
     alice.publish(&newer).await;
     let reply = alice.publish(&profile).await;
@@ -225,11 +216,17 @@ async fn refuses_what_it_should() {
     forged.content = "forged".into();
     assert_eq!(client.publish(&forged).await, json!(["OK", forged.id, false, "invalid: bad id or signature"]));
 
-    let future = Event::sign(ALICE, now() + 3600, 1, vec![], "");
+    let future = Event::sign(ALICE, now() + 3600, STATUS.into(), tags(&[&["d", ""]]), "");
     assert_eq!(client.publish(&future).await[3], "invalid: created_at is too far in the future");
 
-    let expired = Event::sign(ALICE, now(), 1, tags(&[&["expiration", "1000"]]), "");
+    let expired = Event::sign(ALICE, now(), STATUS.into(), tags(&[&["d", ""], &["expiration", "1000"]]), "");
     assert_eq!(client.publish(&expired).await[3], "invalid: event has expired");
+
+    // Only the kinds Armada uses, in the shape it gives them.
+    let text_note = Event::sign(ALICE, now(), 1, vec![], "hello");
+    assert_eq!(client.publish(&text_note).await[3], "blocked: kind 1 is not accepted by this relay");
+    let profile = Event::sign(ALICE, now(), 0, vec![], "not json");
+    assert_eq!(client.publish(&profile).await[3], "invalid: content must be a JSON object");
 
     // Only events that pass the cheap checks count. The third in a minute
     // is one too many.
@@ -241,10 +238,10 @@ async fn refuses_what_it_should() {
     client.send(json!(["REQ", "s", {"search": "x"}])).await;
     assert_eq!(client.recv().await, json!(["CLOSED", "s", "unsupported: filter field search"]));
 
-    client.query("a", &[json!({"kinds": [1]})]).await;
-    client.query("b", &[json!({"kinds": [1]})]).await;
+    client.query("a", &[json!({"kinds": [STATUS]})]).await;
+    client.query("b", &[json!({"kinds": [STATUS]})]).await;
     // Replacing an open one is fine; a third isn't.
-    client.query("b", &[json!({"kinds": [1]})]).await;
+    client.query("b", &[json!({"kinds": [STATUS]})]).await;
     client.send(json!(["REQ", "c", {}])).await;
     assert_eq!(client.recv().await, json!(["CLOSED", "c", "rate-limited: too many open subscriptions"]));
 

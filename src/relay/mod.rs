@@ -16,6 +16,8 @@ mod conn;
 mod filter;
 mod lmdb;
 mod monitors;
+mod nip44;
+mod policy;
 mod query;
 mod record;
 mod store;
@@ -47,6 +49,9 @@ pub struct Relay {
 /// What every connection shares.
 struct Shared {
     config: RelayConfig,
+    /// The [`policy::authority`] of `public_url`, if it's set. Otherwise
+    /// each connection's comes from its request.
+    authority: Option<Arc<str>>,
     store: Arc<Store>,
     hub: Hub,
     writer: Writer,
@@ -61,7 +66,8 @@ struct Shared {
 
 impl Relay {
     /// Open the relay's store. Every connection closes once `cancel` fires.
-    pub fn open(config: &RelayConfig, storage: &Storage, cancel: &CancellationToken) -> Result<Relay> {
+    /// `public_url` is where clients reach it, as they name it in AUTH.
+    pub fn open(config: &RelayConfig, public_url: Option<url::Url>, storage: &Storage, cancel: &CancellationToken) -> Result<Relay> {
         let store = Arc::new(Store::open(&storage.service_dir("relay")?, config.map_size as usize)?);
         let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
         let hub = Hub::spawn((cores / 2).clamp(1, 8));
@@ -69,6 +75,7 @@ impl Relay {
         Ok(Relay {
             shared: Arc::new(Shared {
                 config: config.clone(),
+                authority: public_url.and_then(|url| policy::authority(url.as_str())).map(Arc::from),
                 store,
                 hub,
                 writer,
@@ -93,7 +100,8 @@ impl Relay {
         match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
             Ok(upgrade) => {
                 let max = shared.config.max_message_length;
-                upgrade.max_message_size(max).max_frame_size(max).on_upgrade(move |socket| conn::serve(shared, socket)).into_response()
+                let authority = shared.authority.clone().unwrap_or_else(|| request_authority(&parts).into());
+                upgrade.max_message_size(max).max_frame_size(max).on_upgrade(move |socket| conn::serve(shared, socket, authority)).into_response()
             }
             Err(_) if wants_nip11(&parts.headers) => {
                 let headers = [(header::CONTENT_TYPE, "application/nostr+json"), (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
@@ -113,6 +121,13 @@ pub fn wants(method: &Method, path: &str, headers: &HeaderMap) -> bool {
     // HTTP/1.1's `Upgrade: websocket`, or HTTP/2's extended CONNECT.
     let upgrade = headers.get(header::UPGRADE).and_then(|v| v.to_str().ok()).is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
     upgrade || *method == Method::CONNECT || wants_nip11(headers)
+}
+
+/// The authority a request was made to: HTTP/1.1's `Host`, or HTTP/2's
+/// `:authority`.
+fn request_authority(parts: &http::request::Parts) -> String {
+    let host = parts.headers.get(header::HOST).and_then(|v| v.to_str().ok()).or_else(|| parts.uri.authority().map(|a| a.as_str()));
+    host.and_then(|host| policy::authority(&format!("wss://{}", host.trim()))).unwrap_or_default()
 }
 
 fn wants_nip11(headers: &HeaderMap) -> bool {

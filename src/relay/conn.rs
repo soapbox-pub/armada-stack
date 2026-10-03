@@ -28,6 +28,7 @@ use tokio::task::JoinSet;
 use super::Shared;
 use super::filter::Filter;
 use super::monitors::{ConnId, Link, Outbound};
+use super::policy;
 use super::query::{self, Results};
 use super::record;
 use super::writer::{Submission, ok};
@@ -65,18 +66,20 @@ struct Session {
     sink: Sink,
     subs: HashMap<String, Sub>,
     tokens: TokenBucket,
+    /// What this relay is called, as [`policy::authority`] puts it.
+    authority: Arc<str>,
 }
 
 type QueryDone = (Arc<str>, anyhow::Result<Results>);
 
-pub async fn serve(shared: Arc<Shared>, socket: WebSocket) {
+pub async fn serve(shared: Arc<Shared>, socket: WebSocket, authority: Arc<str>) {
     let id = shared.next_conn.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (link, mut rx, overflow) = Link::new(OUTBOUND);
     let (sink, mut stream) = socket.split();
     shared.hub.connect(id, link.clone()).await;
     let tokens = TokenBucket::new(shared.config.events_per_minute);
     let cancel = shared.cancel.clone();
-    let mut session = Session { shared, id, link, sink, subs: HashMap::new(), tokens };
+    let mut session = Session { shared, id, link, sink, subs: HashMap::new(), tokens, authority };
     let mut queries: JoinSet<QueryDone> = JoinSet::new();
 
     loop {
@@ -152,7 +155,7 @@ impl Session {
         };
 
         if let Err(message) = self.screen(&event) {
-            return self.send(ok(&event.id, false, message)).await;
+            return self.send(ok(&event.id, false, &message)).await;
         }
         // Waiting here slows only this client when verifiers are scarce.
         let Ok(permit) = self.shared.verifiers.clone().acquire_owned().await else { return Ok(()) };
@@ -164,34 +167,32 @@ impl Session {
         Ok(())
     }
 
-    /// The checks that cost next to nothing, and the rate limit. Errors are
+    /// Every check short of the signature, and the rate limit. Errors are
     /// the `OK` message to refuse with.
-    fn screen(&mut self, event: &Event) -> Result<(), &'static str> {
+    fn screen(&mut self, event: &Event) -> Result<(), String> {
         let config = &self.shared.config;
         let now = now();
         if !is_hex64(&event.id) || !is_hex64(&event.pubkey) || event.sig.len() != 128 || hex::decode(&event.sig).is_err() {
-            return Err("invalid: id, pubkey, and sig must be lowercase hex");
-        }
-        if !(0..=i64::from(u16::MAX)).contains(&event.kind) {
-            return Err("invalid: kind must be between 0 and 65535");
+            return Err("invalid: id, pubkey, and sig must be lowercase hex".into());
         }
         if !(0..=i64::from(u32::MAX)).contains(&event.created_at) {
-            return Err("invalid: created_at is out of range");
+            return Err("invalid: created_at is out of range".into());
         }
         if event.created_at > now.saturating_add(config.created_at_upper_limit as i64) {
-            return Err("invalid: created_at is too far in the future");
+            return Err("invalid: created_at is too far in the future".into());
         }
         if event.tags.len() > config.max_event_tags {
-            return Err("invalid: too many tags");
+            return Err("invalid: too many tags".into());
         }
         if event.content.len() > config.max_content_length {
-            return Err("invalid: content is too long");
+            return Err("invalid: content is too long".into());
         }
+        policy::validate(event, now, &self.authority)?;
         if record::expiration(event).is_some_and(|expiration| i64::from(expiration) <= now) {
-            return Err("invalid: event has expired");
+            return Err("invalid: event has expired".into());
         }
         if !self.tokens.take() {
-            return Err("rate-limited: slow down");
+            return Err("rate-limited: slow down".into());
         }
         Ok(())
     }
