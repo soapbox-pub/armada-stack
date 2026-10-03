@@ -465,7 +465,24 @@ fn parses_blob_paths() {
     assert!(blob_path(&format!("/a/{sha}")).is_none());
     assert!(blob_url(&format!("https://cdn.example.com/files/{sha}.png")).is_some());
     assert!(blob_url("https://cdn.example.com/").is_none());
-    assert_eq!(domain("example.com:8080"), "example.com");
-    assert_eq!(domain("[::1]:8080"), "::1");
-    assert_eq!(domain("example.com"), "example.com");
+}
+
+#[tokio::test]
+async fn blob_urls_name_a_public_host_over_https() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::allowing_private(dir.path());
+    let config = BlossomConfig { max_blob_size: MAX, ..BlossomConfig::default() };
+    let blossom = Blossom::open(&config, None, false, &storage, &CancellationToken::new()).unwrap();
+    let blob = ciphertext(9, 5000);
+    let sha = sha_of(&blob);
+    for (host, base) in [("armada.example.org", "https://armada.example.org"), ("localhost:8080", "http://localhost:8080")] {
+        let mut request = upload_request(ALICE, &blob);
+        request.headers_mut().insert("host", host.parse().unwrap());
+        request.extensions_mut().insert(from("203.0.113.1"));
+        let response = blossom.router().oneshot(request).await.unwrap();
+        assert!(response.status().is_success(), "{host}");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let descriptor: Descriptor = serde_json::from_slice(&body).unwrap();
+        assert_eq!(descriptor.url, format!("{base}/{sha}.bin"));
+    }
 }

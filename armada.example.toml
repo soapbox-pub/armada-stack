@@ -6,7 +6,8 @@
 
 # Defaults to 127.0.0.1:8080, or [::]:443 with [tls] on.
 # listen = "127.0.0.1:8080"
-# Unset, it's taken from each request's Host and X-Forwarded-Proto.
+# Unset, it's taken from each request's Host: https:// for a public domain,
+# otherwise whatever X-Forwarded-Proto says.
 # public_url = "https://armada.example.com"
 # Believe X-Forwarded-For. On by default when listen is loopback.
 # trust_proxy = true

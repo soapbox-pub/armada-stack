@@ -37,8 +37,9 @@ pub struct Config {
     pub listen: Option<SocketAddr>,
     /// The origin clients reach armada at, like `https://armada.example.com`:
     /// what Blossom blob URLs are built on, and the domain `server` tags in
-    /// Blossom tokens must name. Unset, it's taken from each request's `Host`
-    /// and `X-Forwarded-Proto`.
+    /// Blossom tokens must name. Unset, it's taken from each request's
+    /// `Host`: over HTTPS for a public domain, and otherwise over whatever
+    /// `X-Forwarded-Proto` says (see [`crate::origin`]).
     pub public_url: Option<String>,
     /// Shared by every service: each keeps its database in a directory of its
     /// own beneath this, and blobs live in one store they all use. Relative to

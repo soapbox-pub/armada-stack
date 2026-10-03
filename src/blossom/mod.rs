@@ -38,6 +38,7 @@ use tokio_util::sync::CancellationToken;
 use crate::blobs::{BlobStore, DownloadError, DownloadReason, Staged};
 use crate::config::BlossomConfig;
 use crate::hash::BlobHash;
+use crate::origin::{Origin, request_origin};
 use crate::ratelimit::{self, RateLimiter};
 use crate::storage::Storage;
 use crate::util::now;
@@ -147,13 +148,6 @@ struct Descriptor {
 #[derive(Deserialize)]
 struct MirrorRequest {
     url: String,
-}
-
-/// Where the request reached this server: the origin blob URLs are built on,
-/// and the domain `server` tags must name.
-struct Origin {
-    base: String,
-    host: Option<String>,
 }
 
 impl Server {
@@ -509,32 +503,10 @@ impl Server {
         }
     }
 
+    /// Where the request reached this server: the origin blob URLs are built
+    /// on, and the domain `server` tags must name.
     fn origin(&self, headers: &HeaderMap) -> Origin {
-        if let Some(url) = &self.public_url {
-            return Origin { base: url.origin().ascii_serialization(), host: url.host_str().map(str::to_string) };
-        }
-        let host = header_str(headers, header::HOST)
-            .map(str::trim)
-            .filter(|host| !host.is_empty() && host.bytes().all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b)));
-        let Some(host) = host else {
-            return Origin { base: "http://localhost".into(), host: None };
-        };
-        let scheme = match header_str(headers, "x-forwarded-proto").and_then(|v| v.split(',').next()).map(str::trim) {
-            Some("https") => "https",
-            _ => "http",
-        };
-        Origin { base: format!("{scheme}://{host}"), host: Some(domain(host).to_ascii_lowercase()) }
-    }
-}
-
-/// A `Host` without its port.
-fn domain(host: &str) -> &str {
-    if let Some(rest) = host.strip_prefix('[') {
-        return rest.split(']').next().unwrap_or(rest);
-    }
-    match host.rsplit_once(':') {
-        Some((name, port)) if !name.contains(':') && port.bytes().all(|b| b.is_ascii_digit()) => name,
-        _ => host,
+        request_origin(self.public_url.as_ref(), headers)
     }
 }
 
