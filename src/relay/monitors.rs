@@ -17,12 +17,13 @@
 //! on one queue, in order, so there's nothing to lock.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::filter::Filter;
+use super::policy::{self, Access, Keys};
 use super::record::EventView;
 use super::store::MAX_INDEXED_TAG;
 
@@ -79,8 +80,11 @@ impl Live {
     }
 }
 
+/// The keys a connection has authenticated as, so far.
+pub type SharedKeys = Arc<RwLock<Keys>>;
+
 enum Command {
-    Connect(ConnId, Link),
+    Connect(ConnId, Link, SharedKeys),
     Disconnect(ConnId),
     Subscribe { conn: ConnId, sub: Arc<str>, filters: Vec<Filter>, installed: oneshot::Sender<()> },
     Unsubscribe(ConnId, String),
@@ -118,8 +122,10 @@ impl Hub {
         &self.shards[(conn % self.shards.len() as u64) as usize]
     }
 
-    pub async fn connect(&self, conn: ConnId, link: Link) {
-        let _ = self.shard(conn).send(Command::Connect(conn, link)).await;
+    /// Add a connection, authenticated as whatever `keys` holds when an
+    /// event arrives for it.
+    pub async fn connect(&self, conn: ConnId, link: Link, keys: SharedKeys) {
+        let _ = self.shard(conn).send(Command::Connect(conn, link, keys)).await;
     }
 
     pub async fn disconnect(&self, conn: ConnId) {
@@ -170,6 +176,7 @@ enum Bucket {
 
 struct Connection {
     link: Link,
+    keys: SharedKeys,
     /// Subscription id → the keys of its installed filters.
     subs: HashMap<Arc<str>, Vec<u64>>,
 }
@@ -188,7 +195,7 @@ struct Monitors {
 impl Monitors {
     fn handle(&mut self, command: Command) {
         match command {
-            Command::Connect(conn, link) => self.connect(conn, link),
+            Command::Connect(conn, link, keys) => self.connect(conn, link, keys),
             Command::Disconnect(conn) => self.disconnect(conn),
             Command::Subscribe { conn, sub, filters, installed } => {
                 self.subscribe(conn, sub, filters);
@@ -204,8 +211,8 @@ impl Monitors {
         }
     }
 
-    pub fn connect(&mut self, conn: ConnId, link: Link) {
-        self.conns.insert(conn, Connection { link, subs: HashMap::new() });
+    pub fn connect(&mut self, conn: ConnId, link: Link, keys: SharedKeys) {
+        self.conns.insert(conn, Connection { link, keys, subs: HashMap::new() });
     }
 
     pub fn disconnect(&mut self, conn: ConnId) {
@@ -322,17 +329,20 @@ impl Monitors {
         candidates.sort_unstable();
         candidates.dedup();
 
+        let private = policy::access(event.kind()) != Access::Anyone;
         let mut sent = HashSet::new();
         for key in candidates {
             let Some(installed) = self.filters.get(&key) else { continue };
             if sent.contains(&installed.sub_key) || !installed.filter.matches(event) {
                 continue;
             }
+            let Some(connection) = self.conns.get(&installed.conn) else { continue };
+            if private && !policy::visible(event, &connection.keys.read().expect("the keys lock")) {
+                continue;
+            }
             sent.insert(installed.sub_key);
             let json = json.get_or_init(|| event.to_json().into()).clone();
-            if let Some(connection) = self.conns.get(&installed.conn) {
-                connection.link.send(Outbound::Event { sub: installed.sub.clone(), seq, json });
-            }
+            connection.link.send(Outbound::Event { sub: installed.sub.clone(), seq, json });
         }
         sent.len()
     }
@@ -343,8 +353,11 @@ mod tests {
     use super::*;
     use crate::nostr::Event;
     use crate::relay::record::encode;
+    use crate::nostr::event::public_key;
     use crate::relay::store::tests::{ALICE, BOB, tags};
     use serde_json::json;
+
+    const CAROL: &str = "0000000000000000000000000000000000000000000000000000000000000003";
 
     fn filters(values: &[serde_json::Value]) -> Vec<Filter> {
         values.iter().map(|v| Filter::parse(v).unwrap()).collect()
@@ -367,7 +380,7 @@ mod tests {
     fn sends_each_subscription_an_event_once() {
         let mut monitors = Monitors::default();
         let (link, mut rx, _) = Link::new(16);
-        monitors.connect(1, link);
+        monitors.connect(1, link, SharedKeys::default());
 
         let note = Event::sign(ALICE, 100, 1, tags(&[&["t", "a"], &["t", "b"]]), "");
         let alice = &note.pubkey;
@@ -394,13 +407,34 @@ mod tests {
         assert!(monitors.filters.is_empty() && monitors.buckets.is_empty() && monitors.tags.is_empty());
     }
 
+    #[test]
+    fn sends_private_events_only_to_whom_they_may_reach() {
+        let mut monitors = Monitors::default();
+        let (bob, carol) = (public_key(BOB), public_key(CAROL));
+        let mut receivers = Vec::new();
+        for (conn, key) in [(1, None), (2, Some(&bob)), (3, Some(&carol))] {
+            let (link, rx, _) = Link::new(16);
+            let keys: Keys = key.map(|key| hex::decode(key).unwrap().try_into().unwrap()).into_iter().collect();
+            monitors.connect(conn, link, Arc::new(RwLock::new(keys)));
+            monitors.subscribe(conn, "s".into(), filters(&[json!({})]));
+            receivers.push(rx);
+        }
+        let wrap = Event::sign(ALICE, 100, 1059, tags(&[&["p", &bob]]), "");
+        assert_eq!(deliver(&monitors, &wrap), 1);
+        let got: Vec<usize> = receivers.iter_mut().map(|rx| received(rx).len()).collect();
+        assert_eq!(got, [0, 1, 0]);
+        // Authenticating later counts.
+        monitors.conns[&3].keys.write().unwrap().insert(hex::decode(&bob).unwrap().try_into().unwrap());
+        assert_eq!(deliver(&monitors, &wrap), 2);
+    }
+
     #[tokio::test]
     async fn routes_through_shards() {
         let hub = Hub::spawn(2);
         let mut receivers = Vec::new();
         for conn in 1..=3 {
             let (link, rx, _) = Link::new(16);
-            hub.connect(conn, link).await;
+            hub.connect(conn, link, SharedKeys::default()).await;
             hub.subscribe(conn, "s".into(), filters(&[json!({"kinds": [1]})])).await.await.unwrap();
             receivers.push(rx);
         }
@@ -431,7 +465,7 @@ mod tests {
     fn signals_a_connection_that_falls_behind() {
         let mut monitors = Monitors::default();
         let (link, _rx, overflow) = Link::new(1);
-        monitors.connect(1, link);
+        monitors.connect(1, link, SharedKeys::default());
         monitors.subscribe(1, "s".into(), filters(&[json!({})]));
         deliver(&monitors, &Event::sign(ALICE, 1, 1, vec![], ""));
         assert!(!overflow.is_cancelled());

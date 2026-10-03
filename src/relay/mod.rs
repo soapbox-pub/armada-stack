@@ -1,6 +1,11 @@
-//! The relay: NIP-01, with NIP-09 deletion, NIP-11, and NIP-40 expiration.
+//! The relay: NIP-01, with NIP-09 deletion, NIP-11, NIP-40 expiration,
+//! NIP-42 authentication, NIP-62 vanishing, and NIP-70 protected events.
 //!
-//! Anyone may read and publish, within the limits in [`RelayConfig`].
+//! It takes the kinds Armada uses and nothing else, each checked against
+//! rules of its own ([`policy`]). Anyone may publish them, within the
+//! limits in [`RelayConfig`], and read them, but for gift wraps, NIP-46
+//! messages, and app data: only connections authenticated as their author
+//! (or their recipient) see those.
 //!
 //! - [`store`] keeps events in LMDB as compact [`record`]s, with
 //!   duplicate-sorted indexes (over [`lmdb`], since heed can't seek within
@@ -141,7 +146,7 @@ fn info(config: &RelayConfig) -> serde_json::Value {
         "description": "The relay of a self-hosted Armada.",
         "software": "armada-stack",
         "version": env!("CARGO_PKG_VERSION"),
-        "supported_nips": [1, 9, 11, 40],
+        "supported_nips": [1, 9, 11, 40, 42, 62, 70],
         "limitation": {
             "max_message_length": config.max_message_length,
             "max_subscriptions": config.max_subscriptions,
@@ -154,7 +159,7 @@ fn info(config: &RelayConfig) -> serde_json::Value {
             "created_at_upper_limit": config.created_at_upper_limit,
             "auth_required": false,
             "payment_required": false,
-            "restricted_writes": false,
+            "restricted_writes": true,
         },
     })
 }

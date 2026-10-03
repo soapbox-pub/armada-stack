@@ -31,7 +31,7 @@ resync_interval = 600
 max_file_size = 104857600
 max_site_size = 1073741824
 
-# A public Nostr relay, within these limits.
+# A Nostr relay for the kinds Armada uses, within these limits.
 [relay]
 max_message_length = 131072
 max_subscriptions = 32
@@ -43,6 +43,8 @@ max_content_length = 65536
 created_at_upper_limit = 900
 # Per connection. 0 for no limit.
 events_per_minute = 600
+# Per connection: Armada authenticates as each Concord stream key it reads.
+max_authed_keys = 2000
 # Reserved address space, not disk.
 map_size = 274877906944
 

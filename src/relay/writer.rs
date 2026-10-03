@@ -157,12 +157,12 @@ mod tests {
         let writer = Writer::spawn(store.clone(), hub.clone());
 
         let (link, mut rx, _) = Link::new(16);
-        hub.connect(1, link.clone()).await;
+        hub.connect(1, link.clone(), Default::default()).await;
         hub.subscribe(1, "s".into(), vec![Filter::parse(&serde_json::json!({})).unwrap()]).await.await.unwrap();
 
         let note = Event::sign(ALICE, 100, 1, vec![], "hi");
         let vanish = Event::sign(ALICE, 50, 62, tags(&[&["relay", "ALL_RELAYS"]]), "");
-        let ephemeral = Event::sign(ALICE, 100, 21_059, vec![], "typing");
+        let ephemeral = Event::sign(ALICE, 100, 20_001, vec![], "typing");
         for event in [&note, &note, &vanish, &ephemeral] {
             assert!(writer.submit(Submission { record: record::encode(event), reply: link.clone() }).is_ok());
         }

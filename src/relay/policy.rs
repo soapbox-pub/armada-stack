@@ -8,7 +8,11 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::Value;
 
+use std::collections::HashSet;
+
+use super::filter::Filter;
 use super::nip44;
+use super::record::{Element, EventView};
 use crate::nostr::Event;
 use crate::nostr::event::is_hex64;
 
@@ -103,6 +107,60 @@ pub fn access(kind: u16) -> Access {
         GIFT_WRAP | EPHEMERAL_GIFT_WRAP | NIP46 => Access::AuthorOrRecipient,
         APP_DATA => Access::Author,
         _ => Access::Anyone,
+    }
+}
+
+/// The pubkeys a connection has authenticated as (NIP-42).
+pub type Keys = HashSet<[u8; 32]>;
+
+/// Whether a connection authenticated as `keys` may see an event.
+pub fn visible(event: &EventView, keys: &Keys) -> bool {
+    match access(event.kind()) {
+        Access::Anyone => true,
+        Access::Author => keys.contains(event.pubkey()),
+        Access::AuthorOrRecipient => {
+            keys.contains(event.pubkey())
+                || event.indexed_tags().any(|tag| matches!(tag, (b'p', Element::Hex(recipient)) if keys.contains(recipient)))
+        }
+    }
+}
+
+/// Restrict a filter to what a connection authenticated as `keys` may
+/// read, before anything runs. A filter naming private kinds has to be
+/// scoped to authenticated `authors` (or `#p` recipients, where they may
+/// read), or it's refused: there's no reading someone else's gift wraps by
+/// asking for everyone's. One without `kinds` is narrowed to the kinds it
+/// may read. Lookups by id can't sweep the store, so pass. Whatever
+/// passes, each event is still checked with [`visible`] before it's sent.
+pub fn scope(filter: &mut Filter, keys: &Keys) -> Result<(), String> {
+    if filter.ids.is_some() {
+        return Ok(());
+    }
+    let authors = filter.authors.as_ref().is_some_and(|authors| !authors.is_empty() && authors.iter().all(|author| keys.contains(author)));
+    let recipients = filter.tags.iter().find(|(letter, _)| *letter == b'p').is_some_and(|(_, values)| {
+        !values.is_empty() && values.iter().all(|value| matches!(value.split_first(), Some((1, key)) if <&[u8; 32]>::try_from(key).is_ok_and(|key| keys.contains(key))))
+    });
+    let readable = |kind: u16| match access(kind) {
+        Access::Anyone => true,
+        Access::Author => authors,
+        Access::AuthorOrRecipient => authors || recipients,
+    };
+    match &mut filter.kinds {
+        Some(kinds) if kinds.iter().all(|&kind| readable(kind)) => Ok(()),
+        Some(_) => {
+            let scoped = filter.authors.is_some() || filter.tags.iter().any(|(letter, _)| *letter == b'p');
+            Err(if scoped {
+                "auth-required: every author, or every #p, has to be authenticated to read gift wraps and app data".into()
+            } else if keys.is_empty() {
+                "auth-required: reading gift wraps and app data takes authors or #p, authenticated".into()
+            } else {
+                "restricted: reading gift wraps and app data takes authors or #p, authenticated".into()
+            })
+        }
+        None => {
+            filter.kinds = Some(KINDS.iter().copied().filter(|&kind| kind != VANISH && readable(kind)).collect());
+            Ok(())
+        }
     }
 }
 

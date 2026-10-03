@@ -154,7 +154,9 @@ async fn serves_the_stack_over_https_and_wss() {
     // The relay, over wss://.
     let stream = connect(address, trusting(&issued.ca, &[b"http/1.1"])).await;
     let (mut socket, _) = tokio_tungstenite::client_async("wss://localhost/", stream).await.unwrap();
-    socket.send(Message::Text(r#"["REQ","s",{"limit":1}]"#.into())).await.unwrap();
+    let challenge = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
+        assert!(challenge.into_text().unwrap().starts_with(r#"["AUTH","#));
+        socket.send(Message::Text(r#"["REQ","s",{"limit":1}]"#.into())).await.unwrap();
     let reply = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
     assert_eq!(reply.into_text().unwrap().as_str(), r#"["EOSE","s"]"#);
     cancel.cancel();

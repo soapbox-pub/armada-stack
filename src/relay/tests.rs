@@ -17,6 +17,8 @@ use crate::nostr::Event;
 use crate::util::now;
 use store::tests::{ALICE, BOB, tags};
 
+const CAROL: &str = "0000000000000000000000000000000000000000000000000000000000000003";
+
 struct Harness {
     _dir: tempfile::TempDir,
     url: String,
@@ -37,17 +39,31 @@ impl Harness {
         Harness { _dir: dir, url, relay: router, _cancel: cancel.drop_guard() }
     }
 
+    /// A client, past the AUTH challenge the relay greets it with.
     async fn client(&self) -> Client {
         let (socket, _) = tokio_tungstenite::connect_async(&self.url).await.unwrap();
-        Client { socket }
+        let mut client = Client { socket, url: self.url.clone(), challenge: String::new() };
+        let greeting = client.recv().await;
+        assert_eq!(greeting[0], "AUTH", "{greeting}");
+        client.challenge = greeting[1].as_str().unwrap().to_string();
+        client
     }
 }
 
 struct Client {
     socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    url: String,
+    challenge: String,
 }
 
 impl Client {
+    /// Authenticate as `secret`'s key, returning the OK.
+    async fn auth(&mut self, secret: &str) -> Value {
+        let event = Event::sign(secret, now(), 22_242, tags(&[&["relay", &self.url], &["challenge", &self.challenge]]), "");
+        self.send(json!(["AUTH", event])).await;
+        self.recv().await
+    }
+
     async fn send(&mut self, message: Value) {
         self.socket.send(Message::Text(message.to_string().into())).await.unwrap();
     }
@@ -248,7 +264,145 @@ async fn refuses_what_it_should() {
     client.send(json!({"not": "an array"})).await;
     assert_eq!(client.recv().await[0], "NOTICE");
     client.send(json!(["AUTH", "x"])).await;
-    assert_eq!(client.recv().await, json!(["NOTICE", "unsupported: AUTH messages"]));
+    assert_eq!(client.recv().await, json!(["NOTICE", "invalid: AUTH takes an event"]));
+    client.send(json!(["COUNT", "x", {}])).await;
+    assert_eq!(client.recv().await, json!(["NOTICE", "unsupported: COUNT messages"]));
+}
+
+#[tokio::test]
+async fn authenticates_as_many_keys_as_it_may() {
+    let harness = Harness::new(RelayConfig { max_authed_keys: 2, ..RelayConfig::default() }).await;
+    let mut client = harness.client().await;
+    // Each connection is challenged afresh.
+    assert_ne!(harness.client().await.challenge, client.challenge);
+
+    assert_eq!(client.auth(ALICE).await[2], true);
+    assert_eq!(client.auth(BOB).await[2], true);
+    assert_eq!(client.auth(ALICE).await[2], true, "again is fine");
+    let reply = client.auth(CAROL).await;
+    assert_eq!(reply[2], false);
+    assert!(reply[3].as_str().unwrap().starts_with("restricted:"));
+
+    let auth = |kind, relay: &str, challenge: &str, at| Event::sign(CAROL, at, kind, tags(&[&["relay", relay], &["challenge", challenge]]), "");
+    let challenge = client.challenge.clone();
+    let url = client.url.clone();
+    for (event, error) in [
+        (auth(22_242, &url, "nope", now()), "invalid: that's not this connection's challenge"),
+        (auth(22_242, "wss://elsewhere.example.com", &challenge, now()), "invalid: that's not this relay"),
+        (auth(1, &url, &challenge, now()), "invalid: AUTH takes a kind 22242 event"),
+        (auth(22_242, &url, &challenge, now() - 3600), "invalid: created_at is too far from now"),
+    ] {
+        client.send(json!(["AUTH", event])).await;
+        assert_eq!(client.recv().await, json!(["OK", event.id, false, error]));
+    }
+    let mut forged = auth(22_242, &url, &challenge, now());
+    forged.pubkey = crate::nostr::event::public_key(ALICE);
+    client.send(json!(["AUTH", forged])).await;
+    assert_eq!(client.recv().await[3], "invalid: bad id or signature");
+}
+
+/// A gift wrap from `secret` to `recipient`'s key, backdated `ago` seconds
+/// as NIP-59 says, which tells apart ones made in the same second.
+fn wrap(secret: &str, kind: u16, recipient: &str, ago: i64) -> Event {
+    let recipient = crate::nostr::event::public_key(recipient);
+    Event::sign(secret, now() - ago, kind.into(), tags(&[&["p", &recipient]]), &nip44::payload(200))
+}
+
+#[tokio::test]
+async fn shows_gift_wraps_only_to_their_author_and_recipient() {
+    let harness = Harness::new(RelayConfig::default()).await;
+    let (alice, bob) = (crate::nostr::event::public_key(ALICE), crate::nostr::event::public_key(BOB));
+    let mut sender = harness.client().await;
+    let mut recipient = harness.client().await;
+    let mut stranger = harness.client().await;
+
+    // Anyone may publish one.
+    let first = wrap(BOB, policy::GIFT_WRAP, ALICE, 100);
+    assert_eq!(sender.publish(&first).await, json!(["OK", first.id, true, ""]));
+
+    // Nobody may ask for anyone's.
+    stranger.send(json!(["REQ", "s", {"kinds": [1059]}])).await;
+    let closed = stranger.recv().await;
+    assert_eq!((&closed[0], &closed[1]), (&json!("CLOSED"), &json!("s")));
+    assert!(closed[2].as_str().unwrap().starts_with("auth-required:"), "{closed}");
+    stranger.send(json!(["REQ", "s", {"kinds": [1059], "#p": [alice]}])).await;
+    assert!(stranger.recv().await[2].as_str().unwrap().starts_with("auth-required:"));
+    // Authenticated as someone else, neither.
+    stranger.auth(CAROL).await;
+    stranger.send(json!(["REQ", "s", {"kinds": [1059], "authors": [bob]}])).await;
+    assert!(stranger.recv().await[2].as_str().unwrap().starts_with("auth-required:"));
+    stranger.send(json!(["REQ", "s", {"kinds": [1059]}])).await;
+    assert!(stranger.recv().await[2].as_str().unwrap().starts_with("restricted:"));
+    // Filters without kinds, and lookups by id, just don't find it.
+    assert!(stranger.query("all", &[json!({})]).await.is_empty());
+    assert!(stranger.query("id", &[json!({"ids": [first.id]})]).await.is_empty());
+
+    // Its recipient, by #p, and its author, by authors.
+    recipient.auth(ALICE).await;
+    assert_eq!(recipient.query("inbox", &[json!({"kinds": [1059], "#p": [alice]})]).await, std::slice::from_ref(&first));
+    assert_eq!(recipient.query("id", &[json!({"ids": [first.id]})]).await, std::slice::from_ref(&first));
+    sender.auth(BOB).await;
+    assert_eq!(sender.query("outbox", &[json!({"kinds": [1059], "authors": [bob]})]).await, std::slice::from_ref(&first));
+
+    // Live, likewise.
+    recipient.send(json!(["CLOSE", "id"])).await;
+    let second = wrap(BOB, policy::GIFT_WRAP, ALICE, 50);
+    sender.publish(&second).await;
+    assert_eq!(sender.recv().await[2]["id"], second.id);
+    assert_eq!(recipient.recv().await[2]["id"], second.id);
+    stranger.quiet().await;
+
+    // Ephemeral wraps are kept a while, for clients catching up.
+    let typing = wrap(BOB, policy::EPHEMERAL_GIFT_WRAP, ALICE, 0);
+    assert_eq!(sender.publish(&typing).await[2], true);
+    assert_eq!(recipient.query("typing", &[json!({"kinds": [21059], "#p": [alice]})]).await, [typing]);
+}
+
+#[tokio::test]
+async fn shows_app_data_only_to_its_author() {
+    let harness = Harness::new(RelayConfig::default()).await;
+    let alice = crate::nostr::event::public_key(ALICE);
+    let mut client = harness.client().await;
+    let settings = Event::sign(ALICE, now(), policy::APP_DATA.into(), tags(&[&["d", "armada/metadata"]]), &nip44::payload(100));
+    assert_eq!(client.publish(&settings).await[2], true);
+
+    client.auth(BOB).await;
+    client.send(json!(["REQ", "s", {"kinds": [30078], "authors": [alice]}])).await;
+    assert!(client.recv().await[2].as_str().unwrap().starts_with("auth-required:"));
+    // A recipient is no one to app data.
+    let bob = crate::nostr::event::public_key(BOB);
+    client.send(json!(["REQ", "s", {"kinds": [30078], "#p": [bob]}])).await;
+    assert!(client.recv().await[2].as_str().unwrap().starts_with("auth-required:"));
+
+    client.auth(ALICE).await;
+    assert_eq!(client.query("s", &[json!({"kinds": [30078], "authors": [alice]})]).await, [settings]);
+}
+
+#[tokio::test]
+async fn takes_protected_events_only_from_their_author() {
+    let harness = Harness::new(RelayConfig::default()).await;
+    let mut client = harness.client().await;
+    let status = Event::sign(ALICE, now(), STATUS.into(), tags(&[&["d", ""], &["-"]]), "mine");
+    assert_eq!(client.publish(&status).await[3], "auth-required: only its author may publish this event");
+    client.auth(BOB).await;
+    assert_eq!(client.publish(&status).await[2], false);
+    client.auth(ALICE).await;
+    assert_eq!(client.publish(&status).await, json!(["OK", status.id, true, ""]));
+}
+
+#[tokio::test]
+async fn vanishes_on_request() {
+    let harness = Harness::new(RelayConfig::default()).await;
+    let mut client = harness.client().await;
+    let status = note(ALICE, "here");
+    client.publish(&status).await;
+    let elsewhere = Event::sign(ALICE, now(), 62, tags(&[&["relay", "wss://elsewhere.example.com"]]), "");
+    assert_eq!(client.publish(&elsewhere).await[2], false);
+    let url = client.url.clone();
+    let request = Event::sign(ALICE, now(), 62, tags(&[&["relay", &url]]), "");
+    assert_eq!(client.publish(&request).await, json!(["OK", request.id, true, ""]));
+    assert!(client.query("s", &[json!({})]).await.is_empty());
+    assert_eq!(client.publish(&status).await[3], "blocked: this event has been deleted");
 }
 
 #[tokio::test]
@@ -260,6 +414,7 @@ async fn describes_itself() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let info: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(info["software"], "armada-stack");
-    assert_eq!(info["supported_nips"], json!([1, 9, 11, 40]));
+    assert_eq!(info["supported_nips"], json!([1, 9, 11, 40, 42, 62, 70]));
+    assert_eq!(info["limitation"]["restricted_writes"], true);
     assert_eq!(info["limitation"]["max_limit"], 500);
 }

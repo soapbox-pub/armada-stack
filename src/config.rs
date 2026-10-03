@@ -117,6 +117,9 @@ pub struct RelayConfig {
     /// Events one connection may publish a minute, in bursts of as many.
     /// 0 for no limit.
     pub events_per_minute: u32,
+    /// Pubkeys one connection may authenticate as. Armada authenticates as
+    /// each Concord stream key it reads, as well as its user.
+    pub max_authed_keys: usize,
     /// The most the database may grow to, in bytes. Address space reserved,
     /// not disk used, so generous is free.
     pub map_size: u64,
@@ -222,6 +225,7 @@ impl Default for RelayConfig {
             max_content_length: 64 << 10,
             created_at_upper_limit: 900,
             events_per_minute: 600,
+            max_authed_keys: 2000,
             map_size: 256 << 30,
         }
     }
@@ -373,8 +377,8 @@ impl Config {
         if relay.max_message_length < 1024 {
             bail!("relay.max_message_length has to be at least 1024 bytes.");
         }
-        if relay.max_subscriptions == 0 || relay.max_filters == 0 || relay.max_limit == 0 {
-            bail!("relay.max_subscriptions, relay.max_filters, and relay.max_limit have to be at least 1.");
+        if relay.max_subscriptions == 0 || relay.max_filters == 0 || relay.max_limit == 0 || relay.max_authed_keys == 0 {
+            bail!("relay.max_subscriptions, relay.max_filters, relay.max_limit, and relay.max_authed_keys have to be at least 1.");
         }
         if relay.map_size < 1 << 24 || usize::try_from(relay.map_size).is_err() {
             bail!("relay.map_size has to be at least 16 MiB, and fit in this machine's address space.");

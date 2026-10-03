@@ -14,6 +14,7 @@ use std::collections::{BinaryHeap, HashSet};
 
 use super::filter::Filter;
 use super::lmdb::{Cursor, Db, Result, Txn};
+use super::policy::{self, Keys};
 use super::record::EventView;
 use super::store::{CREATED, MAX_SEQ, Stamp, Store, stamp, stamp_created_at, stamp_seq};
 
@@ -36,8 +37,9 @@ pub struct Results {
     pub events: Vec<String>,
 }
 
-/// Run a REQ's filters. Each one's limit is capped at `max_limit`.
-pub fn run(store: &Store, filters: &[Filter], max_limit: u64, now: i64) -> Result<Results> {
+/// Run a REQ's filters for a connection authenticated as `keys`. Each
+/// one's limit is capped at `max_limit`.
+pub fn run(store: &Store, filters: &[Filter], keys: &Keys, max_limit: u64, now: i64) -> Result<Results> {
     let txn = store.read()?;
     let next_seq = store.next_seq(&txn)?;
     let mut seen = HashSet::new();
@@ -47,7 +49,7 @@ pub fn run(store: &Store, filters: &[Filter], max_limit: u64, now: i64) -> Resul
         if filter.never || limit == 0 {
             continue;
         }
-        for (seq, view) in run_filter(store, &txn, filter, limit, now)? {
+        for (seq, view) in run_filter(store, &txn, filter, keys, limit, now)? {
             if seen.insert(seq) {
                 events.push(view.to_json());
             }
@@ -56,19 +58,19 @@ pub fn run(store: &Store, filters: &[Filter], max_limit: u64, now: i64) -> Resul
     Ok(Results { next_seq, events })
 }
 
-fn run_filter<'t>(store: &Store, txn: &'t Txn, filter: &Filter, limit: usize, now: i64) -> Result<Vec<(u64, EventView<'t>)>> {
+fn run_filter<'t>(store: &Store, txn: &'t Txn, filter: &Filter, keys: &Keys, limit: usize, now: i64) -> Result<Vec<(u64, EventView<'t>)>> {
     let mut found = Vec::new();
 
     if let Some(ids) = &filter.ids {
         for id in ids {
             let Some(seq) = store.seq_of(txn, id)? else { continue };
-            if let Some(view) = store.load(txn, seq)?.filter(|view| filter.matches(view) && !view.is_expired(now)) {
+            if let Some(view) = store.load(txn, seq)?.filter(|view| filter.matches(view) && !view.is_expired(now) && policy::visible(view, keys)) {
                 found.push((seq, view));
             }
         }
     } else {
         let plan = plan(store, txn, filter)?;
-        scan(store, txn, filter, &plan, limit, now, &mut found)?;
+        scan(store, txn, filter, &plan, keys, limit, now, &mut found)?;
     }
 
     // Newest first; on a tie, the lowest id first (NIP-01).
@@ -166,7 +168,8 @@ fn stamp_of(entry: Option<(&[u8], &[u8])>) -> Option<Stamp> {
     entry?.1.try_into().ok()
 }
 
-fn scan<'t>(store: &Store, txn: &'t Txn, filter: &Filter, plan: &Plan, limit: usize, now: i64, found: &mut Vec<(u64, EventView<'t>)>) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+fn scan<'t>(store: &Store, txn: &'t Txn, filter: &Filter, plan: &Plan, keys: &Keys, limit: usize, now: i64, found: &mut Vec<(u64, EventView<'t>)>) -> Result<()> {
     let mut sources = Vec::new();
     let mut heap = BinaryHeap::new();
     for key in &plan.keys {
@@ -203,7 +206,7 @@ fn scan<'t>(store: &Store, txn: &'t Txn, filter: &Filter, plan: &Plan, limit: us
 
         let seq = stamp_seq(&stamp);
         let Some(view) = store.load(txn, seq)? else { continue };
-        if (plan.exact || filter.matches(&view)) && !view.is_expired(now) {
+        if (plan.exact || filter.matches(&view)) && !view.is_expired(now) && policy::visible(&view, keys) {
             found.push((seq, view));
         }
     }
@@ -223,7 +226,7 @@ mod tests {
 
     fn ids(store: &Store, filters: &[Value], max_limit: u64) -> Vec<String> {
         let filters: Vec<Filter> = filters.iter().map(|f| Filter::parse(f).unwrap()).collect();
-        let results = run(store, &filters, max_limit, 1_000_000).unwrap();
+        let results = run(store, &filters, &Keys::new(), max_limit, 1_000_000).unwrap();
         results.events.iter().map(|json| serde_json::from_str::<Event>(json).unwrap().id).collect()
     }
 
