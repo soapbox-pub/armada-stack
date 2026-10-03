@@ -240,7 +240,7 @@ impl Default for RelayConfig {
         RelayConfig {
             max_message_length: 2 << 20,
             max_subscriptions: 32,
-            max_filters: 16,
+            max_filters: 100,
             max_limit: 500,
             max_event_tags: 2000,
             max_content_length: 1 << 20,
