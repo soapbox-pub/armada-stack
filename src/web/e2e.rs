@@ -202,8 +202,9 @@ async fn a_published_site_is_downloaded_and_served() {
         let (status, _, body) = web.get(path, &[]).await;
         assert_eq!((status, body), (StatusCode::OK, served.as_bytes().to_vec()), "{path}");
     }
+    // But not a chunk: that's a 404, still under the site's policy.
     let (status, headers, _) = web.get("/assets/gone.js", &[]).await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(headers["content-security-policy"], "default-src 'self'; img-src https:, frame-ancestors 'none'");
 
     let (status, ..) = web.request("POST", "/", &[]).await;
@@ -241,7 +242,7 @@ async fn new_versions_go_live_over_the_kept_ones_and_survive_a_restart() {
     web.updates.send(third.clone()).await.unwrap();
     eventually("the third version going live", async || web.get("/", &[]).await.2 == b"third").await;
     assert!(web.db.get(&first.id).unwrap().is_none());
-    assert_ne!(web.get("/assets/first.js", &[]).await.2, b"1");
+    assert_eq!(web.get("/assets/first.js", &[]).await.0, StatusCode::NOT_FOUND);
     assert_eq!(web.get("/assets/second.js", &[]).await.2, b"2");
 
     // An older version turning up late changes nothing.

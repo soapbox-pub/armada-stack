@@ -39,6 +39,9 @@ pub struct Site {
     pub csp: HeaderValue,
 }
 
+/// Where a Vite build puts its chunks, each named by its content.
+pub const ASSETS: &str = "/assets/";
+
 /// What a request path resolved to.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Resolved<'a> {
@@ -87,11 +90,17 @@ impl Site {
     /// and gets the site's shell: `/404.html` first, since NIP-5A names it as
     /// the fallback path, then `/index.html`. Every other service's paths
     /// were routed away before this, and the manifest says which files the
-    /// site has, so nothing is left to tell apart. A missing chunk getting
-    /// HTML is fine: browsers refuse HTML as a module, or as anything at all
-    /// under `nosniff`, so the import fails just the same.
+    /// site has, so nothing is left to tell apart.
+    ///
+    /// Except under [`ASSETS`], where the build puts its chunks and nothing
+    /// is a route. A chunk no kept version has is a 404, as Armada's own
+    /// hosting answered, which its chunk-error recovery takes as the cue to
+    /// reload onto the version being served.
     pub fn resolve(&self, request_path: &str) -> Option<(Resolved<'_>, &File)> {
         let normalized = normalize_site_path(request_path);
+        if normalized.starts_with(ASSETS) {
+            return self.files.get_key_value(&normalized).map(|(path, file)| (Resolved { path, shell: false }, file));
+        }
         let mut candidates: Vec<(String, bool)> = vec![(normalized.clone(), false)];
         if normalized != "/" {
             candidates.push((format!("{normalized}.html"), false));
@@ -184,8 +193,12 @@ mod tests {
         assert_eq!(resolve(&app, "/settings.html"), shell());
         // However much a route looks like a file.
         assert_eq!(resolve(&app, "/s/relay.ditto.pub"), shell());
-        assert_eq!(resolve(&app, "/assets/gone.js"), shell());
         assert_eq!(resolve(&app, "/assets/app.js"), Some(("/assets/app.js".into(), false)));
+        // Except for chunks, which are files or nothing.
+        assert_eq!(resolve(&app, "/assets/gone.js"), None);
+        assert_eq!(resolve(&app, "/assets/"), None);
+        assert_eq!(resolve(&app, "/assets/../settings"), shell());
+        assert_eq!(resolve(&app, "/assetsx/gone.js"), shell());
         assert_eq!(resolve(&site(&["/about.html"]), "/missing"), None);
     }
 }
