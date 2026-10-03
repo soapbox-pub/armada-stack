@@ -31,9 +31,8 @@ pub type ConnId = u64;
 /// What the rest of the relay sends a connection.
 #[derive(Debug)]
 pub enum Outbound {
-    /// A new event for one of its subscriptions. `seq` is `None` for
-    /// ephemeral events, which are never stored.
-    Event { sub: Arc<str>, seq: Option<u64>, json: Arc<str> },
+    /// A new event for one of its subscriptions.
+    Event { sub: Arc<str>, seq: u64, json: Arc<str> },
     /// A message ready to send as is.
     Text(String),
 }
@@ -66,17 +65,16 @@ impl Link {
 /// writing rather than queueing without end.
 const SHARD_QUEUE: usize = 256;
 
-/// A committed (or ephemeral) event on its way to live subscriptions.
+/// A committed event on its way to live subscriptions.
 pub struct Live {
     pub record: Vec<u8>,
-    /// `None` for ephemeral events, which are never stored.
-    pub seq: Option<u64>,
+    pub seq: u64,
     /// Its JSON, written by whichever shard needs it first.
     json: OnceLock<Arc<str>>,
 }
 
 impl Live {
-    pub fn new(record: Vec<u8>, seq: Option<u64>) -> Live {
+    pub fn new(record: Vec<u8>, seq: u64) -> Live {
         Live { record, seq, json: OnceLock::new() }
     }
 }
@@ -297,7 +295,7 @@ impl Monitors {
 
     /// Send a new event to every subscription it matches, writing its JSON
     /// into `json` if no one has yet. Returns how many.
-    fn broadcast(&self, event: &EventView, seq: Option<u64>, json: &OnceLock<Arc<str>>) -> usize {
+    fn broadcast(&self, event: &EventView, seq: u64, json: &OnceLock<Arc<str>>) -> usize {
         let mut candidates: Vec<u64> = Vec::new();
         for bucket in [Bucket::Id(*event.id()), Bucket::Author(*event.pubkey()), Bucket::Kind(event.kind()), Bucket::Other] {
             if let Some(set) = self.buckets.get(&bucket) {
@@ -354,7 +352,7 @@ mod tests {
 
     fn deliver(monitors: &Monitors, event: &Event) -> usize {
         let record = encode(event);
-        monitors.broadcast(&EventView::new(&record).unwrap(), Some(1), &OnceLock::new())
+        monitors.broadcast(&EventView::new(&record).unwrap(), 1, &OnceLock::new())
     }
 
     fn received(rx: &mut mpsc::Receiver<Outbound>) -> Vec<String> {
@@ -409,14 +407,14 @@ mod tests {
         hub.unsubscribe(3, "s").await;
 
         let note = Event::sign(ALICE, 100, 1, vec![], "");
-        let events = vec![Live::new(encode(&note), Some(1)), Live::new(encode(&Event::sign(BOB, 100, 7, vec![], "")), Some(2))];
+        let events = vec![Live::new(encode(&note), 1), Live::new(encode(&Event::sign(BOB, 100, 7, vec![], "")), 2)];
         let broadcaster = hub.clone();
         tokio::task::spawn_blocking(move || broadcaster.broadcast(events)).await.unwrap();
 
         for rx in &mut receivers[..2] {
             match rx.recv().await.unwrap() {
                 Outbound::Event { sub, seq, json } => {
-                    assert_eq!((&*sub, seq), ("s", Some(1)));
+                    assert_eq!((&*sub, seq), ("s", 1));
                     assert_eq!(serde_json::from_str::<Event>(&json).unwrap(), note);
                 }
                 other => panic!("unexpected {other:?}"),

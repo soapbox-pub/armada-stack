@@ -1,5 +1,5 @@
-//! The relay's LMDB: events, their indexes, and what NIP-01, NIP-09, and
-//! NIP-40 say about which events to keep.
+//! The relay's LMDB: events, their indexes, and what NIP-01, NIP-09,
+//! NIP-40, and NIP-62 say about which events to keep.
 //!
 //! Each stored event gets a sequence number, never reused, under which its
 //! [record](super::record) is kept. The indexes point at events by a 10-byte
@@ -21,6 +21,7 @@
 //! | `replaceable`   | address                      | seq (u64 BE)           |
 //! | `deleted`       | id ‖ pubkey                  | —                      |
 //! | `deleted_addrs` | address                      | created_at (u32 BE)    |
+//! | `vanished`      | pubkey                       | created_at (u32 BE)    |
 //! | `expirations`   | expiration (u32 BE) ‖ seq    | —                      |
 //! | `meta`          | name                         | value                  |
 //!
@@ -32,6 +33,10 @@
 //! Tag values are indexed in [`record::tag_value`] form; an *address* is
 //! pubkey ‖ kind ‖ the `d` tag in that form (always empty for replaceable
 //! kinds).
+//!
+//! Gift wraps belong to their `p` recipient, not their author (see
+//! [`policy::is_gift_wrap`]): only the recipient may delete one, by NIP-09
+//! or by vanishing.
 
 use std::path::Path;
 
@@ -39,7 +44,8 @@ use anyhow::{Context, bail};
 use sha2::{Digest, Sha256};
 
 use super::lmdb::{Db, DbFlags, Env, Result, RoTxn, RwTxn, Txn};
-use super::record::{self, DELETION, Element, EventView, GIFT_WRAP};
+use super::policy::{self, DELETION, NIP46, VANISH};
+use super::record::{self, Element, EventView};
 
 /// Bumped when the layout changes incompatibly.
 const VERSION: u32 = 2;
@@ -93,8 +99,10 @@ pub enum Outcome {
     Duplicate,
     /// A newer version of it is already here.
     Replaced,
-    /// Its author asked for it to be deleted.
+    /// Its owner asked for it to be deleted.
     Deleted,
+    /// A request to vanish, carried out. Never stored.
+    Vanished,
 }
 
 #[derive(Clone, Copy)]
@@ -109,6 +117,7 @@ pub struct Tables {
     pub replaceable: Db,
     pub deleted: Db,
     pub deleted_addrs: Db,
+    pub vanished: Db,
     pub expirations: Db,
     pub meta: Db,
 }
@@ -132,6 +141,7 @@ impl Store {
             replaceable: env.create_db("replaceable", DbFlags::PLAIN)?,
             deleted: env.create_db("deleted", DbFlags::PLAIN)?,
             deleted_addrs: env.create_db("deleted_addrs", DbFlags::PLAIN)?,
+            vanished: env.create_db("vanished", DbFlags::PLAIN)?,
             expirations: env.create_db("expirations", DbFlags::PLAIN)?,
             meta: env.create_db("meta", DbFlags::PLAIN)?,
         };
@@ -194,17 +204,21 @@ impl Store {
         txn.len(self.tables.events)
     }
 
-    /// Offer an encoded event to the store, applying replacement and
-    /// deletion. The caller has checked it's valid and not ephemeral.
+    /// Offer an encoded event to the store, applying replacement, deletion,
+    /// and requests to vanish. The caller has checked it's valid.
     pub fn insert(&self, txn: &mut RwTxn, record: &[u8]) -> Result<Outcome> {
         let view = EventView::new(record).expect("an encoded record");
         let t = self.tables;
         let (id, kind, created_at) = (view.id(), view.kind(), view.created_at());
 
+        if kind == VANISH {
+            self.vanish(txn, &view)?;
+            return Ok(Outcome::Vanished);
+        }
         if self.contains(txn, id)? {
             return Ok(Outcome::Duplicate);
         }
-        if self.tombstoned(txn, &view)? {
+        if self.tombstoned(txn, &view)? || self.owners_vanished(txn, &view)? {
             return Ok(Outcome::Deleted);
         }
 
@@ -256,31 +270,72 @@ impl Store {
         Ok(Outcome::Stored(seq))
     }
 
-    /// Whether the event's author (or for a gift wrap, its recipient) has
-    /// already asked for it to be deleted.
+    /// Whether the event's owner has already asked for it to be deleted.
     fn tombstoned(&self, txn: &Txn, view: &EventView) -> Result<bool> {
+        let Some(owner) = owner(view) else { return Ok(false) };
         let mut key = [0u8; 64];
         key[..32].copy_from_slice(view.id());
-        key[32..].copy_from_slice(view.pubkey());
-        if txn.get(self.tables.deleted, &key)?.is_some() {
-            return Ok(true);
+        key[32..].copy_from_slice(owner);
+        Ok(txn.get(self.tables.deleted, &key)?.is_some())
+    }
+
+    /// Whether someone the event belongs to vanished after it was made: its
+    /// owner, or the other party to a NIP-46 message.
+    fn owners_vanished(&self, txn: &Txn, view: &EventView) -> Result<bool> {
+        let mut parties: Vec<&[u8; 32]> = owner(view).into_iter().collect();
+        if view.kind() == NIP46 {
+            parties.extend(recipient(view));
         }
-        if view.kind() == GIFT_WRAP {
-            for (letter, value) in view.indexed_tags() {
-                if let (b'p', Element::Hex(recipient)) = (letter, value) {
-                    key[32..].copy_from_slice(recipient);
-                    if txn.get(self.tables.deleted, &key)?.is_some() {
-                        return Ok(true);
-                    }
-                }
+        for party in parties {
+            if let Some(at) = txn.get(self.tables.vanished, party)?
+                && view.created_at() <= u32::from_be_bytes(at.try_into().unwrap_or_default())
+            {
+                return Ok(true);
             }
         }
         Ok(false)
     }
 
-    /// The stored events a deletion request may delete (NIP-09): its
-    /// author's own, by id or by address up to the request's time, and gift
-    /// wraps addressed to them. Never other deletion requests.
+    /// Carry out a request to vanish (NIP-62): delete everything its author
+    /// made up to its time, other than gift wraps they sent, along with the
+    /// gift wraps and NIP-46 messages addressed to them, and keep any of
+    /// those from coming back.
+    fn vanish(&self, txn: &mut RwTxn, request: &EventView) -> Result<()> {
+        let t = self.tables;
+        let (author, until) = (request.pubkey(), request.created_at());
+        let mut doomed = Vec::new();
+        let mut p = vec![b'p'];
+        Element::Hex(author).encode(&mut p);
+        for (db, key) in [(t.authors, &author[..]), (t.tags, &p[..])] {
+            let mut cursor = txn.cursor(db)?;
+            let mut entry = cursor.set(key)?;
+            while let Some((_, stamp)) = entry {
+                if stamp_created_at(stamp) > until {
+                    break;
+                }
+                doomed.push(stamp_seq(stamp));
+                entry = cursor.next_dup()?;
+            }
+        }
+        doomed.sort_unstable();
+        doomed.dedup();
+        for seq in doomed {
+            let Some(view) = self.load(txn, seq)? else { continue };
+            let theirs = owner(&view) == Some(author) || (view.kind() == NIP46 && recipient(&view) == Some(author));
+            if theirs {
+                self.remove(txn, seq)?;
+            }
+        }
+        let previous = txn.get(t.vanished, author)?.map_or(0, |v| u32::from_be_bytes(v.try_into().unwrap_or_default()));
+        if until > previous {
+            txn.put(t.vanished, author, &until.to_be_bytes())?;
+        }
+        Ok(())
+    }
+
+    /// The stored events a deletion request may delete (NIP-09): those it
+    /// owns, by id or by address up to the request's time. Never other
+    /// deletion requests.
     fn collect_deletions(&self, txn: &Txn, deletion: &EventView, out: &mut Vec<u64>) -> Result<()> {
         let author = deletion.pubkey();
         for (letter, value) in deletion.indexed_tags() {
@@ -288,10 +343,7 @@ impl Store {
                 (b'e', Element::Hex(id)) => {
                     let Some(seq) = self.seq_of(txn, id)? else { continue };
                     let Some(target) = self.load(txn, seq)? else { continue };
-                    let recipient = || {
-                        target.kind() == GIFT_WRAP && target.indexed_tags().any(|(l, v)| l == b'p' && v == Element::Hex(author))
-                    };
-                    if target.kind() != DELETION && (target.pubkey() == author || recipient()) {
+                    if target.kind() != DELETION && owner(&target) == Some(author) {
                         out.push(seq);
                     }
                 }
@@ -404,6 +456,20 @@ impl Store {
         }
         Ok(expired.len())
     }
+}
+
+/// Who an event belongs to: a gift wrap's recipient, or anything else's
+/// author.
+fn owner<'a>(view: &EventView<'a>) -> Option<&'a [u8; 32]> {
+    if policy::is_gift_wrap(view.kind()) { recipient(view) } else { Some(view.pubkey()) }
+}
+
+/// An envelope's `p` recipient. Envelopes have exactly one.
+fn recipient<'a>(view: &EventView<'a>) -> Option<&'a [u8; 32]> {
+    view.indexed_tags().find_map(|tag| match tag {
+        (b'p', Element::Hex(recipient)) => Some(recipient),
+        _ => None,
+    })
 }
 
 fn expiration_key(expiration: u32, seq: u64) -> [u8; 12] {
@@ -606,14 +672,51 @@ pub mod tests {
     }
 
     #[test]
-    fn lets_recipients_delete_gift_wraps() {
+    fn lets_only_recipients_delete_gift_wraps() {
         let (_dir, store) = open();
         let alice = public_key(ALICE);
-        let wrap = Event::sign(BOB, 100, GIFT_WRAP.into(), tags(&[&["p", &alice]]), "sealed");
+        let wrap = Event::sign(BOB, 100, policy::GIFT_WRAP.into(), tags(&[&["p", &alice]]), "sealed");
         put(&store, &wrap);
+        // Its author can't, nor keep it from arriving again.
+        put(&store, &Event::sign(BOB, 200, 5, tags(&[&["e", &wrap.id]]), ""));
+        assert!(has(&store, &wrap));
         put(&store, &Event::sign(ALICE, 200, 5, tags(&[&["e", &wrap.id]]), ""));
         assert!(!has(&store, &wrap));
         assert_eq!(put(&store, &wrap), Outcome::Deleted);
+
+        // An author's deletion before it arrives doesn't count either.
+        let early = Event::sign(BOB, 100, policy::GIFT_WRAP.into(), tags(&[&["p", &alice]]), "early");
+        put(&store, &Event::sign(BOB, 200, 5, tags(&[&["e", &early.id]]), ""));
+        assert!(matches!(put(&store, &early), Outcome::Stored(_)));
+    }
+
+    #[test]
+    fn vanishes() {
+        let (_dir, store) = open();
+        let (alice, bob) = (public_key(ALICE), public_key(BOB));
+        let wrap = |secret, to: &str, at| Event::sign(secret, at, policy::GIFT_WRAP.into(), tags(&[&["p", to]]), &at.to_string());
+        let profile = Event::sign(ALICE, 100, 0, vec![], "{}");
+        let sent = wrap(ALICE, &bob, 100);
+        let received = wrap(BOB, &alice, 100);
+        let to_her_signer = Event::sign(BOB, 100, NIP46.into(), tags(&[&["p", &alice]]), "rpc");
+        let bobs = Event::sign(BOB, 100, 0, tags(&[&["p", &alice]]), "{}");
+        let later = Event::sign(ALICE, 300, 3, vec![], "");
+        for event in [&profile, &sent, &received, &to_her_signer, &bobs, &later] {
+            assert!(matches!(put(&store, event), Outcome::Stored(_)));
+        }
+
+        let request = Event::sign(ALICE, 200, VANISH.into(), tags(&[&["relay", "ALL_RELAYS"]]), "");
+        assert_eq!(put(&store, &request), Outcome::Vanished);
+        assert!(!has(&store, &request), "never stored");
+        assert!(!has(&store, &profile) && !has(&store, &received) && !has(&store, &to_her_signer));
+        // The wrap she sent is Bob's; Bob's events are his; and hers since are hers.
+        assert!(has(&store, &sent) && has(&store, &bobs) && has(&store, &later));
+
+        // Nothing from before comes back.
+        assert_eq!(put(&store, &profile), Outcome::Deleted);
+        assert_eq!(put(&store, &wrap(BOB, &alice, 150)), Outcome::Deleted);
+        assert!(matches!(put(&store, &wrap(BOB, &alice, 250)), Outcome::Stored(_)));
+        assert!(matches!(put(&store, &Event::sign(ALICE, 250, 0, vec![], "{}")), Outcome::Stored(_)));
     }
 
     #[test]

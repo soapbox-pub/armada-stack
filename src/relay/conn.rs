@@ -54,7 +54,7 @@ struct Sub {
     /// The id as JSON, ready to splice into messages.
     json: String,
     /// Live events held until the query's EOSE.
-    pending: Option<Vec<(Option<u64>, Arc<str>)>>,
+    pending: Option<Vec<(u64, Arc<str>)>>,
     /// The query's snapshot: stored events below this were sent with it.
     floor: u64,
 }
@@ -265,7 +265,7 @@ impl Session {
         self.sink.feed(Message::Text(format!("[\"EOSE\",{sub_json}]").into())).await.map_err(|_| Gone)?;
         for (seq, json) in pending {
             // Stored events the query could see were sent with it.
-            if seq.is_none_or(|seq| seq >= results.next_seq) {
+            if seq >= results.next_seq {
                 self.sink.feed(Message::Text(event_message(&sub_json, &json).into())).await.map_err(|_| Gone)?;
             }
         }
@@ -282,7 +282,7 @@ impl Session {
                         pending.push((seq, json));
                         Ok(())
                     }
-                    None if seq.is_some_and(|seq| seq < state.floor) => Ok(()),
+                    None if seq < state.floor => Ok(()),
                     None => {
                         let message = event_message(&state.json, &json);
                         self.send(message).await
@@ -310,7 +310,8 @@ fn admit(shared: &Shared, event: Event, link: Link) {
     if !event.verify() {
         return refuse(false, "invalid: bad id or signature");
     }
-    let submission = Submission { record: record::encode(&event), reply: link.clone() };
+    let record = record::encode_expiring(&event, policy::expiration(&event, now()));
+    let submission = Submission { record, reply: link.clone() };
     if shared.writer.submit(submission).is_err() {
         refuse(false, "rate-limited: the relay is busy, try again shortly");
     }

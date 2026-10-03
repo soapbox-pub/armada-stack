@@ -40,7 +40,7 @@ pub fn is_replaceable(kind: u16) -> bool {
     kind == 0 || kind == 3 || (10_000..20_000).contains(&kind)
 }
 
-/// Kinds that are relayed but never stored.
+/// Kinds that are kept only briefly (see [`policy::EPHEMERAL_LIFETIME`](super::policy::EPHEMERAL_LIFETIME)).
 pub fn is_ephemeral(kind: u16) -> bool {
     (20_000..30_000).contains(&kind)
 }
@@ -50,14 +50,17 @@ pub fn is_addressable(kind: u16) -> bool {
     (30_000..40_000).contains(&kind)
 }
 
-pub const DELETION: u16 = 5;
-pub const GIFT_WRAP: u16 = 1059;
-
 /// Encode an event. It must already be valid: ids and keys hex, numbers in
 /// range (see `validate`).
+#[cfg(test)]
 pub fn encode(event: &Event) -> Vec<u8> {
+    encode_expiring(event, expiration(event))
+}
+
+/// Encode an event to be deleted at `expiration`, which may be sooner than
+/// its own.
+pub fn encode_expiring(event: &Event, expiration: Option<u32>) -> Vec<u8> {
     let mut out = Vec::with_capacity(FIXED + 8 + event.content.len() + event.tags.len() * 40);
-    let expiration = expiration(event);
     let base64 = decode_base64(&event.content);
     out.push(if expiration.is_some() { FLAG_EXPIRATION } else { 0 } | if base64.is_some() { FLAG_BASE64 } else { 0 });
     push_hex(&mut out, &event.id);

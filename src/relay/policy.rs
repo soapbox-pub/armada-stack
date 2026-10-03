@@ -69,16 +69,23 @@ pub fn is_accepted(kind: u16) -> bool {
     KINDS.binary_search(&kind).is_ok()
 }
 
-/// Kinds that are never stored.
-pub fn is_unstored(kind: u16) -> bool {
-    kind == VANISH
-}
-
 /// Gift wraps belong to their `p` recipient rather than their author: only
 /// the recipient may delete one. Concord's stream keys are shared by every
 /// member, so an author's deletion could come from anyone in the channel.
 pub fn is_gift_wrap(kind: u16) -> bool {
     matches!(kind, GIFT_WRAP | EPHEMERAL_GIFT_WRAP)
+}
+
+/// When an event is to be deleted: its NIP-40 expiration, or for an
+/// ephemeral one, [`EPHEMERAL_LIFETIME`] from `now` if that's sooner.
+pub fn expiration(event: &Event, now: i64) -> Option<u32> {
+    let own = super::record::expiration(event);
+    let kind = u16::try_from(event.kind).unwrap_or_default();
+    if !super::record::is_ephemeral(kind) {
+        return own;
+    }
+    let lifetime = u32::try_from(now).unwrap_or(u32::MAX).saturating_add(EPHEMERAL_LIFETIME);
+    Some(own.map_or(lifetime, |own| own.min(lifetime)))
 }
 
 /// Who may read an event.
@@ -399,6 +406,22 @@ mod tests {
         assert!(wrap(GIFT_WRAP, NOW - 2 * 86400).is_ok());
         assert!(wrap(EPHEMERAL_GIFT_WRAP, NOW - 30).is_ok());
         assert_eq!(wrap(EPHEMERAL_GIFT_WRAP, NOW - 120).unwrap_err(), "invalid: ephemeral event is too old");
+    }
+
+    #[test]
+    fn keeps_ephemeral_events_briefly() {
+        let p = public_key(BOB);
+        let event = |kind: u16, expiration: Option<&str>| {
+            let mut event_tags = vec![vec!["p".to_string(), p.clone()]];
+            event_tags.extend(expiration.map(|at| vec!["expiration".to_string(), at.to_string()]));
+            Event::sign(ALICE, NOW, kind.into(), event_tags, "")
+        };
+        let lifetime = NOW as u32 + EPHEMERAL_LIFETIME;
+        assert_eq!(expiration(&event(GIFT_WRAP, None), NOW), None);
+        assert_eq!(expiration(&event(GIFT_WRAP, Some("1800000000")), NOW), Some(1_800_000_000));
+        assert_eq!(expiration(&event(EPHEMERAL_GIFT_WRAP, None), NOW), Some(lifetime));
+        assert_eq!(expiration(&event(NIP46, Some("1800000000")), NOW), Some(lifetime));
+        assert_eq!(expiration(&event(NIP46, Some("1700000010")), NOW), Some(1_700_000_010));
     }
 
     #[test]

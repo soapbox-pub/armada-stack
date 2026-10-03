@@ -7,15 +7,15 @@
 //! the batch for the [monitors](super::monitors), whose threads match it
 //! against live subscriptions while this one moves on to the next commit.
 //!
-//! Ephemeral events take the same path, minus the store, so they're relayed
-//! in the order they arrived relative to stored ones.
+//! Ephemeral events are stored too, briefly, so a client that reconnects can
+//! catch up on them.
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::time::{Duration, Instant};
 
 use super::monitors::{Hub, Link, Live, Outbound};
-use super::record::{self, EventView};
+use super::record::EventView;
 use super::store::{Outcome, Store};
 use crate::util::now;
 
@@ -98,33 +98,25 @@ fn write(store: &Store, hub: &Hub, batch: Vec<Submission>) {
     let mut live = Vec::new();
     for (submission, outcome) in batch.into_iter().zip(outcomes) {
         let id = hex::encode(EventView::new(&submission.record).expect("a record").id());
-        let (accepted, message, seq) = match outcome {
-            None => (true, "", None),
-            Some(Outcome::Stored(seq)) => (true, "", Some(seq)),
-            Some(Outcome::Duplicate) => (true, "duplicate: already have this event", None),
-            Some(Outcome::Replaced) => (false, "duplicate: already have a newer version of this event", None),
-            Some(Outcome::Deleted) => (false, "blocked: this event has been deleted", None),
+        let (accepted, message) = match outcome {
+            Outcome::Stored(_) | Outcome::Vanished => (true, ""),
+            Outcome::Duplicate => (true, "duplicate: already have this event"),
+            Outcome::Replaced => (false, "duplicate: already have a newer version of this event"),
+            Outcome::Deleted => (false, "blocked: this event has been deleted"),
         };
         submission.reply.send(Outbound::Text(ok(&id, accepted, message)));
-        if outcome.is_none() || seq.is_some() {
+        if let Outcome::Stored(seq) = outcome {
             live.push(Live::new(submission.record, seq));
         }
     }
     hub.broadcast(live);
 }
 
-/// Store a batch in one transaction. `None` for ephemeral events, which
-/// aren't stored.
-fn store_batch(store: &Store, batch: &[Submission]) -> super::lmdb::Result<Vec<Option<Outcome>>> {
+/// Store a batch in one transaction.
+fn store_batch(store: &Store, batch: &[Submission]) -> super::lmdb::Result<Vec<Outcome>> {
     let mut txn = store.write()?;
-    let mut outcomes = Vec::with_capacity(batch.len());
-    for submission in batch {
-        let kind = EventView::new(&submission.record).expect("a record").kind();
-        outcomes.push(if record::is_ephemeral(kind) { None } else { Some(store.insert(&mut txn, &submission.record)?) });
-    }
-    if outcomes.iter().any(Option::is_some) {
-        txn.commit()?;
-    }
+    let outcomes = batch.iter().map(|submission| store.insert(&mut txn, &submission.record)).collect::<Result<Vec<_>, _>>()?;
+    txn.commit()?;
     Ok(outcomes)
 }
 
@@ -154,7 +146,8 @@ mod tests {
     use super::*;
     use crate::nostr::Event;
     use crate::relay::filter::Filter;
-    use crate::relay::store::tests::{ALICE, open};
+    use crate::relay::record;
+    use crate::relay::store::tests::{ALICE, open, tags};
 
     #[tokio::test]
     async fn stores_then_answers_and_broadcasts() {
@@ -168,23 +161,26 @@ mod tests {
         hub.subscribe(1, "s".into(), vec![Filter::parse(&serde_json::json!({})).unwrap()]).await.await.unwrap();
 
         let note = Event::sign(ALICE, 100, 1, vec![], "hi");
-        let ephemeral = Event::sign(ALICE, 100, 20_001, vec![], "typing");
-        for event in [&note, &note, &ephemeral] {
+        let vanish = Event::sign(ALICE, 50, 62, tags(&[&["relay", "ALL_RELAYS"]]), "");
+        let ephemeral = Event::sign(ALICE, 100, 21_059, vec![], "typing");
+        for event in [&note, &note, &vanish, &ephemeral] {
             assert!(writer.submit(Submission { record: record::encode(event), reply: link.clone() }).is_ok());
         }
 
         let mut messages = Vec::new();
-        while messages.len() < 5 {
+        while messages.len() < 6 {
             messages.push(rx.recv().await.unwrap());
         }
         let oks: Vec<_> = messages.iter().filter_map(|m| if let Outbound::Text(t) = m { Some(t.as_str()) } else { None }).collect();
         assert_eq!(oks[0], ok(&note.id, true, ""));
         assert_eq!(oks[1], ok(&note.id, true, "duplicate: already have this event"));
-        assert_eq!(oks[2], ok(&ephemeral.id, true, ""));
+        assert_eq!(oks[2], ok(&vanish.id, true, ""));
+        assert_eq!(oks[3], ok(&ephemeral.id, true, ""));
+        // Requests to vanish are carried out, but neither kept nor relayed.
         let seqs: Vec<_> = messages.iter().filter_map(|m| if let Outbound::Event { seq, .. } = m { Some(*seq) } else { None }).collect();
-        assert_eq!(seqs, [Some(1), None]);
+        assert_eq!(seqs, [1, 2]);
 
         let txn = store.read().unwrap();
-        assert_eq!(store.len(&txn).unwrap(), 1);
+        assert_eq!(store.len(&txn).unwrap(), 2);
     }
 }
