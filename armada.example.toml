@@ -54,6 +54,10 @@ map_size = 274877906944
 # A Blossom server for encrypted blobs only.
 [blossom]
 max_blob_size = 104857600
+# Per IPv4 address or IPv6 /64. 0 for no limit.
+uploads_per_minute = 60
+# At least max_blob_size.
+upload_bytes_per_hour = 1073741824
 
 # A blind Concord AV broker (CORD-07 §2) for LiveKit servers you run. Off
 # until a node is listed; needs public_url. See deploy/livekit.yaml.

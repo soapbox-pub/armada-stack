@@ -77,7 +77,7 @@ async fn main() -> Result<()> {
     let cancel = CancellationToken::new();
     let nostr = Arc::new(NostrService::new(config.web.relay_urls()));
     let web = web::Web::open(&config.web, &storage, nostr).await?;
-    let blossom = blossom::Blossom::open(&config.blossom, config.public_url()?, &storage, &cancel)?;
+    let blossom = blossom::Blossom::open(&config.blossom, config.public_url()?, config.trusts_proxy(), &storage, &cancel)?;
     let relay = relay::Relay::open(&config.relay, config.public_url()?, config.trusts_proxy(), &storage, &cancel)?;
     let av = av::Av::open(&config, &cancel)?;
     if av.is_some() {

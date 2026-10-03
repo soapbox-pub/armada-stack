@@ -99,14 +99,16 @@ mod tests {
             naddr: http::HeaderValue::from_static("naddr"),
         });
         let relay = Relay::open(&config.relay, None, false, &storage, &cancel).unwrap();
-        let blossom = Blossom::open(&config.blossom, None, &storage, &cancel).unwrap();
+        let blossom = Blossom::open(&config.blossom, None, false, &storage, &cancel).unwrap();
         let router = router(Services { web, relay, blossom, av: None });
         Harness { _dir: dir, router, _cancel: cancel.drop_guard() }
     }
 
     impl Harness {
         async fn send(&self, method: Method, path: &str, headers: &[(&str, &str)]) -> (StatusCode, http::HeaderMap, String) {
-            let mut builder = Request::builder().method(method).uri(path);
+            // As a real server would, the peer's address.
+            let peer = axum::extract::ConnectInfo(std::net::SocketAddr::from(([203, 0, 113, 1], 4000)));
+            let mut builder = Request::builder().method(method).uri(path).extension(peer);
             for (name, value) in headers {
                 builder = builder.header(*name, *value);
             }

@@ -11,7 +11,11 @@
 //! - The server keeps a blob's size, the day it arrived, and who uploaded it
 //!   (which deleting needs) — never its declared type, the name a token
 //!   mentions, or anything about the request. There is no `/list`.
-//! - Nothing is logged per request.
+//! - Nothing is logged per request. Each client's address is held in
+//!   memory while it's rate limited, and no longer.
+//!
+//! Uploads and mirrors are limited per client address, in number and in
+//! bytes: tokens are free to sign, so they bound nothing alone.
 //!
 //! Its blobs live in a store of their own, apart from the site's.
 
@@ -20,6 +24,7 @@ mod db;
 pub mod sniff;
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use axum::body::Body;
@@ -33,6 +38,7 @@ use tokio_util::sync::CancellationToken;
 use crate::blobs::{BlobStore, DownloadError, DownloadReason, Staged};
 use crate::config::BlossomConfig;
 use crate::hash::BlobHash;
+use crate::ratelimit::{self, RateLimiter};
 use crate::storage::Storage;
 use crate::util::now;
 use crate::web::serve::{Range, matches_etag, parse_range};
@@ -57,6 +63,9 @@ const PREFLIGHT_MAX_AGE: &str = "86400";
 /// The most a `/mirror` request body may be. It's one URL.
 const MAX_MIRROR_REQUEST: usize = 16 * 1024;
 
+/// The most clients counted at once, by each limit.
+const MAX_RATE_LIMITED: usize = 100_000;
+
 type Reply = Response<Body>;
 
 #[derive(Clone)]
@@ -69,6 +78,12 @@ struct Server {
     blobs: BlobStore,
     public_url: Option<url::Url>,
     max_blob_size: u64,
+    /// Whether to believe `X-Forwarded-For`; see [`crate::config::Config::trust_proxy`].
+    trust_proxy: bool,
+    /// Uploads and mirrors each client may start a minute, and bytes it may
+    /// send an hour. `None` for no limit.
+    uploads: Option<Mutex<RateLimiter>>,
+    bytes: Option<Mutex<RateLimiter>>,
     /// Held while a blob goes into the store and the index, and while one
     /// comes out of both, so a delete racing an upload of the same blob
     /// can't leave a record without its bytes.
@@ -81,7 +96,7 @@ impl Blossom {
     /// Open the server's index and store. `public_url` is the origin clients
     /// reach it at, if configured; mirrors in progress are abandoned once
     /// `cancel` fires.
-    pub fn open(config: &BlossomConfig, public_url: Option<url::Url>, storage: &Storage, cancel: &CancellationToken) -> Result<Blossom> {
+    pub fn open(config: &BlossomConfig, public_url: Option<url::Url>, trust_proxy: bool, storage: &Storage, cancel: &CancellationToken) -> Result<Blossom> {
         let db = BlossomDb::open(storage)?;
         let blobs = storage.blob_store("blossom/blobs");
         blobs.clear_temp();
@@ -91,6 +106,9 @@ impl Blossom {
                 blobs,
                 public_url,
                 max_blob_size: config.max_blob_size,
+                trust_proxy,
+                uploads: limiter(config.uploads_per_minute.into(), Duration::from_secs(60)),
+                bytes: limiter(config.upload_bytes_per_hour, Duration::from_secs(60 * 60)),
                 commit: Arc::new(Mutex::new(())),
                 cancel: cancel.child_token(),
             }),
@@ -259,6 +277,14 @@ impl Server {
     /// `PUT /upload` (BUD-02).
     async fn upload(&self, request: Request) -> Reply {
         let (parts, body) = request.into_parts();
+        let Some(client) = self.client(&parts) else {
+            // Without one there's nothing to limit by, and a shared count
+            // would let any such client exhaust it for the rest.
+            return error(StatusCode::BAD_REQUEST, "Cannot determine the client's address.");
+        };
+        if let Some(refusal) = self.admit(&client) {
+            return refusal;
+        }
         let origin = self.origin(&parts.headers);
         let token = match authorize(&parts.headers, "upload", origin.host.as_deref(), now()) {
             Ok(token) => token,
@@ -277,10 +303,13 @@ impl Server {
         {
             return unauthorized("Authorization has no x tag for this blob.");
         }
-        if let Some(length) = header_str(&parts.headers, header::CONTENT_LENGTH).and_then(|v| v.parse::<u64>().ok())
-            && let Some(refusal) = self.check_size(length)
-        {
-            return refusal;
+        if let Some(length) = header_str(&parts.headers, header::CONTENT_LENGTH).and_then(|v| v.parse::<u64>().ok()) {
+            if let Some(refusal) = self.check_size(length) {
+                return refusal;
+            }
+            if let Some(refusal) = self.check_bytes(&client, length) {
+                return refusal;
+            }
         }
 
         let mut sniffer = Sniffer::default();
@@ -291,6 +320,7 @@ impl Server {
             }
             Err(failure) => return transfer_error(&failure, self.max_blob_size),
         };
+        self.charge_bytes(&client, staged.size);
         // Without X-SHA-256 the hash is only known now.
         if !token.covers(staged.sha256) {
             return unauthorized("Authorization has no x tag for this blob.");
@@ -345,6 +375,14 @@ impl Server {
     /// same rules as an upload.
     async fn mirror(&self, request: Request) -> Reply {
         let (parts, body) = request.into_parts();
+        let Some(client) = self.client(&parts) else {
+            // Without one there's nothing to limit by, and a shared count
+            // would let any such client exhaust it for the rest.
+            return error(StatusCode::BAD_REQUEST, "Cannot determine the client's address.");
+        };
+        if let Some(refusal) = self.admit(&client) {
+            return refusal;
+        }
         let origin = self.origin(&parts.headers);
         let token = match authorize(&parts.headers, "upload", origin.host.as_deref(), now()) {
             Ok(token) => token,
@@ -379,7 +417,38 @@ impl Server {
             Ok(staged) => staged,
             Err(error) => return transfer_error(&error, self.max_blob_size),
         };
+        self.charge_bytes(&client, staged.size);
         self.keep(staged, &token, &origin).await
+    }
+
+    /// The key a request's client is limited under.
+    fn client(&self, parts: &http::request::Parts) -> Option<String> {
+        ratelimit::client_key(&parts.headers, &parts.extensions, self.trust_proxy)
+    }
+
+    /// Count an upload or mirror against its client, before its token is
+    /// checked: that's work too.
+    fn admit(&self, client: &str) -> Option<Reply> {
+        if let Some(uploads) = &self.uploads
+            && let Err(retry_after) = uploads.lock().admit(client, Instant::now())
+        {
+            return Some(rate_limited("Too many uploads; try again later.", retry_after));
+        }
+        self.check_bytes(client, 1)
+    }
+
+    /// Whether `client` may send `length` more bytes this hour.
+    fn check_bytes(&self, client: &str, length: u64) -> Option<Reply> {
+        let retry_after = self.bytes.as_ref()?.lock().check(client, length, Instant::now()).err()?;
+        Some(rate_limited("Too many bytes uploaded; try again later.", retry_after))
+    }
+
+    /// Spend what a blob took to receive. Only blobs that arrive whole count:
+    /// the rest were cut off early, or at `max_blob_size`, and never kept.
+    fn charge_bytes(&self, client: &str, size: u64) {
+        if let Some(bytes) = &self.bytes {
+            bytes.lock().charge(client, size, Instant::now());
+        }
     }
 
     /// Commit a staged blob, record its uploader, and describe it.
@@ -547,6 +616,17 @@ fn error_owned(status: StatusCode, reason: String) -> Reply {
         .header("x-reason", HeaderValue::from_str(&printable).unwrap_or(HeaderValue::from_static("Error")))
         .body(Body::from(reason))
         .expect("response")
+}
+
+fn rate_limited(reason: &str, retry_after: u64) -> Reply {
+    let mut response = error(StatusCode::TOO_MANY_REQUESTS, reason);
+    response.headers_mut().insert(header::RETRY_AFTER, retry_after.into());
+    response
+}
+
+/// A limit of `limit` a `window`, or none for 0.
+fn limiter(limit: u64, window: Duration) -> Option<Mutex<RateLimiter>> {
+    (limit != 0).then(|| Mutex::new(RateLimiter::new(limit, window, MAX_RATE_LIMITED)))
 }
 
 fn unauthorized(reason: &str) -> Reply {

@@ -83,17 +83,17 @@ impl RateLimiter {
     /// Count a request from `key`, or refuse it with the seconds until its
     /// window resets.
     pub fn admit(&mut self, key: &str, now: Instant) -> Result<(), u64> {
-        self.check(key, now)?;
+        self.check(key, 1, now)?;
         self.charge(key, 1, now);
         Ok(())
     }
 
-    /// Whether `key` has anything left this window, without spending it, or
+    /// Whether `key` has `cost` left this window, without spending it, or
     /// else the seconds until its window resets.
-    pub fn check(&mut self, key: &str, now: Instant) -> Result<(), u64> {
+    pub fn check(&mut self, key: &str, cost: u64, now: Instant) -> Result<(), u64> {
         self.expire(now);
         match self.counts.get(key) {
-            Some(window) if window.count >= self.limit => Err((window.resets - now).as_millis().div_ceil(1000) as u64),
+            Some(window) if window.count.saturating_add(cost) > self.limit => Err((window.resets - now).as_millis().div_ceil(1000) as u64),
             _ => Ok(()),
         }
     }
@@ -217,13 +217,14 @@ mod tests {
     fn charges_costs_paid_after_the_fact() {
         let start = Instant::now();
         let mut limiter = RateLimiter::new(100, Duration::from_secs(60), 1000);
-        assert_eq!(limiter.check("a", start), Ok(()));
+        assert_eq!(limiter.check("a", 100, start), Ok(()));
         limiter.charge("a", 60, start);
-        assert_eq!(limiter.check("a", start), Ok(()));
+        assert_eq!(limiter.check("a", 40, start), Ok(()));
+        assert_eq!(limiter.check("a", 41, start), Err(60));
         // Over, since it was already spent; then nothing more until it resets.
         limiter.charge("a", 60, start);
-        assert_eq!(limiter.check("a", start + Duration::from_secs(30)), Err(30));
-        assert_eq!(limiter.check("a", start + Duration::from_secs(60)), Ok(()));
+        assert_eq!(limiter.check("a", 1, start + Duration::from_secs(30)), Err(30));
+        assert_eq!(limiter.check("a", 100, start + Duration::from_secs(60)), Ok(()));
     }
 
     #[test]

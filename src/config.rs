@@ -136,6 +136,12 @@ pub struct RelayConfig {
 pub struct BlossomConfig {
     /// Bytes one blob may be.
     pub max_blob_size: u64,
+    /// Uploads and mirrors one client may start a minute, by IPv4 address
+    /// or IPv6 /64. 0 for no limit.
+    pub uploads_per_minute: u32,
+    /// Bytes one client may upload or mirror an hour, by IPv4 address or
+    /// IPv6 /64: at least `max_blob_size`, or 0 for no limit.
+    pub upload_bytes_per_hour: u64,
 }
 
 /// A blind Concord AV broker (CORD-07 §2), handing out seats on LiveKit
@@ -241,7 +247,7 @@ impl Default for RelayConfig {
 
 impl Default for BlossomConfig {
     fn default() -> Self {
-        BlossomConfig { max_blob_size: 100 << 20 }
+        BlossomConfig { max_blob_size: 100 << 20, uploads_per_minute: 60, upload_bytes_per_hour: 1 << 30 }
     }
 }
 
@@ -394,6 +400,9 @@ impl Config {
         self.public_url()?;
         if self.blossom.max_blob_size < crate::blossom::sniff::MIN_SIZE {
             bail!("blossom.max_blob_size is smaller than any encrypted blob could be.");
+        }
+        if self.blossom.upload_bytes_per_hour != 0 && self.blossom.upload_bytes_per_hour < self.blossom.max_blob_size {
+            bail!("blossom.upload_bytes_per_hour has to be at least blossom.max_blob_size, or 0 for no limit.");
         }
         self.validate_av()?;
         self.validate_tls()?;
@@ -594,6 +603,8 @@ mod tests {
         assert!(Config::parse("public_url = \"ftp://example.com\"").is_err());
         assert!(Config::parse("public_url = \"https://example.com/armada\"").is_err());
         assert!(Config::parse("[blossom]\nmax_blob_size = 0").is_err());
+        assert!(Config::parse("[blossom]\nupload_bytes_per_hour = 1048576").is_err());
+        assert!(Config::parse("[blossom]\nupload_bytes_per_hour = 0").is_ok());
         assert!(Config::parse("[relay]\nmax_limit = 0").is_err());
         assert!(Config::parse("[relay]\nmap_size = 1024").is_err());
         let config = Config::parse("public_url = \"https://Armada.Example.com/\"").unwrap();

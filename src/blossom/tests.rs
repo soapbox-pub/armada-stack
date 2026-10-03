@@ -1,6 +1,9 @@
 //! The Blossom server end to end, through its router.
 
+use std::net::SocketAddr;
+
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use http::{HeaderMap, Request, StatusCode};
 use http_body_util::BodyExt;
 use rand::rngs::StdRng;
@@ -26,15 +29,22 @@ struct Harness {
 
 impl Harness {
     fn new() -> Harness {
+        Self::with(BlossomConfig { max_blob_size: MAX, ..BlossomConfig::default() })
+    }
+
+    fn with(config: BlossomConfig) -> Harness {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::allowing_private(dir.path());
-        let config = BlossomConfig { max_blob_size: MAX };
         let public_url = url::Url::parse("https://blossom.example.com").ok();
-        let blossom = Blossom::open(&config, public_url, &storage, &CancellationToken::new()).unwrap();
+        let blossom = Blossom::open(&config, public_url, false, &storage, &CancellationToken::new()).unwrap();
         Harness { _dir: dir, storage, blossom }
     }
 
-    async fn send(&self, request: Request<Body>) -> (StatusCode, HeaderMap, Vec<u8>) {
+    /// From `203.0.113.1`, unless the request says otherwise.
+    async fn send(&self, mut request: Request<Body>) -> (StatusCode, HeaderMap, Vec<u8>) {
+        if request.extensions().get::<ConnectInfo<SocketAddr>>().is_none() {
+            request.extensions_mut().insert(from("203.0.113.1"));
+        }
         let response = self.blossom.router().oneshot(request).await.unwrap();
         let (parts, body) = response.into_parts();
         (parts.status, parts.headers, body.collect().await.unwrap().to_bytes().to_vec())
@@ -63,6 +73,19 @@ impl Harness {
     fn tmp_is_empty(&self) -> bool {
         std::fs::read_dir(self.storage.root().join("blossom/blobs/tmp")).map_or(true, |mut dir| dir.next().is_none())
     }
+}
+
+fn from(address: &str) -> ConnectInfo<SocketAddr> {
+    ConnectInfo(SocketAddr::new(address.parse().unwrap(), 4000))
+}
+
+fn upload_request(secret: &str, bytes: &[u8]) -> Request<Body> {
+    let sha = sha_of(bytes);
+    Request::put("/upload")
+        .header("authorization", auth(secret, "upload", &[&sha]))
+        .header("x-sha-256", &sha)
+        .body(Body::from(bytes.to_vec()))
+        .unwrap()
 }
 
 fn auth(secret: &str, verb: &str, x: &[&str]) -> http::HeaderValue {
@@ -331,6 +354,74 @@ async fn mirrors_under_the_same_rules() {
     assert_eq!(harness.send(mirror(format!("{elsewhere}/{missing}"), &missing)).await.0, StatusCode::BAD_GATEWAY);
     assert_eq!(harness.send(mirror(format!("{elsewhere}/nothing"), &sha)).await.0, StatusCode::BAD_REQUEST);
     assert!(harness.tmp_is_empty());
+}
+
+#[tokio::test]
+async fn limits_each_addresss_uploads() {
+    let harness = Harness::with(BlossomConfig { max_blob_size: MAX, uploads_per_minute: 2, ..BlossomConfig::default() });
+    assert_eq!(harness.upload(ALICE, &ciphertext(10, 3000)).await.0, StatusCode::CREATED);
+    // Refused or not, an attempt counts.
+    assert_eq!(harness.send(Request::put("/upload").body(Body::empty()).unwrap()).await.0, StatusCode::UNAUTHORIZED);
+    let (status, headers, _) = harness.upload(ALICE, &ciphertext(11, 3000)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(reason(&headers), "Too many uploads; try again later.");
+    let retry_after: u64 = headers["retry-after"].to_str().unwrap().parse().unwrap();
+    assert!((1..=60).contains(&retry_after), "{retry_after}");
+    // Mirrors share the count.
+    let mirror = Request::put("/mirror").header("authorization", auth(ALICE, "upload", &[])).body(Body::from("{}")).unwrap();
+    assert_eq!(harness.send(mirror).await.0, StatusCode::TOO_MANY_REQUESTS);
+
+    // Others aren't charged for it; one IPv6 /64 is one client.
+    let mut request = upload_request(BOB, &ciphertext(12, 3000));
+    request.extensions_mut().insert(from("2001:db8::1"));
+    assert_eq!(harness.send(request).await.0, StatusCode::CREATED);
+    for n in [13, 14] {
+        let mut request = upload_request(BOB, &ciphertext(n, 3000));
+        request.extensions_mut().insert(from("2001:db8::2"));
+        let expected = if n == 13 { StatusCode::CREATED } else { StatusCode::TOO_MANY_REQUESTS };
+        assert_eq!(harness.send(request).await.0, expected);
+    }
+
+    // Reads, deletes, and preflights aren't limited.
+    assert_eq!(harness.get(&format!("/{}", sha_of(&ciphertext(10, 3000)))).await.0, StatusCode::OK);
+    let head = Request::head("/upload").header("x-content-length", "5000").body(Body::empty()).unwrap();
+    assert_eq!(harness.send(head).await.0, StatusCode::OK);
+    assert_eq!(harness.delete(ALICE, &sha_of(&ciphertext(10, 3000))).await, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn limits_each_addresss_bytes() {
+    let harness = Harness::with(BlossomConfig { max_blob_size: 10_000, upload_bytes_per_hour: 10_000, ..BlossomConfig::default() });
+    let declared = |n, size| {
+        let mut request = upload_request(ALICE, &ciphertext(n, size));
+        request.headers_mut().insert("content-length", size.into());
+        request
+    };
+    assert_eq!(harness.send(declared(20, 6000)).await.0, StatusCode::CREATED);
+    // One that would go over is refused before it's read.
+    let (status, headers, _) = harness.send(declared(21, 6000)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(reason(&headers), "Too many bytes uploaded; try again later.");
+    assert!(headers.contains_key("retry-after"));
+    // One that fits isn't.
+    assert_eq!(harness.send(declared(22, 4000)).await.0, StatusCode::CREATED);
+
+    // Without a Content-Length, it's charged once it's in; then nothing more.
+    let harness = Harness::with(BlossomConfig { max_blob_size: 10_000, upload_bytes_per_hour: 10_000, ..BlossomConfig::default() });
+    for (n, expected) in [(23, StatusCode::CREATED), (24, StatusCode::CREATED), (25, StatusCode::TOO_MANY_REQUESTS)] {
+        let blob = ciphertext(n, 6000);
+        let sha = sha_of(&blob);
+        let stream = futures_util::stream::iter([Ok::<_, std::io::Error>(bytes::Bytes::from(blob))]);
+        let request = Request::put("/upload").header("authorization", auth(ALICE, "upload", &[&sha])).body(Body::from_stream(stream)).unwrap();
+        assert_eq!(harness.send(request).await.0, expected, "{n}");
+    }
+}
+
+#[tokio::test]
+async fn refuses_an_upload_from_no_address() {
+    let harness = Harness::new();
+    let response = harness.blossom.router().oneshot(upload_request(ALICE, &ciphertext(30, 3000))).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
