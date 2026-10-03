@@ -105,7 +105,9 @@ pub enum Access {
 pub fn access(kind: u16) -> Access {
     match kind {
         GIFT_WRAP | EPHEMERAL_GIFT_WRAP | NIP46 => Access::AuthorOrRecipient,
-        APP_DATA => Access::Author,
+        // A deletion request says what its author once published, and for
+        // a gift wrap, that they received it.
+        APP_DATA | DELETION => Access::Author,
         _ => Access::Anyone,
     }
 }
@@ -150,11 +152,11 @@ pub fn scope(filter: &mut Filter, keys: &Keys) -> Result<(), String> {
         Some(_) => {
             let scoped = filter.authors.is_some() || filter.tags.iter().any(|(letter, _)| *letter == b'p');
             Err(if scoped {
-                "auth-required: every author, or every #p, has to be authenticated to read gift wraps and app data".into()
+                "auth-required: to read private kinds, every author (or #p) has to be authenticated".into()
             } else if keys.is_empty() {
-                "auth-required: reading gift wraps and app data takes authors or #p, authenticated".into()
+                "auth-required: private kinds can only be read by authors (or #p) you've authenticated as".into()
             } else {
-                "restricted: reading gift wraps and app data takes authors or #p, authenticated".into()
+                "restricted: private kinds can only be read by authors (or #p) you've authenticated as".into()
             })
         }
         None => {

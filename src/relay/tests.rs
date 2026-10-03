@@ -215,11 +215,25 @@ async fn honors_deletion_and_replacement() {
 
     let oops = note(ALICE, "oops");
     alice.publish(&oops).await;
-    alice.publish(&Event::sign(ALICE, at, 5, tags(&[&["e", &oops.id]]), "")).await;
+    let deletion = Event::sign(ALICE, at, 5, tags(&[&["e", &oops.id]]), "");
+    alice.publish(&deletion).await;
     assert!(alice.query("o", &[json!({"ids": [oops.id]})]).await.is_empty());
     let reply = alice.publish(&oops).await;
     assert_eq!(reply[2], false);
     assert!(reply[3].as_str().unwrap().starts_with("blocked:"));
+
+    // Deletion requests are their author's alone to read.
+    let author = crate::nostr::event::public_key(ALICE);
+    alice.send(json!(["REQ", "d", {"kinds": [5], "authors": [author]}])).await;
+    assert!(alice.recv().await[2].as_str().unwrap().starts_with("auth-required:"));
+    assert!(alice.query("all", &[json!({})]).await.iter().all(|event| event.kind != 5));
+    assert!(alice.query("id", &[json!({"ids": [deletion.id]})]).await.is_empty());
+    let mut bob = harness.client().await;
+    bob.auth(BOB).await;
+    bob.send(json!(["REQ", "d", {"kinds": [5], "#e": [oops.id]}])).await;
+    assert!(bob.recv().await[2].as_str().unwrap().starts_with("restricted:"));
+    alice.auth(ALICE).await;
+    assert_eq!(alice.query("d", &[json!({"kinds": [5], "authors": [author]})]).await, [deletion]);
 }
 
 #[tokio::test]

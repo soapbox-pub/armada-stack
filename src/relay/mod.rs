@@ -4,8 +4,8 @@
 //! It takes the kinds Armada uses and nothing else, each checked against
 //! rules of its own ([`policy`]). Anyone may publish them, within the
 //! limits in [`RelayConfig`], and read them, but for gift wraps, NIP-46
-//! messages, and app data: only connections authenticated as their author
-//! (or their recipient) see those.
+//! messages, app data, and deletion requests: only connections
+//! authenticated as their author (or their recipient) see those.
 //!
 //! - [`store`] keeps events in LMDB as compact [`record`]s, with
 //!   duplicate-sorted indexes (over [`lmdb`], since heed can't seek within
