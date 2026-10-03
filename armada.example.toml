@@ -35,12 +35,17 @@ max_site_size = 1073741824
 # What the web app is told through window.ENV, at /_armada/env.js, by the
 # names Armada reads. Unset, armada's own relay, Blossom server (preferred for
 # uploads) and AV broker join Armada's public ones, once public_url or a
-# public Host says where armada is reached. A name set here replaces that;
-# "" turns a list off. To use only this armada's services:
+# public Host says where armada is reached. A name set here replaces that.
+# "" turns off CONCORD_AV_SERVERS, BROADCAST_RELAYS and
+# PREFERRED_BLOSSOM_SERVER, but brings back Armada's own default for
+# APP_RELAYS, APP_BLOSSOM_SERVERS and SEARCH_RELAYS. To lean on this armada's
+# services alone:
 # [web.env]
 # APP_RELAYS = "wss://armada.example.com"
-# APP_BLOSSOM_SERVERS = "https://armada.example.com/"
 # CONCORD_AV_SERVERS = "https://armada.example.com"
+# Keep a public Blossom server besides this one, which takes only encrypted
+# blobs: avatars, banners and emoji are uploaded in the clear.
+# APP_BLOSSOM_SERVERS = "https://armada.example.com/,https://blossom.ditto.pub/"
 
 # A Nostr relay for the kinds Armada uses, within these limits.
 [relay]
