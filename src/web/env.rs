@@ -1,5 +1,6 @@
 //! `window.ENV` for the web app: the script that points Armada at this
-//! armada's own relay, Blossom server and AV broker.
+//! armada's own relay, Blossom server and AV broker, and makes its relay a
+//! home for new Concord communities.
 //!
 //! Armada reads its deployment settings through `config(name)`, which takes a
 //! string on `window.ENV` over the value its build baked in. A tag loading
@@ -34,6 +35,10 @@ pub const ENV_PATH: &str = "/_armada/env.js";
 /// they're restated here to keep using them.
 const ARMADA_RELAYS: &[&str] = &["wss://relay.ditto.pub", "wss://relay.dreamith.to"];
 const ARMADA_BLOSSOM_SERVERS: &[&str] = &["https://blossom.ditto.pub/", "https://blossom.dreamith.to/", "https://blossom.primal.net/"];
+/// `COMMUNITY_RELAYS`' default, the CORD stock set in Armada's
+/// `src/concord/lib/stockRelays.ts`. A community has at most five relays, so
+/// this one and these four fill it.
+const ARMADA_COMMUNITY_RELAYS: &[&str] = &["wss://jskitty.com/nostr", "wss://asia.vectorapp.io/nostr", "wss://relay.ditto.pub", "wss://relay.dreamith.to"];
 /// `CONCORD_AV_SERVERS`' default, in `src/lib/platform.ts`.
 const ARMADA_AV_SERVERS: &[&str] = &["https://armada.buzz"];
 
@@ -64,6 +69,7 @@ impl ClientEnv {
         let blossom = format!("{}/", origin.base);
         let mut values = BTreeMap::from([
             ("APP_RELAYS".to_string(), join(origin.websocket(), ARMADA_RELAYS)),
+            ("COMMUNITY_RELAYS".to_string(), join(origin.websocket(), ARMADA_COMMUNITY_RELAYS)),
             ("APP_BLOSSOM_SERVERS".to_string(), join(blossom.clone(), ARMADA_BLOSSOM_SERVERS)),
             ("PREFERRED_BLOSSOM_SERVER".to_string(), blossom),
             // This armada, not armada.buzz, on purpose: see the module docs.
@@ -113,6 +119,10 @@ mod tests {
         let env = ClientEnv::new(&Config::default()).unwrap();
         let values = env.values(&host("armada.example.com"));
         assert_eq!(values["APP_RELAYS"], "wss://armada.example.com,wss://relay.ditto.pub,wss://relay.dreamith.to");
+        assert_eq!(
+            values["COMMUNITY_RELAYS"],
+            "wss://armada.example.com,wss://jskitty.com/nostr,wss://asia.vectorapp.io/nostr,wss://relay.ditto.pub,wss://relay.dreamith.to"
+        );
         assert_eq!(values["APP_BLOSSOM_SERVERS"], "https://armada.example.com/,https://blossom.ditto.pub/,https://blossom.dreamith.to/,https://blossom.primal.net/");
         assert_eq!(values["PREFERRED_BLOSSOM_SERVER"], "https://armada.example.com/");
         assert_eq!(values["PUBLIC_WEB_ORIGIN"], "https://armada.example.com");
