@@ -176,7 +176,9 @@ async fn a_published_site_is_downloaded_and_served() {
     assert_eq!(headers["vary"], "accept-encoding");
     assert_eq!(headers["access-control-allow-origin"], "*");
     assert_eq!(headers["x-nsite-addr"], harness.address.naddr());
-    assert_eq!(headers["content-security-policy"], "default-src 'self'; img-src https:");
+    assert_eq!(headers["content-security-policy"], "default-src 'self'; img-src https:, frame-ancestors 'none'");
+    assert_eq!(headers["x-frame-options"], "DENY");
+    assert_eq!(headers["x-content-type-options"], "nosniff");
     let mut decoded = Vec::new();
     brotli::BrotliDecompress(&mut body.as_slice(), &mut decoded).unwrap();
     assert_eq!(decoded, served.as_bytes());
@@ -198,7 +200,7 @@ async fn a_published_site_is_downloaded_and_served() {
     }
     let (status, headers, _) = web.get("/assets/gone.js", &[]).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(headers["content-security-policy"], "default-src 'self'; img-src https:");
+    assert_eq!(headers["content-security-policy"], "default-src 'self'; img-src https:, frame-ancestors 'none'");
 
     let (status, ..) = web.request("POST", "/", &[]).await;
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);

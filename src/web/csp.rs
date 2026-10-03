@@ -3,7 +3,10 @@
 //!
 //! Sent as a header as well as left in the page, because a header covers
 //! what a `<meta>` tag can't: every response, not just documents, and
-//! directives like `frame-ancestors` that browsers ignore in markup.
+//! directives like `frame-ancestors` that browsers ignore in markup. A site
+//! whose policy doesn't say who may frame it may be framed by no one, since
+//! a page holding someone's keys is worth clickjacking; one that says
+//! otherwise keeps its word.
 
 use http::HeaderValue;
 
@@ -20,14 +23,35 @@ const MAX_POLICY_LENGTH: usize = 8 * 1024;
 /// ships, which is what most nsites are built from.
 pub const DEFAULT_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
 frame-src 'self' https:; font-src 'self'; base-uri 'self'; manifest-src 'self'; \
-connect-src 'self' blob: https: wss:; img-src 'self' data: blob: https:; media-src 'self' https:";
+connect-src 'self' blob: https: wss:; img-src 'self' data: blob: https:; media-src 'self' https:; \
+frame-ancestors 'none'";
+
+/// Added, as a policy of its own, to a site's that doesn't name
+/// `frame-ancestors`.
+const NO_FRAMING: &str = "frame-ancestors 'none'";
 
 /// The policy to send for a site whose `/index.html` is `html`, if it has one.
 pub fn site_policy(html: Option<&str>) -> HeaderValue {
     html.and_then(extract_csp)
+        .map(|policy| if frame_ancestors(&policy).next().is_some() { policy } else { format!("{policy}, {NO_FRAMING}") })
         // Only printable ASCII gets this far, which is always a valid header.
         .and_then(|policy| HeaderValue::from_str(&policy).ok())
         .unwrap_or(HeaderValue::from_static(DEFAULT_CSP))
+}
+
+/// Whether a policy lets no one frame the site, which is what
+/// `X-Frame-Options: DENY` says to browsers older than `frame-ancestors`.
+pub fn denies_framing(policy: &str) -> bool {
+    frame_ancestors(policy).any(|sources| sources.eq_ignore_ascii_case("'none'"))
+}
+
+/// The sources of each `frame-ancestors` directive in a policy list.
+fn frame_ancestors(policy: &str) -> impl Iterator<Item = &str> {
+    policy.split([',', ';']).filter_map(|directive| {
+        let directive = directive.trim();
+        let (name, sources) = directive.split_once(' ').unwrap_or((directive, ""));
+        name.eq_ignore_ascii_case("frame-ancestors").then(|| sources.trim())
+    })
 }
 
 /// The enforcing Content Security Policy an HTML document declares.
@@ -100,6 +124,20 @@ mod tests {
     fn falls_back_to_the_default() {
         assert_eq!(site_policy(None), DEFAULT_CSP);
         assert_eq!(site_policy(Some("<title>x</title>")), DEFAULT_CSP);
-        assert_eq!(site_policy(Some(r#"<meta http-equiv="content-security-policy" content="a">"#)), "a");
+        assert_eq!(site_policy(Some(r#"<meta http-equiv="content-security-policy" content="a">"#)), "a, frame-ancestors 'none'");
+    }
+
+    #[test]
+    fn denies_framing_unless_the_site_says_otherwise() {
+        let policy = |content: &str| site_policy(Some(&format!(r#"<meta http-equiv="content-security-policy" content="{content}">"#)));
+        assert!(denies_framing(DEFAULT_CSP));
+        assert!(denies_framing(policy("default-src 'self'").to_str().unwrap()));
+        let own = policy("default-src 'self'; Frame-Ancestors https://host.example");
+        assert_eq!(own, "default-src 'self'; Frame-Ancestors https://host.example");
+        assert!(!denies_framing(own.to_str().unwrap()));
+        assert!(denies_framing("default-src 'self'; frame-ancestors 'none'"));
+        // Only the directive itself counts.
+        assert!(!denies_framing("default-src 'self'; frame-src 'none'"));
+        assert_eq!(policy("frame-src 'none'"), "frame-src 'none', frame-ancestors 'none'");
     }
 }

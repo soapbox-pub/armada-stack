@@ -14,7 +14,7 @@ use bytes::Bytes;
 use http::header::{self, HeaderMap, HeaderValue};
 use http::{Method, Request, Response, StatusCode};
 
-use super::csp::DEFAULT_CSP;
+use super::csp::{DEFAULT_CSP, denies_framing};
 use super::env::{ClientEnv, ENV_PATH};
 use super::site::Site;
 use crate::blobs::{BlobStore, Encoding, Variants};
@@ -54,7 +54,12 @@ impl SiteServer {
         // On every answer, not only documents: the policy is the site's, and a
         // 404 or a 503 is the site answering too.
         let csp = site.map_or(HeaderValue::from_static(DEFAULT_CSP), |site| site.csp.clone());
+        if csp.to_str().is_ok_and(denies_framing) {
+            headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+        }
         headers.insert(header::CONTENT_SECURITY_POLICY, csp);
+        // Every file is served as the type its name says, never another.
+        headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
         // Set on everything rather than only on what varied, because a cache
         // has to be told before it stores the first response.
         headers.append(header::VARY, HeaderValue::from_static("accept-encoding"));
