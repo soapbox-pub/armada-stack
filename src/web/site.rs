@@ -6,11 +6,12 @@ use std::collections::HashMap;
 use http::HeaderValue;
 
 use super::csp::{MAX_HTML_BYTES, site_policy};
+use super::inject::{MAX_INJECT_BYTES, inject_env};
 use crate::blobs::{BlobStore, Variants};
 use crate::hash::BlobHash;
 use crate::nostr::Event;
 use crate::nsite::{join_root, manifest_paths, normalize_site_path};
-use crate::util::{extname, http_date};
+use crate::util::{extname, http_date, lowercase_extname};
 
 #[derive(Clone, Copy, Debug)]
 pub struct File {
@@ -48,7 +49,11 @@ impl Site {
         let mut files = HashMap::new();
         for (path, sha256) in manifest_paths(event) {
             let variants = blobs.variants(sha256).ok_or(sha256)?;
-            files.insert(path, File { sha256, variants });
+            let mut file = File { sha256, variants };
+            if matches!(&*lowercase_extname(&path), ".html" | ".htm") {
+                file = with_env(&path, file, blobs);
+            }
+            files.insert(path, file);
         }
         let index = files.get("/index.html").map(|file| blobs.read_text(file.sha256, MAX_HTML_BYTES));
         Ok(Site {
@@ -89,6 +94,36 @@ impl Site {
             let (path, file) = self.files.get_key_value(&path)?;
             Some((Resolved { path, status }, file))
         })
+    }
+}
+
+/// A page with the `window.ENV` script added, stored and compressed under a
+/// hash of its own — the site's own copy is left as published. Blocking. A
+/// page that can't take the tag, or can't be rewritten, is served as it is.
+fn with_env(path: &str, file: File, blobs: &BlobStore) -> File {
+    if file.variants.identity > MAX_INJECT_BYTES {
+        return file;
+    }
+    let rewrite = || -> anyhow::Result<Option<File>> {
+        let Some(page) = inject_env(&blobs.open(file.sha256, None)?) else { return Ok(None) };
+        let sha256 = BlobHash::of(&page);
+        // Stored by an earlier load of this version, or another with the same page.
+        if blobs.size(sha256).is_none() {
+            blobs.put(sha256, &page)?;
+        }
+        blobs.ensure_variants(sha256)?;
+        Ok(blobs.variants(sha256).map(|variants| File { sha256, variants }))
+    };
+    match rewrite() {
+        Ok(Some(rewritten)) => rewritten,
+        Ok(None) => {
+            tracing::info!(path, "page left without the env script: no head, or a 'strict-dynamic' policy");
+            file
+        }
+        Err(error) => {
+            tracing::warn!(path, %error, "could not add the env script to a page");
+            file
+        }
     }
 }
 

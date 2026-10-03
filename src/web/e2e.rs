@@ -164,10 +164,13 @@ async fn a_published_site_is_downloaded_and_served() {
 
     eventually("the site going live", async || web.get("/", &[]).await.0 == StatusCode::OK).await;
 
+    // The page is served with the env script first in its head, under a
+    // hash of its own; the site's policy already lets it load.
+    let served = page.replacen("<head>", r#"<head><script src="/_armada/env.js"></script>"#, 1);
     let (status, headers, body) = web.get("/", &[("accept-encoding", "gzip, br")]).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers["content-encoding"], "br");
-    assert_eq!(headers["etag"], format!("\"{}-br\"", hex::encode(Sha256::digest(page.as_bytes()))));
+    assert_eq!(headers["etag"], format!("\"{}-br\"", hex::encode(Sha256::digest(served.as_bytes()))));
     assert_eq!(headers["content-type"], "text/html; charset=utf-8");
     assert_eq!(headers["cache-control"], "public, no-cache");
     assert_eq!(headers["vary"], "accept-encoding");
@@ -176,7 +179,7 @@ async fn a_published_site_is_downloaded_and_served() {
     assert_eq!(headers["content-security-policy"], "default-src 'self'; img-src https:");
     let mut decoded = Vec::new();
     brotli::BrotliDecompress(&mut body.as_slice(), &mut decoded).unwrap();
-    assert_eq!(decoded, page.as_bytes());
+    assert_eq!(decoded, served.as_bytes());
 
     let etag = headers["etag"].to_str().unwrap().to_string();
     let (status, ..) = web.get("/", &[("accept-encoding", "br"), ("if-none-match", &etag)]).await;
@@ -190,13 +193,18 @@ async fn a_published_site_is_downloaded_and_served() {
 
     // A client-side route gets the app; a missing asset does not.
     let (status, _, body) = web.get("/invite/naddr1xyz", &[]).await;
-    assert_eq!((status, body), (StatusCode::OK, page.as_bytes().to_vec()));
+    assert_eq!((status, body), (StatusCode::OK, served.as_bytes().to_vec()));
     let (status, headers, _) = web.get("/assets/gone.js", &[]).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(headers["content-security-policy"], "default-src 'self'; img-src https:");
 
     let (status, ..) = web.request("POST", "/", &[]).await;
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+
+    let (status, headers, body) = web.get("/_armada/env.js", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["content-type"], "text/javascript; charset=utf-8");
+    assert_eq!(body, b"self.ENV = {};\n");
 
     web.stop().await;
 }

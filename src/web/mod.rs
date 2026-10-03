@@ -10,6 +10,7 @@ mod db;
 #[cfg(test)]
 mod e2e;
 pub mod env;
+mod inject;
 pub mod serve;
 mod site;
 mod sync;

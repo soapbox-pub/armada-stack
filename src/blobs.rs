@@ -344,7 +344,6 @@ impl BlobStore {
     }
 
     /// Store bytes already in memory, verifying them against `sha256`.
-    #[cfg(test)]
     pub fn put(&self, sha256: BlobHash, bytes: &[u8]) -> Result<u64> {
         let digest = BlobHash::of(bytes);
         if digest != sha256 {
