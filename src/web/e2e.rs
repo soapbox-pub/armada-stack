@@ -191,11 +191,13 @@ async fn a_published_site_is_downloaded_and_served() {
     assert_eq!(headers["cache-control"], "public, max-age=3600, must-revalidate");
     assert_eq!(body, b"console");
 
-    // A client-side route gets the app; a missing asset does not.
-    let (status, _, body) = web.get("/invite/naddr1xyz", &[]).await;
-    assert_eq!((status, body), (StatusCode::OK, served.as_bytes().to_vec()));
+    // Any path the site has no file for gets the app, dots and all.
+    for path in ["/invite/naddr1xyz", "/s/relay.ditto.pub"] {
+        let (status, _, body) = web.get(path, &[]).await;
+        assert_eq!((status, body), (StatusCode::OK, served.as_bytes().to_vec()), "{path}");
+    }
     let (status, headers, _) = web.get("/assets/gone.js", &[]).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(headers["content-security-policy"], "default-src 'self'; img-src https:");
 
     let (status, ..) = web.request("POST", "/", &[]).await;

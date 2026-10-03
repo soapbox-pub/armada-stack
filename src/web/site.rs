@@ -11,7 +11,7 @@ use crate::blobs::{BlobStore, Variants};
 use crate::hash::BlobHash;
 use crate::nostr::Event;
 use crate::nsite::{join_root, manifest_paths, normalize_site_path};
-use crate::util::{extname, http_date, lowercase_extname};
+use crate::util::{http_date, lowercase_extname};
 
 #[derive(Clone, Copy, Debug)]
 pub struct File {
@@ -38,8 +38,9 @@ pub struct Site {
 pub struct Resolved<'a> {
     /// The site path whose file answers, which names its content type.
     pub path: &'a str,
-    /// 200 for a file the site has, or 404 for its not-found page.
-    pub status: u16,
+    /// Whether it's the site's shell, standing in for a path it has no
+    /// file for.
+    pub shell: bool,
 }
 
 impl Site {
@@ -64,35 +65,29 @@ impl Site {
         })
     }
 
-    /// Resolve a request path: exact match, then — for an extensionless
-    /// path — a `.html` sibling and then `index.html` beneath it.
+    /// Resolve a request path: exact match, then a `.html` sibling, then
+    /// `index.html` beneath it.
     ///
-    /// Past that, a document request is a client-side route, and gets the
-    /// site's shell under a `200`: `/404.html` first, since NIP-5A names it as
-    /// the fallback path, then `/index.html`. Any other request gets
-    /// `/404.html` under a `404`: a missing script must 404, not answer with a
-    /// page of HTML, or Armada's chunk-error recovery can't tell.
+    /// Past that, the path is a client-side route, whatever it looks like,
+    /// and gets the site's shell: `/404.html` first, since NIP-5A names it as
+    /// the fallback path, then `/index.html`. Every other service's paths
+    /// were routed away before this, and the manifest says which files the
+    /// site has, so nothing is left to tell apart. A missing chunk getting
+    /// HTML is fine: browsers refuse HTML as a module, or as anything at all
+    /// under `nosniff`, so the import fails just the same.
     pub fn resolve(&self, request_path: &str) -> Option<(Resolved<'_>, &File)> {
         let normalized = normalize_site_path(request_path);
-        let extension = extname(&normalized);
-        let extensionless = extension.is_empty();
-        let shell = matches!(extension.to_ascii_lowercase().as_str(), "" | ".html" | ".htm");
+        let mut candidates: Vec<(String, bool)> = vec![(normalized.clone(), false)];
+        if normalized != "/" {
+            candidates.push((format!("{normalized}.html"), false));
+        }
+        candidates.push((join_root(&format!("{normalized}/index.html")), false));
+        candidates.push(("/404.html".into(), true));
+        candidates.push(("/index.html".into(), true));
 
-        let mut candidates: Vec<(String, u16)> = vec![(normalized.clone(), 200)];
-        if extensionless && normalized != "/" {
-            candidates.push((format!("{normalized}.html"), 200));
-        }
-        if extensionless {
-            candidates.push((join_root(&format!("{normalized}/index.html")), 200));
-        }
-        candidates.push(("/404.html".into(), if shell { 200 } else { 404 }));
-        if shell {
-            candidates.push(("/index.html".into(), 200));
-        }
-
-        candidates.into_iter().find_map(|(path, status)| {
+        candidates.into_iter().find_map(|(path, shell)| {
             let (path, file) = self.files.get_key_value(&path)?;
-            Some((Resolved { path, status }, file))
+            Some((Resolved { path, shell }, file))
         })
     }
 }
@@ -141,14 +136,14 @@ mod tests {
         }
     }
 
-    fn resolve(site: &Site, path: &str) -> Option<(String, u16)> {
-        site.resolve(path).map(|(resolved, _)| (resolved.path.to_string(), resolved.status))
+    fn resolve(site: &Site, path: &str) -> Option<(String, bool)> {
+        site.resolve(path).map(|(resolved, _)| (resolved.path.to_string(), resolved.shell))
     }
 
     #[test]
     fn resolves_paths() {
         let docs = site(&["/index.html", "/about.html", "/guide/index.html", "/a b.txt", "/404.html"]);
-        let found = |path: &str| Some((path.to_string(), 200));
+        let found = |path: &str| Some((path.to_string(), false));
 
         assert_eq!(resolve(&docs, "/"), found("/index.html"));
         assert_eq!(resolve(&docs, "/about"), found("/about.html"));
@@ -156,15 +151,20 @@ mod tests {
         assert_eq!(resolve(&docs, "/guide/"), found("/guide/index.html"));
         assert_eq!(resolve(&docs, "/a%20b.txt"), found("/a b.txt"));
         assert_eq!(resolve(&docs, "/../about.html"), found("/about.html"));
-        assert_eq!(resolve(&docs, "/missing"), Some(("/404.html".into(), 200)));
-        assert_eq!(resolve(&docs, "/missing.js"), Some(("/404.html".into(), 404)));
+        assert_eq!(resolve(&docs, "/missing"), Some(("/404.html".into(), true)));
+        assert_eq!(resolve(&docs, "/missing.js"), Some(("/404.html".into(), true)));
     }
 
     #[test]
     fn falls_back_to_the_shell() {
         let app = site(&["/index.html", "/assets/app.js"]);
-        assert_eq!(resolve(&app, "/invite/naddr1abc"), Some(("/index.html".into(), 200)));
-        assert_eq!(resolve(&app, "/settings.html"), Some(("/index.html".into(), 200)));
-        assert_eq!(resolve(&app, "/assets/gone.js"), None);
+        let shell = || Some(("/index.html".into(), true));
+        assert_eq!(resolve(&app, "/invite/naddr1abc"), shell());
+        assert_eq!(resolve(&app, "/settings.html"), shell());
+        // However much a route looks like a file.
+        assert_eq!(resolve(&app, "/s/relay.ditto.pub"), shell());
+        assert_eq!(resolve(&app, "/assets/gone.js"), shell());
+        assert_eq!(resolve(&app, "/assets/app.js"), Some(("/assets/app.js".into(), false)));
+        assert_eq!(resolve(&site(&["/about.html"]), "/missing"), None);
     }
 }

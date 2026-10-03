@@ -132,10 +132,10 @@ impl SiteServer {
         };
         let size = bytes.as_ref().map_or(file.variants.size(encoding), |bytes| bytes.len() as u64);
 
-        // A range is of this representation only: not of a not-found page
-        // standing in for what was asked, and not of a version the client
+        // A range is of this representation only: not of the shell standing
+        // in for what was asked, and not of a version the client
         // didn't name in `If-Range`.
-        let ranged = resolved.status != 404 && header_str(request, header::IF_RANGE).is_none_or(|tag| tag == etag);
+        let ranged = !resolved.shell && header_str(request, header::IF_RANGE).is_none_or(|tag| tag == etag);
         let requested = if ranged { header_str(request, header::RANGE) } else { None };
         let range = match parse_range(requested, size) {
             Range::Unsatisfiable => {
@@ -149,9 +149,7 @@ impl SiteServer {
             Range::Part(start, end) => Some((start, end)),
         };
 
-        let status = if resolved.status == 404 {
-            StatusCode::NOT_FOUND
-        } else if range.is_some() {
+        let status = if range.is_some() {
             StatusCode::PARTIAL_CONTENT
         } else {
             StatusCode::OK
