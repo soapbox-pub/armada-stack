@@ -352,6 +352,12 @@ async fn shows_gift_wraps_only_to_their_author_and_recipient() {
     assert_eq!(recipient.recv().await[2]["id"], second.id);
     stranger.quiet().await;
 
+    // Big ones too, up to the content limit.
+    let big = Event::sign(BOB, now() - 25, 1059, tags(&[&["p", &alice]]), &nip44::payload(600_000));
+    assert_eq!(sender.publish(&big).await, json!(["OK", big.id, true, ""]));
+    assert_eq!(sender.recv().await[2]["id"], big.id);
+    assert_eq!(recipient.recv().await[2]["id"], big.id);
+
     // Ephemeral wraps are kept a while, for clients catching up.
     let typing = wrap(BOB, policy::EPHEMERAL_GIFT_WRAP, ALICE, 0);
     assert_eq!(sender.publish(&typing).await[2], true);

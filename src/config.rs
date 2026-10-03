@@ -217,12 +217,12 @@ impl Default for WebConfig {
 impl Default for RelayConfig {
     fn default() -> Self {
         RelayConfig {
-            max_message_length: 128 << 10,
+            max_message_length: 2 << 20,
             max_subscriptions: 32,
             max_filters: 16,
             max_limit: 500,
             max_event_tags: 2000,
-            max_content_length: 64 << 10,
+            max_content_length: 1 << 20,
             created_at_upper_limit: 900,
             events_per_minute: 600,
             max_authed_keys: 2000,

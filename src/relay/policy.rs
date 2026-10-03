@@ -451,6 +451,8 @@ mod tests {
             refused(kind, &[&["p", &p]], "plain text");
         }
         ok(GIFT_WRAP, &[&["p", &p], &["k", "3313"]], &wrap);
+        // However long.
+        ok(GIFT_WRAP, &[&["p", &p]], &payload(500_000));
         refused(GIFT_WRAP, &[&["p", &p], &["k", "3313"], &["k", "14"]], &wrap);
         refused(GIFT_WRAP, &[&["p", &p], &["k", "x"]], &wrap);
         refused(NIP46, &[&["p", &p], &["k", "1"]], &wrap);

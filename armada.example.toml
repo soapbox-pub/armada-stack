@@ -33,12 +33,12 @@ max_site_size = 1073741824
 
 # A Nostr relay for the kinds Armada uses, within these limits.
 [relay]
-max_message_length = 131072
+max_message_length = 2097152
 max_subscriptions = 32
 max_filters = 16
 max_limit = 500
 max_event_tags = 2000
-max_content_length = 65536
+max_content_length = 1048576
 # Seconds into the future an event's created_at may be.
 created_at_upper_limit = 900
 # Per connection. 0 for no limit.
