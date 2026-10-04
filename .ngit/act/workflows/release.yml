@@ -101,16 +101,18 @@ jobs:
       - name: Publish the release
         env:
           NSYTE_BUNKER: ${{ secrets.NSYTE_BUNKER }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -eu
           : "${NSYTE_BUNKER:?NSYTE_BUNKER is not set; ask the ngit-ci operator to provision it for #SOAPBOX.}"
           umask 077
           printf '%s' "$NSYTE_BUNKER" > "$RUNNER_TEMP/nbunksec"
           # The checkout's remote is the coordinator's clone, so name the
-          # repository; the version comes from the tag.
-          ngit release publish --defaults \
+          # repository. The checkout has the tagged commit but not the tag
+          # itself, so the version and commit are given rather than found.
+          ngit release publish "$VERSION" --defaults \
             --repo nostr://npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/git.shakespeare.diy/armada-stack \
-            --tag "$GITHUB_REF_NAME" \
+            --commit "$GITHUB_SHA" \
             --nbunksec-file "$RUNNER_TEMP/nbunksec"
 
       - name: Remove the signer
