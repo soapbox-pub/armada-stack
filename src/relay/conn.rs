@@ -1,12 +1,10 @@
-//! One client's WebSocket: NIP-01's EVENT, REQ, and CLOSE, and NIP-42's
-//! AUTH.
+//! One client's WebSocket: NIP-01's EVENT, REQ, and CLOSE.
 //!
-//! The AUTH challenge goes out as soon as the client connects, so it can
-//! authenticate before it asks for anything, rather than learning it has
-//! to from a refusal. A connection may authenticate as many keys as it
-//! likes, up to a limit: Armada authenticates as every Concord stream key
-//! it reads, besides its user. Each AUTH is checked in turn, on the
-//! connection's own task, so a REQ sent after it is answered knowing it.
+//! There's no NIP-42 AUTH. A relay that has readers sign in ties each one's
+//! key to the address it connects from, which plain REQs and EVENTs never
+//! do: anyone may ask for anything, or send any signed event, so neither
+//! says whose it is. What may be read is up to the filter alone
+//! ([`policy::scope`]).
 //!
 //! Events get their cheap checks here, on the connection's own task. The
 //! rest — the duplicate lookup, which reads the map and can stall on disk,
@@ -36,8 +34,8 @@ use tokio::task::JoinSet;
 use super::Shared;
 use super::clients::Slot;
 use super::filter::Filter;
-use super::monitors::{ConnId, Link, Outbound, SharedKeys};
-use super::policy::{self, Keys};
+use super::monitors::{ConnId, Link, Outbound};
+use super::policy;
 use super::query::{self, Results};
 use super::record;
 use super::writer::{Submission, ok};
@@ -51,9 +49,6 @@ const OUTBOUND: usize = 4096;
 
 /// The longest subscription id NIP-01 allows.
 const MAX_SUB_ID: usize = 64;
-
-/// Seconds an AUTH event's `created_at` may be from now.
-const AUTH_WINDOW: i64 = 600;
 
 /// A connection's side of the socket has gone; stop.
 struct Gone;
@@ -84,8 +79,6 @@ struct Session {
     slot: Slot,
     /// What this relay is called, as [`policy::authority`] puts it.
     authority: Arc<str>,
-    challenge: String,
-    keys: SharedKeys,
 }
 
 type QueryDone = (Arc<str>, anyhow::Result<Results>);
@@ -94,18 +87,13 @@ pub async fn serve(shared: Arc<Shared>, socket: WebSocket, authority: Arc<str>, 
     let id = shared.next_conn.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (link, mut rx, overflow) = Link::new(OUTBOUND);
     let (sink, mut stream) = socket.split();
-    let keys = SharedKeys::default();
-    shared.hub.connect(id, link.clone(), keys.clone()).await;
+    shared.hub.connect(id, link.clone()).await;
     let tokens = TokenBucket::new(shared.config.events_per_minute, Instant::now());
     let cancel = shared.cancel.clone();
-    let challenge = hex::encode(rand::random::<[u8; 16]>());
-    let mut session = Session { shared, id, link, sink, subs: HashMap::new(), tokens, slot, authority, challenge, keys };
+    let mut session = Session { shared, id, link, sink, subs: HashMap::new(), tokens, slot, authority };
     let mut queries: JoinSet<QueryDone> = JoinSet::new();
 
-    // The challenge, before anything else: see the module docs.
-    let challenge = serde_json::json!(["AUTH", session.challenge]).to_string();
-    let mut alive = session.send(challenge).await.is_ok();
-    while alive {
+    loop {
         let result = tokio::select! {
             _ = cancel.cancelled() => break,
             _ = overflow.cancelled() => {
@@ -124,7 +112,9 @@ pub async fn serve(shared: Arc<Shared>, socket: WebSocket, authority: Arc<str>, 
                 Err(_) => Ok(()),
             },
         };
-        alive = result.is_ok();
+        if result.is_err() {
+            break;
+        }
     }
 
     session.shared.hub.disconnect(id).await;
@@ -151,7 +141,6 @@ impl Session {
         match message.first().and_then(Value::as_str) {
             Some("EVENT") => self.on_event(message.get(1)).await,
             Some("REQ") => self.on_req(&message, queries).await,
-            Some("AUTH") => self.on_auth(message.get(1)).await,
             Some("COUNT") => match message.get(1).and_then(Value::as_str) {
                 Some(sub) => self.closed(sub, "unsupported: COUNT isn't supported").await,
                 None => self.notice("invalid: COUNT needs a subscription id").await,
@@ -217,61 +206,9 @@ impl Session {
         if record::expiration(event).is_some_and(|expiration| i64::from(expiration) <= now) {
             return Err("invalid: event has expired".into());
         }
-        // NIP-70.
-        if event.tags.iter().any(|tag| tag.len() == 1 && tag[0] == "-") && !self.keys().contains(&key(&event.pubkey)) {
-            return Err("auth-required: only its author may publish this event".into());
-        }
         let instant = Instant::now();
         if !self.tokens.take(instant) || !self.slot.take_event(instant) {
             return Err("rate-limited: slow down".into());
-        }
-        Ok(())
-    }
-
-    fn keys(&self) -> std::sync::RwLockReadGuard<'_, Keys> {
-        self.keys.read().expect("the keys lock")
-    }
-
-    /// Authenticate as the key that signed `event` (NIP-42).
-    async fn on_auth(&mut self, event: Option<&Value>) -> Result<(), Gone> {
-        let Some(Ok(event)) = event.map(|e| serde_json::from_value::<Event>(e.clone())) else {
-            return self.notice("invalid: AUTH takes an event").await;
-        };
-        let reply = match self.check_auth(&event) {
-            Ok(()) => {
-                let max = self.shared.config.max_authed_keys;
-                let mut keys = self.keys.write().expect("the keys lock");
-                let pubkey = key(&event.pubkey);
-                if keys.len() >= max && !keys.contains(&pubkey) {
-                    ok(&event.id, false, "restricted: this connection has authenticated as too many keys")
-                } else {
-                    keys.insert(pubkey);
-                    ok(&event.id, true, "")
-                }
-            }
-            Err(message) => ok(&event.id, false, message),
-        };
-        self.send(reply).await
-    }
-
-    fn check_auth(&self, event: &Event) -> Result<(), &'static str> {
-        if !is_hex64(&event.id) || !is_hex64(&event.pubkey) {
-            return Err("invalid: id and pubkey must be lowercase hex");
-        }
-        if event.kind != i64::from(policy::AUTH) {
-            return Err("invalid: AUTH takes a kind 22242 event");
-        }
-        if (event.created_at - now()).abs() > AUTH_WINDOW {
-            return Err("invalid: created_at is too far from now");
-        }
-        if event.tag("challenge") != Some(self.challenge.as_str()) {
-            return Err("invalid: that's not this connection's challenge");
-        }
-        if event.tag("relay").and_then(policy::authority).as_deref() != Some(&*self.authority) {
-            return Err("invalid: that's not this relay");
-        }
-        if !event.verify() {
-            return Err("invalid: bad id or signature");
         }
         Ok(())
     }
@@ -288,10 +225,9 @@ impl Session {
         if message.len() - 2 > config.max_filters {
             return self.closed(&sub, "invalid: too many filters").await;
         }
-        let keys = self.keys().clone();
         let scoped = |value| {
             let mut filter = Filter::parse(value)?;
-            policy::scope(&mut filter, &keys)?;
+            policy::scope(&mut filter)?;
             Ok::<_, String>(filter)
         };
         let filters = match message[2..].iter().map(scoped).collect::<Result<Vec<_>, _>>() {
@@ -321,7 +257,7 @@ impl Session {
                 let _permit = shared.queries.clone().acquire_owned().await?;
                 let store = shared.store.clone();
                 let max_limit = shared.config.max_limit;
-                Ok(tokio::task::spawn_blocking(move || query::run(&store, &filters, &keys, max_limit, now())).await??)
+                Ok(tokio::task::spawn_blocking(move || query::run(&store, &filters, max_limit, now())).await??)
             };
             (name, results.await)
         });
@@ -400,13 +336,6 @@ fn admit(shared: &Shared, event: Event, link: Link) {
     if shared.writer.submit(submission).is_err() {
         refuse(false, "rate-limited: the relay is busy, try again shortly");
     }
-}
-
-/// A checked hex key's bytes.
-fn key(hex: &str) -> [u8; 32] {
-    let mut key = [0; 32];
-    hex::decode_to_slice(hex, &mut key).expect("checked hex");
-    key
 }
 
 fn event_message(sub_json: &str, event_json: &str) -> String {

@@ -1,14 +1,12 @@
 //! The relay: NIP-01, with NIP-09 deletion, NIP-11, NIP-40 expiration,
-//! NIP-42 authentication, NIP-62 vanishing, and NIP-70 protected events.
+//! and NIP-62 vanishing. No NIP-42 AUTH (see [`conn`]), so no NIP-70
+//! protected events either.
 //!
 //! It takes the kinds Armada uses and nothing else, each checked against
 //! rules of its own ([`policy`]). Anyone may publish them, within the
 //! limits in [`RelayConfig`] — per connection, and per client address
-//! ([`clients`]) — and read them, but for gift wraps, NIP-46
-//! messages, app data, and deletion requests: only connections
-//! authenticated as their author (or their recipient) see those, or for
-//! gift wraps, filters that name their author, and for NIP-46, filters
-//! that name either party.
+//! ([`clients`]) — and read them, but gift wraps and NIP-46 messages are
+//! only found by filters that name their author or recipient.
 //!
 //! - [`store`] keeps events in LMDB as compact [`record`]s, with
 //!   duplicate-sorted indexes (over [`lmdb`], since heed can't seek within
@@ -81,7 +79,7 @@ struct Shared {
 
 impl Relay {
     /// Open the relay's store. Every connection closes once `cancel` fires.
-    /// `public_url` is where clients reach it, as they name it in AUTH.
+    /// `public_url` is where clients reach it, as requests to vanish name it.
     pub fn open(config: &RelayConfig, public_url: Option<url::Url>, trust_proxy: bool, storage: &Storage, cancel: &CancellationToken) -> Result<Relay> {
         let store = Arc::new(Store::open(&storage.service_dir("relay")?, config.map_size as usize)?);
         let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
@@ -166,7 +164,7 @@ fn info(config: &RelayConfig) -> serde_json::Value {
         "description": "The relay of a self-hosted Armada.",
         "software": "armada-stack",
         "version": env!("CARGO_PKG_VERSION"),
-        "supported_nips": [1, 9, 11, 40, 42, 62, 70],
+        "supported_nips": [1, 9, 11, 40, 62],
         "limitation": {
             "max_message_length": config.max_message_length,
             "max_subscriptions": config.max_subscriptions,

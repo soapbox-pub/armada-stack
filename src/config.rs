@@ -135,9 +135,9 @@ pub struct RelayConfig {
     /// Events one client may publish a minute across all its connections,
     /// in bursts of as many, by IPv4 address or IPv6 /64. 0 for no limit.
     pub events_per_minute_per_ip: u32,
-    /// Pubkeys one connection may authenticate as. Armada authenticates as
-    /// each Concord stream key it reads, as well as its user.
-    pub max_authed_keys: usize,
+    /// Ignored: the relay once did NIP-42 AUTH, and configs from then may
+    /// still set this.
+    pub max_authed_keys: Option<serde::de::IgnoredAny>,
     /// The most the database may grow to, in bytes. Address space reserved,
     /// not disk used, so generous is free.
     pub map_size: u64,
@@ -253,7 +253,7 @@ impl Default for RelayConfig {
             events_per_minute: 600,
             max_connections_per_ip: 50,
             events_per_minute_per_ip: 1200,
-            max_authed_keys: 2000,
+            max_authed_keys: None,
             map_size: 256 << 30,
         }
     }
@@ -413,8 +413,8 @@ impl Config {
         if relay.max_message_length < 1024 {
             bail!("relay.max_message_length has to be at least 1024 bytes.");
         }
-        if relay.max_subscriptions == 0 || relay.max_filters == 0 || relay.max_limit == 0 || relay.max_authed_keys == 0 {
-            bail!("relay.max_subscriptions, relay.max_filters, relay.max_limit, and relay.max_authed_keys have to be at least 1.");
+        if relay.max_subscriptions == 0 || relay.max_filters == 0 || relay.max_limit == 0 {
+            bail!("relay.max_subscriptions, relay.max_filters, and relay.max_limit have to be at least 1.");
         }
         if relay.map_size < 1 << 24 || usize::try_from(relay.map_size).is_err() {
             bail!("relay.map_size has to be at least 16 MiB, and fit in this machine's address space.");
@@ -633,6 +633,8 @@ mod tests {
         assert!(Config::parse("[blossom]\nupload_bytes_per_hour = 0").is_ok());
         assert!(Config::parse("[relay]\nmax_limit = 0").is_err());
         assert!(Config::parse("[relay]\nmap_size = 1024").is_err());
+        // From when the relay did AUTH.
+        assert!(Config::parse("[relay]\nmax_authed_keys = 2000").is_ok());
         let config = Config::parse("public_url = \"https://Armada.Example.com/\"").unwrap();
         assert_eq!(config.public_url().unwrap().unwrap().host_str(), Some("armada.example.com"));
         assert!(Config::load(Some(Path::new("/nonexistent/armada.toml")), &Environment::default()).is_err());

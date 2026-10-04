@@ -214,8 +214,6 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await });
 
         let (mut socket, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
-        let challenge = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
-        assert!(challenge.into_text().unwrap().starts_with(r#"["AUTH","#));
         socket.send(Message::Text(r#"["REQ","s",{"limit":1}]"#.into())).await.unwrap();
         let reply = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
         assert_eq!(reply.into_text().unwrap().as_str(), r#"["EOSE","s"]"#);

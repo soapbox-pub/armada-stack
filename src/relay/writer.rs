@@ -167,7 +167,7 @@ mod tests {
         let writer = Writer::spawn(store.clone(), hub.clone());
 
         let (link, mut rx, _) = Link::new(16);
-        hub.connect(1, link.clone(), Default::default()).await;
+        hub.connect(1, link.clone()).await;
         hub.subscribe(1, "s".into(), vec![Filter::parse(&serde_json::json!({})).unwrap()]).await.await.unwrap();
 
         let note = Event::sign(ALICE, 100, 1, vec![], "hi");

@@ -44,7 +44,6 @@ impl Harness {
         Harness { _dir: dir, url, relay: router, _cancel: cancel.drop_guard() }
     }
 
-    /// A client, past the AUTH challenge the relay greets it with.
     async fn client(&self) -> Client {
         self.client_via(None).await.unwrap()
     }
@@ -63,28 +62,16 @@ impl Harness {
             Err(Error::Http(response)) => return Err(response.status()),
             Err(error) => panic!("{error}"),
         };
-        let mut client = Client { socket, url: self.url.clone(), challenge: String::new() };
-        let greeting = client.recv().await;
-        assert_eq!(greeting[0], "AUTH", "{greeting}");
-        client.challenge = greeting[1].as_str().unwrap().to_string();
-        Ok(client)
+        Ok(Client { socket, url: self.url.clone() })
     }
 }
 
 struct Client {
     socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
     url: String,
-    challenge: String,
 }
 
 impl Client {
-    /// Authenticate as `secret`'s key, returning the OK.
-    async fn auth(&mut self, secret: &str) -> Value {
-        let event = Event::sign(secret, now(), 22_242, tags(&[&["relay", &self.url], &["challenge", &self.challenge]]), "");
-        self.send(json!(["AUTH", event])).await;
-        self.recv().await
-    }
-
     async fn send(&mut self, message: Value) {
         self.socket.send(Message::Text(message.to_string().into())).await.unwrap();
     }
@@ -266,18 +253,11 @@ async fn honors_deletion_and_replacement() {
     assert_eq!(reply[2], false);
     assert!(reply[3].as_str().unwrap().starts_with("blocked:"));
 
-    // Deletion requests are their author's alone to read.
+    // Deletion requests are anyone's to read.
     let author = crate::nostr::event::public_key(ALICE);
-    alice.send(json!(["REQ", "d", {"kinds": [5], "authors": [author]}])).await;
-    assert!(alice.recv().await[2].as_str().unwrap().starts_with("auth-required:"));
-    assert!(alice.query("all", &[json!({})]).await.iter().all(|event| event.kind != 5));
-    assert!(alice.query("id", &[json!({"ids": [deletion.id]})]).await.is_empty());
     let mut bob = harness.client().await;
-    bob.auth(BOB).await;
-    bob.send(json!(["REQ", "d", {"kinds": [5], "#e": [oops.id]}])).await;
-    assert!(bob.recv().await[2].as_str().unwrap().starts_with("restricted:"));
-    alice.auth(ALICE).await;
-    assert_eq!(alice.query("d", &[json!({"kinds": [5], "authors": [author]})]).await, [deletion]);
+    assert_eq!(bob.query("d", &[json!({"kinds": [5], "#e": [oops.id]})]).await, std::slice::from_ref(&deletion));
+    assert_eq!(bob.query("d", &[json!({"kinds": [5], "authors": [author]})]).await, [deletion]);
 }
 
 #[tokio::test]
@@ -322,7 +302,7 @@ async fn refuses_what_it_should() {
     client.send(json!({"not": "an array"})).await;
     assert_eq!(client.recv().await[0], "NOTICE");
     client.send(json!(["AUTH", "x"])).await;
-    assert_eq!(client.recv().await, json!(["NOTICE", "invalid: AUTH takes an event"]));
+    assert_eq!(client.recv().await, json!(["NOTICE", "unsupported: AUTH messages"]));
     client.send(json!(["COUNT", "x", {}])).await;
     assert_eq!(client.recv().await, json!(["CLOSED", "x", "unsupported: COUNT isn't supported"]));
     client.send(json!(["NEG-OPEN", "x", {}, ""])).await;
@@ -392,38 +372,6 @@ async fn refuses_a_client_with_no_address() {
     }
 }
 
-#[tokio::test]
-async fn authenticates_as_many_keys_as_it_may() {
-    let harness = Harness::new(RelayConfig { max_authed_keys: 2, ..RelayConfig::default() }).await;
-    let mut client = harness.client().await;
-    // Each connection is challenged afresh.
-    assert_ne!(harness.client().await.challenge, client.challenge);
-
-    assert_eq!(client.auth(ALICE).await[2], true);
-    assert_eq!(client.auth(BOB).await[2], true);
-    assert_eq!(client.auth(ALICE).await[2], true, "again is fine");
-    let reply = client.auth(CAROL).await;
-    assert_eq!(reply[2], false);
-    assert!(reply[3].as_str().unwrap().starts_with("restricted:"));
-
-    let auth = |kind, relay: &str, challenge: &str, at| Event::sign(CAROL, at, kind, tags(&[&["relay", relay], &["challenge", challenge]]), "");
-    let challenge = client.challenge.clone();
-    let url = client.url.clone();
-    for (event, error) in [
-        (auth(22_242, &url, "nope", now()), "invalid: that's not this connection's challenge"),
-        (auth(22_242, "wss://elsewhere.example.com", &challenge, now()), "invalid: that's not this relay"),
-        (auth(1, &url, &challenge, now()), "invalid: AUTH takes a kind 22242 event"),
-        (auth(22_242, &url, &challenge, now() - 3600), "invalid: created_at is too far from now"),
-    ] {
-        client.send(json!(["AUTH", event])).await;
-        assert_eq!(client.recv().await, json!(["OK", event.id, false, error]));
-    }
-    let mut forged = auth(22_242, &url, &challenge, now());
-    forged.pubkey = crate::nostr::event::public_key(ALICE);
-    client.send(json!(["AUTH", forged])).await;
-    assert_eq!(client.recv().await[3], "invalid: bad id or signature");
-}
-
 /// A gift wrap from `secret` to `recipient`'s key, backdated `ago` seconds
 /// as NIP-59 says, which tells apart ones made in the same second.
 fn wrap(secret: &str, kind: u16, recipient: &str, ago: i64) -> Event {
@@ -432,7 +380,7 @@ fn wrap(secret: &str, kind: u16, recipient: &str, ago: i64) -> Event {
 }
 
 #[tokio::test]
-async fn shows_gift_wraps_only_to_their_author_and_recipient() {
+async fn shows_gift_wraps_only_to_filters_naming_their_author_or_recipient() {
     let harness = Harness::new(RelayConfig::default()).await;
     let (alice, bob) = (crate::nostr::event::public_key(ALICE), crate::nostr::event::public_key(BOB));
     let mut sender = harness.client().await;
@@ -443,17 +391,11 @@ async fn shows_gift_wraps_only_to_their_author_and_recipient() {
     let first = wrap(BOB, policy::GIFT_WRAP, ALICE, 100);
     assert_eq!(sender.publish(&first).await, json!(["OK", first.id, true, ""]));
 
-    // Nobody may ask for anyone's.
+    // Nobody may ask for everyone's.
     stranger.send(json!(["REQ", "s", {"kinds": [1059]}])).await;
     let closed = stranger.recv().await;
     assert_eq!((&closed[0], &closed[1]), (&json!("CLOSED"), &json!("s")));
-    assert!(closed[2].as_str().unwrap().starts_with("auth-required:"), "{closed}");
-    stranger.send(json!(["REQ", "s", {"kinds": [1059], "#p": [alice]}])).await;
-    assert!(stranger.recv().await[2].as_str().unwrap().starts_with("auth-required:"));
-    // Authenticated as someone else, neither.
-    stranger.auth(CAROL).await;
-    stranger.send(json!(["REQ", "s", {"kinds": [1059]}])).await;
-    assert!(stranger.recv().await[2].as_str().unwrap().starts_with("restricted:"));
+    assert!(closed[2].as_str().unwrap().starts_with("restricted:"), "{closed}");
     // Filters without kinds, and lookups by id, just don't find it, even
     // beside a filter that names its author.
     assert!(stranger.query("all", &[json!({}), json!({"kinds": [1059], "authors": [crate::nostr::event::public_key(CAROL)]})]).await.is_empty());
@@ -462,15 +404,11 @@ async fn shows_gift_wraps_only_to_their_author_and_recipient() {
     assert!(stranger.query("id", &[json!({"ids": [first.id]}), json!({"kinds": [1059], "authors": [alice]})]).await.is_empty());
     assert!(stranger.query("p", &[json!({"kinds": [1059], "authors": [alice], "#p": [alice]})]).await.is_empty());
 
-    // Its recipient, by #p, and its author, by authors.
-    recipient.auth(ALICE).await;
+    // Its recipient, by #p, and its author, by authors, whoever asks.
     assert_eq!(recipient.query("inbox", &[json!({"kinds": [1059], "#p": [alice]})]).await, std::slice::from_ref(&first));
-    assert_eq!(recipient.query("id", &[json!({"ids": [first.id]})]).await, std::slice::from_ref(&first));
-    sender.auth(BOB).await;
     assert_eq!(sender.query("outbox", &[json!({"kinds": [1059], "authors": [bob]})]).await, std::slice::from_ref(&first));
 
     // Live, likewise.
-    recipient.send(json!(["CLOSE", "id"])).await;
     let second = wrap(BOB, policy::GIFT_WRAP, ALICE, 50);
     sender.publish(&second).await;
     assert_eq!(sender.recv().await[2]["id"], second.id);
@@ -491,7 +429,7 @@ async fn shows_gift_wraps_only_to_their_author_and_recipient() {
 
 /// A gift wrap's author is a throwaway key or a Concord stream address, so
 /// naming it is enough to read its wraps: that's how a Concord member reads
-/// a Control Plane only staff can sign, never authenticating as its key.
+/// a Control Plane only staff can sign.
 #[tokio::test]
 async fn shows_gift_wraps_to_filters_naming_their_author() {
     let harness = Harness::new(RelayConfig::default()).await;
@@ -505,17 +443,15 @@ async fn shows_gift_wraps_to_filters_naming_their_author() {
     let typing = wrap(BOB, policy::EPHEMERAL_GIFT_WRAP, ALICE, 0);
     sender.publish(&typing).await;
 
-    // Without authenticating at all.
     assert_eq!(reader.query("plane", &[json!({"kinds": [1059], "authors": [bob]})]).await, std::slice::from_ref(&first));
     assert_eq!(reader.query("both", &[json!({"kinds": [1059, 21059], "authors": [bob]})]).await, [typing.clone(), first.clone()]);
     assert_eq!(reader.query("id", &[json!({"ids": [first.id], "authors": [bob]})]).await, std::slice::from_ref(&first));
-    // But not alongside a kind that does need it.
-    reader.send(json!(["REQ", "s", {"kinds": [1059, 30078], "authors": [bob]}])).await;
-    assert!(reader.recv().await[2].as_str().unwrap().starts_with("auth-required:"));
+    // Alongside kinds anyone may read.
+    assert_eq!(reader.query("mixed", &[json!({"kinds": [1059, 30078], "authors": [bob]})]).await, std::slice::from_ref(&first));
 
     // Live, only to the filter that named it: another subscription of the
     // same connection, and others' subscriptions, get nothing.
-    for sub in ["plane", "both", "id"] {
+    for sub in ["plane", "both", "id", "mixed"] {
         reader.send(json!(["CLOSE", sub])).await;
     }
     reader.send(json!(["REQ", "live", {"kinds": [1059], "authors": [bob], "since": now()}, {"kinds": [0]}])).await;
@@ -533,35 +469,24 @@ async fn shows_gift_wraps_to_filters_naming_their_author() {
 }
 
 #[tokio::test]
-async fn shows_app_data_only_to_its_author() {
+async fn shows_app_data_to_anyone() {
     let harness = Harness::new(RelayConfig::default()).await;
     let alice = crate::nostr::event::public_key(ALICE);
     let mut client = harness.client().await;
     let settings = Event::sign(ALICE, now(), policy::APP_DATA.into(), tags(&[&["d", "armada/metadata"]]), &nip44::payload(100));
     assert_eq!(client.publish(&settings).await[2], true);
-
-    client.auth(BOB).await;
-    client.send(json!(["REQ", "s", {"kinds": [30078], "authors": [alice]}])).await;
-    assert!(client.recv().await[2].as_str().unwrap().starts_with("auth-required:"));
-    // A recipient is no one to app data.
-    let bob = crate::nostr::event::public_key(BOB);
-    client.send(json!(["REQ", "s", {"kinds": [30078], "#p": [bob]}])).await;
-    assert!(client.recv().await[2].as_str().unwrap().starts_with("auth-required:"));
-
-    client.auth(ALICE).await;
-    assert_eq!(client.query("s", &[json!({"kinds": [30078], "authors": [alice]})]).await, [settings]);
+    let mut stranger = harness.client().await;
+    assert_eq!(stranger.query("s", &[json!({"kinds": [30078], "authors": [alice]})]).await, [settings]);
 }
 
+/// NIP-70 has a relay take a protected event only from a connection
+/// authenticated as its author, and there's no authenticating here.
 #[tokio::test]
-async fn takes_protected_events_only_from_their_author() {
+async fn refuses_protected_events() {
     let harness = Harness::new(RelayConfig::default()).await;
     let mut client = harness.client().await;
     let status = Event::sign(ALICE, now(), STATUS.into(), tags(&[&["d", ""], &["-"]]), "mine");
-    assert_eq!(client.publish(&status).await[3], "auth-required: only its author may publish this event");
-    client.auth(BOB).await;
-    assert_eq!(client.publish(&status).await[2], false);
-    client.auth(ALICE).await;
-    assert_eq!(client.publish(&status).await, json!(["OK", status.id, true, ""]));
+    assert!(client.publish(&status).await[3].as_str().unwrap().starts_with("blocked:"));
 }
 
 #[tokio::test]
@@ -588,13 +513,13 @@ async fn describes_itself() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let info: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(info["software"], "armada-stack");
-    assert_eq!(info["supported_nips"], json!([1, 9, 11, 40, 42, 62, 70]));
+    assert_eq!(info["supported_nips"], json!([1, 9, 11, 40, 62]));
     assert_eq!(info["limitation"]["restricted_writes"], true);
     assert_eq!(info["limitation"]["max_limit"], 500);
 }
 
-/// NIP-46 runs between a client's throwaway key and a remote signer, and
-/// neither authenticates: each finds what's meant for it by naming itself.
+/// NIP-46 runs between a client's throwaway key and a remote signer: each
+/// finds what's meant for it by naming itself.
 #[tokio::test]
 async fn carries_nip46_between_parties_that_name_themselves() {
     let harness = Harness::new(RelayConfig::default()).await;
@@ -610,9 +535,9 @@ async fn carries_nip46_between_parties_that_name_themselves() {
     // Someone watching the signer's outbox, by its author.
     stranger.send(json!(["REQ", "outbox", {"kinds": [24133], "authors": [signer]}])).await;
     assert_eq!(stranger.recv().await, json!(["EOSE", "outbox"]));
-    // Asking for everyone's is still refused, and without kinds finds none.
+    // Asking for everyone's is refused, and without kinds finds none.
     stranger.send(json!(["REQ", "all", {"kinds": [24133]}])).await;
-    assert!(stranger.recv().await[2].as_str().unwrap().starts_with("auth-required:"));
+    assert!(stranger.recv().await[2].as_str().unwrap().starts_with("restricted:"));
     stranger.send(json!(["REQ", "any", {}])).await;
     assert_eq!(stranger.recv().await, json!(["EOSE", "any"]));
 
