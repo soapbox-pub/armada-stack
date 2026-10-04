@@ -42,6 +42,9 @@ pub struct Site {
 /// Where a Vite build puts its chunks, each named by its content.
 pub const ASSETS: &str = "/assets/";
 
+/// Where software probes a site for a capability (RFC 8615).
+const WELL_KNOWN: &str = "/.well-known";
+
 /// What a request path resolved to.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Resolved<'a> {
@@ -96,9 +99,14 @@ impl Site {
     /// is a route. A chunk no kept version has is a 404, as Armada's own
     /// hosting answered, which its chunk-error recovery takes as the cue to
     /// reload onto the version being served.
+    ///
+    /// And except under [`WELL_KNOWN`]: what asks there is software probing
+    /// for a capability — Universal Links, WebFinger, NIP-05 — and any page
+    /// at all, let alone the shell under a `200`, tells it the site has one.
     pub fn resolve(&self, request_path: &str) -> Option<(Resolved<'_>, &File)> {
         let normalized = normalize_site_path(request_path);
-        if normalized.starts_with(ASSETS) {
+        let well_known = normalized.strip_prefix(WELL_KNOWN).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'));
+        if normalized.starts_with(ASSETS) || well_known {
             return self.files.get_key_value(&normalized).map(|(path, file)| (Resolved { path, shell: false }, file));
         }
         let mut candidates: Vec<(String, bool)> = vec![(normalized.clone(), false)];
@@ -200,5 +208,18 @@ mod tests {
         assert_eq!(resolve(&app, "/assets/../settings"), shell());
         assert_eq!(resolve(&app, "/assetsx/gone.js"), shell());
         assert_eq!(resolve(&site(&["/about.html"]), "/missing"), None);
+    }
+
+    #[test]
+    fn well_known_is_the_file_or_nothing() {
+        let aasa = "/.well-known/apple-app-site-association";
+        let app = site(&["/index.html", "/404.html", aasa, "/.well-known/matrix.html", "/.well-known/x/index.html"]);
+        assert_eq!(resolve(&app, aasa), Some((aasa.into(), false)));
+        assert_eq!(resolve(&app, "/.well-known/nostr.json"), None);
+        assert_eq!(resolve(&app, "/.well-known/matrix"), None);
+        assert_eq!(resolve(&app, "/.well-known/x"), None);
+        assert_eq!(resolve(&app, "/.well-known/"), None);
+        assert_eq!(resolve(&app, "/.well-known"), None);
+        assert_eq!(resolve(&app, "/.well-known-x/foo"), Some(("/404.html".into(), true)));
     }
 }
