@@ -16,25 +16,35 @@ Encrypt. You won't need a reverse proxy.
 ## 1. Download
 
 Each release has prebuilt binaries for Linux on x86_64 and on aarch64
-(ARM64). They're statically linked, so they run on any distribution. Their
-download links are in the release on gitworkshop.dev, under
-`nostr://npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/git.shakespeare.diy/armada-stack`.
-With [ngit](https://ngit.dev/install) installed, this lists the same links:
+(ARM64). They're statically linked, so they run on any distribution.
+
+Releases are published on Nostr and signed by Soapbox's key,
+`npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj`. To find
+the latest release and its download links, use [ngit](https://ngit.dev/install).
+`ngit release` has to run inside a git repository, so make an empty one
+for it:
 
 ```sh
-ngit release list --repo nostr://npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/git.shakespeare.diy/armada-stack
-ngit release view armada-stack@0.1.0 --repo nostr://npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/git.shakespeare.diy/armada-stack
+REPO=nostr://npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/git.shakespeare.diy/armada-stack
+git init -q /tmp/armada-releases && cd /tmp/armada-releases
+ngit release list --repo "$REPO"
+ngit release view armada-stack@0.1.0 --repo "$REPO" --verify
 ```
 
-Releases are signed by Soapbox's key, `npub10qdp2…`. Check that before
-trusting one.
+`view` prints each file's URL and sha256. `--verify` downloads every file and
+checks it. The links are Blossom URLs named by the file's hash, so they don't
+change once a release is out.
 
-On the server, download the binary for its architecture (`uname -m` says
-which) and the release's `SHA256SUMS`, and check one against the other:
+For 0.1.0, download the binary for the server's architecture (`uname -m`
+says which) and the release's `SHA256SUMS`, then check one against the other:
 
 ```sh
-curl -fLo armada-0.1.0-linux-x86_64 <binary URL from the release>
-curl -fLo SHA256SUMS <SHA256SUMS URL from the release>
+# x86_64
+curl -fLo armada-0.1.0-linux-x86_64 https://blossom.ditto.pub/d2545811934f7c1eeffe28968ecba3056bae6b016aa5f50187cbc859202be1a5
+# aarch64
+curl -fLo armada-0.1.0-linux-aarch64 https://blossom.ditto.pub/5a2debc9dd2df2522749463b6585f5a088315a600b6ff83e78f9ac8342573d36
+
+curl -fLo SHA256SUMS https://blossom.ditto.pub/6e7a0bf1f73f11b31e18c4d7ec4d00ba31de09797a57cb0fa00f9e4b5b1298ef
 sha256sum --check --ignore-missing SHA256SUMS
 ```
 
