@@ -5,9 +5,10 @@
 #
 # With a domain, this sets up a whole server: the binary, an armada user,
 # /etc/armada/armada.toml, and a systemd service that gets its own HTTPS
-# certificate from Let's Encrypt. Without one, it installs or upgrades the
-# binary alone, restarting the service if there is one. Run it again to
-# upgrade.
+# certificate from Let's Encrypt. Without one, on a fresh install with a
+# terminal, it asks for the domain. Run it again, with or without the
+# domain, to upgrade: it installs the latest binary and refreshes and
+# restarts the service if one is set up.
 #
 # Releases are found on Nostr and trusted only if signed by Soapbox's key,
 # npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj. The
@@ -34,7 +35,8 @@ Install armada from its latest signed release.
   install.sh [DOMAIN] [--email EMAIL] [--version VERSION]
 
   DOMAIN             set up a server for this domain, which must already
-                     point here. Without it, install or upgrade the binary.
+                     point here. Without it, a fresh install asks for one,
+                     and an existing server is upgraded.
   --email EMAIL      give Let's Encrypt an address to write to about the
                      certificate
   --version VERSION  install this release instead of the latest
@@ -525,8 +527,9 @@ write_config() {
 	say "wrote $CONFIG; every other setting has a default"
 }
 
-write_unit() {
-	cat >"$UNIT" <<'EOF'
+# The systemd unit, as deploy/armada.service has it.
+unit_text() {
+	cat <<'EOF'
 [Unit]
 Description=Armada (web app, relay, Blossom, AV broker)
 After=network-online.target
@@ -585,17 +588,25 @@ set_up_server() {
 
 	if [ -e "$CONFIG" ]; then
 		say "keeping the existing $CONFIG"
-		grep -q "^public_url = \"https://$DOMAIN\"" "$CONFIG" ||
-			say "note: its public_url isn't https://$DOMAIN"
 	else
 		write_config
 	fi
 
-	write_unit
-	systemctl daemon-reload </dev/null
 	systemctl enable armada </dev/null >/dev/null 2>&1
+	start_service
+}
+
+# Install the unit, (re)start the service, and wait for it to answer at
+# https://$DOMAIN/, when there's a domain to ask.
+start_service() {
+	cp "$TMP/unit" "$UNIT"
+	systemctl daemon-reload </dev/null
 	systemctl restart armada </dev/null
-	say "started the armada service; getting a certificate for $DOMAIN"
+	if [ -z "$DOMAIN" ]; then
+		say "restarted the armada service"
+		return
+	fi
+	say "started the armada service; waiting for https://$DOMAIN/"
 
 	if wait_for_https 120; then
 		say "armada is running at https://$DOMAIN/"
@@ -605,6 +616,28 @@ set_up_server() {
 		say "See what armada says with: journalctl -u armada -e"
 		exit 1
 	fi
+}
+
+# The domain in the existing config's public_url, or nothing.
+config_domain() {
+	sed -n 's|^[[:space:]]*public_url[[:space:]]*=[[:space:]]*"https://\([^/"]*\)/\{0,1\}".*|\1|p' "$CONFIG" | head -n 1
+}
+
+valid_domain() {
+	case "$1" in
+	*[!A-Za-z0-9.-]* | .* | *. | *..*) return 1 ;;
+	esac
+}
+
+# Ask for the domain on the terminal; under curl | sh, stdin is the script.
+prompt_domain() {
+	while :; do
+		printf '%s\n%s' "armada: Domain for this server, e.g. armada.example.com" \
+			"        (it must already point here; leave blank to install only the binary): " >/dev/tty
+		read -r DOMAIN </dev/tty || DOMAIN=
+		valid_domain "$DOMAIN" && return
+		say "$DOMAIN isn't a domain name"
+	done
 }
 
 main() {
@@ -632,9 +665,7 @@ main() {
 			;;
 		esac
 	done
-	case "$DOMAIN" in
-	*[!A-Za-z0-9.-]* | .* | *. | *..*) die "$DOMAIN isn't a domain name" ;;
-	esac
+	valid_domain "$DOMAIN" || die "$DOMAIN isn't a domain name"
 	case "$EMAIL" in
 	*[\"\\\ ]*) die "$EMAIL isn't an email address" ;;
 	esac
@@ -646,6 +677,17 @@ main() {
 	*) die "There's no release for $(uname -m) yet; INSTALL.md says how to build from source." ;;
 	esac
 	[ "$(id -u)" -eq 0 ] || die "Run this as root, e.g. curl -fsSL <URL> | sudo sh -s -- $DOMAIN"
+
+	if [ -e "$CONFIG" ]; then
+		# Moving domains means a new certificate and a new public_url, which
+		# is a decision for whoever edits the config, not a rerun.
+		existing=$(config_domain)
+		if [ -n "$DOMAIN" ] && [ -n "$existing" ] && [ "$DOMAIN" != "$existing" ]; then
+			die "$CONFIG is for $existing. To move to $DOMAIN, edit its public_url; to upgrade, run this without a domain."
+		fi
+	elif [ -z "$DOMAIN" ] && (: </dev/tty) 2>/dev/null; then
+		prompt_domain
+	fi
 
 	TMP=$(mktemp -d)
 	trap 'rm -rf "$TMP"' EXIT
@@ -663,21 +705,28 @@ main() {
 	[ "$("$TMP/armada" --version)" = "armada $version" ] ||
 		die "The downloaded binary doesn't say it's version $version."
 
-	if [ -z "$DOMAIN" ] && [ -x "$BIN" ] && cmp -s "$TMP/armada" "$BIN"; then
+	if [ -x "$BIN" ] && cmp -s "$TMP/armada" "$BIN"; then
+		changed=false
 		say "armada $version is already installed at $BIN"
-		return
+	else
+		changed=true
+		mkdir -p "$(dirname "$BIN")"
+		cp "$TMP/armada" "$BIN.new"
+		mv -f "$BIN.new" "$BIN"
+		say "installed armada $version at $BIN"
 	fi
-
-	mkdir -p "$(dirname "$BIN")"
-	cp "$TMP/armada" "$BIN.new"
-	mv -f "$BIN.new" "$BIN"
-	say "installed armada $version at $BIN"
+	unit_text >"$TMP/unit"
 
 	if [ -n "$DOMAIN" ]; then
 		set_up_server
-	elif [ -d /run/systemd/system ] && systemctl is-active --quiet armada </dev/null 2>&1; then
-		systemctl restart armada </dev/null
-		say "restarted the armada service"
+	elif [ -e "$UNIT" ] && [ -d /run/systemd/system ]; then
+		# A server is set up: an upgrade. Leave it be only if nothing changed
+		# and it's running.
+		if ! $changed && cmp -s "$TMP/unit" "$UNIT" && systemctl is-active --quiet armada </dev/null; then
+			return
+		fi
+		[ -e "$CONFIG" ] && DOMAIN=$(config_domain)
+		start_service
 	else
 		say "to set up a server, run this again with its domain"
 	fi
