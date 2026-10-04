@@ -19,6 +19,8 @@ use crate::nostr::event::is_hex64;
 pub const DELETION: u16 = 5;
 pub const VANISH: u16 = 62;
 pub const GIFT_WRAP: u16 = 1059;
+/// A Concord Community listed on Discover, by an invite link anyone may use.
+const ANNOUNCEMENT: u16 = 3314;
 pub const EPHEMERAL_GIFT_WRAP: u16 = 21059;
 pub const AUTH: u16 = 22242;
 pub const NIP46: u16 = 24133;
@@ -32,6 +34,7 @@ pub const KINDS: &[u16] = &[
     DELETION,
     VANISH,
     GIFT_WRAP,
+    ANNOUNCEMENT,
     10000,
     10002,
     10007,
@@ -260,6 +263,8 @@ pub fn validate(event: &Event, now: i64, relay: &str) -> Result<(), String> {
         }
         13303 | APP_DATA | 33302 => content(event, Content::Nip44),
         16767 | 36767 => content(event, Content::Empty),
+        ANNOUNCEMENT if is_invite_link(&event.content) => Ok(()),
+        ANNOUNCEMENT => Err("invalid: an announcement's content must be one invite link".into()),
         30030 => each(event, "emoji", |tag| tag.len() >= 3 && is_shortcode(&tag[1]) && is_http_url(&tag[2])),
         INVITE_BUNDLE => {
             if event.tag("d") != Some("") {
@@ -403,6 +408,29 @@ fn is_nip04(content: &str) -> bool {
     let Some((ciphertext, iv)) = content.split_once("?iv=") else { return false };
     let (Ok(ciphertext), Ok(iv)) = (STANDARD.decode(ciphertext), STANDARD.decode(iv)) else { return false };
     !ciphertext.is_empty() && ciphertext.len() % 16 == 0 && iv.len() == 16
+}
+
+/// An invite link as Armada parses one: `naddr1…#<fragment>`, or an http(s)
+/// URL of `/invite/naddr1…#<fragment>`, where the naddr is an invite
+/// bundle's (kind 33301, empty `d`) and the fragment is base64url. What the
+/// fragment holds is the link's business; it's checked only for its alphabet.
+fn is_invite_link(content: &str) -> bool {
+    let (naddr, fragment) = match content.split_once('#') {
+        Some((naddr, fragment)) if naddr.starts_with("naddr1") => (naddr.to_string(), fragment.to_string()),
+        _ => {
+            let Ok(url) = url::Url::parse(content) else { return false };
+            if !matches!(url.scheme(), "http" | "https") {
+                return false;
+            }
+            let Some(naddr) = url.path().strip_prefix("/invite/") else { return false };
+            (crate::util::decode_path(naddr).trim_end_matches('/').to_string(), url.fragment().unwrap_or_default().to_string())
+        }
+    };
+    let bundle = matches!(
+        crate::nostr::nip19::decode(&naddr),
+        Ok(crate::nostr::nip19::Decoded::Naddr { kind, identifier, .. }) if kind == u32::from(INVITE_BUNDLE) && identifier.is_empty()
+    );
+    bundle && !fragment.is_empty() && fragment.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// A canonical decimal: digits only, no sign, no leading zeros.
@@ -604,6 +632,36 @@ mod tests {
         refused(INVITE_BUNDLE, &[&["d", ""], &["vsk", "9"]], &blob);
         refused(INVITE_BUNDLE, &[&["d", "x"], &["vsk", "6"]], &blob);
         refused(INVITE_BUNDLE, &[&["d", ""], &["vsk", "7"]], &blob);
+    }
+
+    #[test]
+    fn checks_announcements() {
+        use crate::nostr::nip19::naddr_encode;
+        let alice = public_key(ALICE);
+        let bundle = naddr_encode(&alice, 33301, "", &[]);
+        let fragment = "AQEgc2VjcmV0LXRva2VuLWJ5dGVz_-0";
+        for link in [
+            format!("https://armada.buzz/invite/{bundle}#{fragment}"),
+            format!("http://localhost:8080/invite/{bundle}/#{fragment}"),
+            format!("{bundle}#{fragment}"),
+        ] {
+            ok(ANNOUNCEMENT, &[&["client", "Armada"]], &link);
+        }
+        for content in [
+            String::new(),
+            "join us".to_string(),
+            format!("join us: https://armada.buzz/invite/{bundle}#{fragment}"),
+            format!("https://armada.buzz/invite/{bundle}"),
+            format!("https://armada.buzz/invite/{bundle}#"),
+            format!("https://armada.buzz/invite/{bundle}#not base64"),
+            format!("https://armada.buzz/i/{bundle}#{fragment}"),
+            format!("ftp://armada.buzz/invite/{bundle}#{fragment}"),
+            format!("https://armada.buzz/invite/{}#{fragment}", naddr_encode(&alice, 33301, "x", &[])),
+            format!("https://armada.buzz/invite/{}#{fragment}", naddr_encode(&alice, 30023, "", &[])),
+            format!("https://armada.buzz/invite/naddr1nope#{fragment}"),
+        ] {
+            assert!(refused(ANNOUNCEMENT, &[], &content).starts_with("invalid:"), "{content:?}");
+        }
     }
 
     #[test]
