@@ -1,0 +1,117 @@
+name: Release
+
+# On a version tag (vX.Y.Z): test, build static Linux binaries for x86_64 and
+# aarch64, and publish them as an ngit release (NIP-82) signed by the Soapbox
+# key, as .ngit/release.yaml describes. The binaries are also uploaded as run
+# artifacts first, so a failed publish still leaves them on the CI result.
+#
+# Secrets, provisioned for this repository on the coordinator:
+#   RELEASE_NBUNKSEC  an nbunksec for a remote signer session on the Soapbox
+#                     key (npub10qdp2…), which owns the application. Releases
+#                     signed by any other key are refused by `pubkey` in the
+#                     manifest.
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Pinned with their checksums: these run with the release signer in the
+      # environment.
+      ZIG_VERSION: 0.16.0
+      ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+      ZIGBUILD_VERSION: 0.23.4
+      ZIGBUILD_SHA256: 9e3cf73485edbd45905c8aadbc0fdf869c7ddc3848f0c898229f2680db52e44b
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches Cargo.toml
+        id: version
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          cargo_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)"
+          if [ "$version" != "$cargo_version" ]; then
+            echo "Tag $GITHUB_REF_NAME doesn't match Cargo.toml's version $cargo_version." >&2
+            exit 1
+          fi
+          grep -qE "^## \[?v?$version\]?( |$)" CHANGELOG.md || {
+            echo "CHANGELOG.md has no section for $version." >&2
+            exit 1
+          }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust, zig and cargo-zigbuild
+        run: |
+          set -eu
+          if ! command -v rustup >/dev/null; then
+            curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+
+          tools="$RUNNER_TEMP/tools"
+          mkdir -p "$tools"
+          cd "$tools"
+          curl -fsSL -o zig.tar.xz "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz"
+          echo "$ZIG_SHA256  zig.tar.xz" | sha256sum -c -
+          tar -xJf zig.tar.xz
+          curl -fsSL -o zigbuild.tar.xz "https://github.com/rust-cross/cargo-zigbuild/releases/download/v$ZIGBUILD_VERSION/cargo-zigbuild-x86_64-unknown-linux-musl.tar.xz"
+          echo "$ZIGBUILD_SHA256  zigbuild.tar.xz" | sha256sum -c -
+          tar -xJf zigbuild.tar.xz
+          echo "$tools/zig-x86_64-linux-$ZIG_VERSION" >> "$GITHUB_PATH"
+          echo "$tools/cargo-zigbuild-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -eu
+          zig version
+          cargo-zigbuild --version
+          mkdir -p dist
+          for arch in x86_64 aarch64; do
+            cargo zigbuild --release --locked --target "$arch-unknown-linux-musl"
+            cp "${CARGO_TARGET_DIR:-target}/$arch-unknown-linux-musl/release/armada" "dist/armada-$VERSION-linux-$arch"
+          done
+          # The x86_64 build has to run here, and run anywhere: no dynamic
+          # loader, no libc.
+          ./dist/armada-$VERSION-linux-x86_64 --version
+          file dist/* || true
+          (cd dist && sha256sum armada-* > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: armada-${{ steps.version.outputs.version }}
+          path: dist/
+          if-no-files-found: error
+
+      - uses: danconwaydev/setup-ngit@v3
+
+      - name: Publish the release
+        env:
+          RELEASE_NBUNKSEC: ${{ secrets.RELEASE_NBUNKSEC }}
+        run: |
+          set -eu
+          : "${RELEASE_NBUNKSEC:?Set the RELEASE_NBUNKSEC secret.}"
+          umask 077
+          printf '%s' "$RELEASE_NBUNKSEC" > "$RUNNER_TEMP/nbunksec"
+          # The checkout's remote is the coordinator's clone, so name the
+          # repository; the version comes from the tag.
+          ngit release publish --defaults \
+            --repo nostr://npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/git.shakespeare.diy/armada-stack \
+            --tag "$GITHUB_REF_NAME" \
+            --nbunksec-file "$RUNNER_TEMP/nbunksec"
+
+      - name: Remove the signer
+        if: ${{ always() }}
+        run: rm -f "$RUNNER_TEMP/nbunksec"

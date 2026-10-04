@@ -1,0 +1,28 @@
+# What `ngit release publish` publishes for a version tag. The release
+# workflow (.ngit/act/workflows/release.yml) builds the files named here and
+# then runs it; see https://ngit.dev/releases/manifest for the fields.
+schema: 1
+application: armada-stack
+# Every release of an application has to come from the key that published the
+# first, so publishing fails before anything is uploaded under another one.
+pubkey: npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj
+name: Armada Stack
+summary: Self-host Armada in one binary
+description: |
+  Armada's web app, a Nostr relay, a Blossom server, and a Concord AV broker,
+  served from one domain by one static binary. See INSTALL.md.
+license: AGPL-3.0-only
+repository: nostr://npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/git.shakespeare.diy/armada-stack
+release_notes: CHANGELOG.md
+publication:
+  blossom_servers:
+    - https://blossom.ditto.pub
+    - https://blossom.dreamith.to
+    - https://blossom.primal.net
+assets:
+  - file: dist/armada-{version}-linux-x86_64
+    platforms: [linux-x86_64]
+  - file: dist/armada-{version}-linux-aarch64
+    platforms: [linux-aarch64]
+  - file: dist/SHA256SUMS
+    platform_agnostic: true
