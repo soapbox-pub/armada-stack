@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install armada, the self-hosted Armada server, from its latest release.
 #
-#   curl -fsSL <this script's URL> | sudo sh -s -- armada.example.com
+#   curl -fsSL https://armada.buzz/install.sh | sudo sh -s -- armada.example.com
 #
 # With a domain, this sets up a whole server: the binary, an armada user,
 # /etc/armada/armada.toml, and a systemd service that gets its own HTTPS
@@ -41,7 +41,7 @@ Install armada from its latest signed release.
                      certificate
   --version VERSION  install this release instead of the latest
 
-Run as root: curl -fsSL <URL> | sudo sh -s -- armada.example.com
+Run as root: curl -fsSL https://armada.buzz/install.sh | sudo sh -s -- armada.example.com
 EOF
 }
 
@@ -676,7 +676,7 @@ main() {
 	aarch64 | arm64) PLATFORM=linux-aarch64 ;;
 	*) die "There's no release for $(uname -m) yet; INSTALL.md says how to build from source." ;;
 	esac
-	[ "$(id -u)" -eq 0 ] || die "Run this as root, e.g. curl -fsSL <URL> | sudo sh -s -- $DOMAIN"
+	[ "$(id -u)" -eq 0 ] || die "Run this as root, e.g. curl -fsSL https://armada.buzz/install.sh | sudo sh -s -- $DOMAIN"
 
 	if [ -e "$CONFIG" ]; then
 		# Moving domains means a new certificate and a new public_url, which

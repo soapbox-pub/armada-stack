@@ -47,7 +47,7 @@ ports there.
 On the server, run [`install.sh`](install.sh) as root with your domain:
 
 ```sh
-curl -fsSL <install.sh URL> | sudo sh -s -- armada.example.com
+curl -fsSL https://armada.buzz/install.sh | sudo sh -s -- armada.example.com
 ```
 
 From a copy of this repository, that's `sudo sh install.sh armada.example.com`.
@@ -106,7 +106,7 @@ server's relay and Blossom server alongside Armada's public ones.
 Run the installer again, with or without the domain:
 
 ```sh
-curl -fsSL <install.sh URL> | sudo sh
+curl -fsSL https://armada.buzz/install.sh | sudo sh
 ```
 
 It installs the latest release, refreshes the systemd unit, and restarts the
