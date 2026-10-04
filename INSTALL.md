@@ -12,20 +12,33 @@ Encrypt. You won't need a reverse proxy.
 - A domain or subdomain you can point at it, such as `armada.example.com`.
 - Ports 80 and 443 open to the internet. Let's Encrypt checks port 80 when it
   issues the certificate.
-- A machine with Rust 1.88 or newer and a C compiler to build on. The build
-  compiles LMDB, so it needs `cc`.
 
-## 1. Build
+## 1. Download
+
+Each release has prebuilt binaries for Linux on x86_64 and on aarch64
+(ARM64). They're statically linked, so they run on any distribution. Their
+download links are in the release on gitworkshop.dev, under
+`nostr://npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/git.shakespeare.diy/armada-stack`.
+With [ngit](https://ngit.dev/install) installed, this lists the same links:
 
 ```sh
-git clone <this repository> armada-stack
-cd armada-stack
-cargo build --release
+ngit release list --repo nostr://npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/git.shakespeare.diy/armada-stack
+ngit release view armada-stack@0.1.0 --repo nostr://npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/git.shakespeare.diy/armada-stack
 ```
 
-The binary is `target/release/armada`. It links against glibc dynamically, so
-build it on a machine whose glibc is no newer than the server's. The easy way
-is to build on the server itself, or on the same distribution.
+Releases are signed by Soapbox's key, `npub10qdp2…`. Check that before
+trusting one.
+
+On the server, download the binary for its architecture (`uname -m` says
+which) and the release's `SHA256SUMS`, and check one against the other:
+
+```sh
+curl -fLo armada-0.1.0-linux-x86_64 <binary URL from the release>
+curl -fLo SHA256SUMS <SHA256SUMS URL from the release>
+sha256sum --check --ignore-missing SHA256SUMS
+```
+
+To build it yourself instead, see [Building from source](#building-from-source).
 
 ## 2. Point DNS at the server
 
@@ -58,11 +71,10 @@ ports there.
 
 ## 4. Install
 
-Copy the binary to the server and create a user for it to run as:
+Install the binary and create a user for it to run as:
 
 ```sh
-scp target/release/armada root@SERVER:/usr/local/bin/armada
-ssh root@SERVER
+install -m 755 armada-0.1.0-linux-x86_64 /usr/local/bin/armada
 useradd --system --home-dir /var/lib/armada --shell /usr/sbin/nologin armada
 mkdir -p /etc/armada
 ```
@@ -127,16 +139,17 @@ server's relay and Blossom server alongside Armada's public ones.
 
 ## Upgrading
 
-Build a new binary, copy it over the old one, and restart:
+Download and check the new release's binary as in step 1, then put it in
+place and restart:
 
 ```sh
-cargo build --release
-scp target/release/armada root@SERVER:/usr/local/bin/armada.new
-ssh root@SERVER 'mv /usr/local/bin/armada.new /usr/local/bin/armada && systemctl restart armada'
+install -m 755 armada-X.Y.Z-linux-x86_64 /usr/local/bin/armada.new
+mv /usr/local/bin/armada.new /usr/local/bin/armada
+systemctl restart armada
 ```
 
-Copying to a new name and then moving it into place replaces the file in one
-step, so the old binary is never left half-overwritten while it's running.
+Installing under a new name and then moving it into place replaces the file
+in one step, so the running binary is never half-overwritten.
 
 ## Backups
 
@@ -186,6 +199,26 @@ public_url = "https://armada.example.com"
 The proxy must pass WebSocket upgrades through, for the relay and `/rtc`.
 It must not buffer or limit request bodies below the Blossom upload size,
 which is 100 MB by default.
+
+## Building from source
+
+You need Rust 1.88 or newer and a C compiler, because the build compiles
+LMDB:
+
+```sh
+git clone nostr://npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/git.shakespeare.diy/armada-stack
+cd armada-stack
+cargo build --release
+```
+
+Cloning a `nostr://` URL needs [ngit](https://ngit.dev/install). The binary is
+`target/release/armada`. It links glibc dynamically, so build it on a machine
+whose glibc is no newer than the server's. The simplest way is to build on the
+server itself.
+
+The release binaries are built differently: statically against musl, by
+[cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild). See
+`.ngit/act/workflows/release.yml`.
 
 ## Logs
 
