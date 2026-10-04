@@ -52,7 +52,8 @@ curl -fsSL <install.sh URL> | sudo sh -s -- armada.example.com
 
 From a copy of this repository, that's `sudo sh install.sh armada.example.com`.
 Add `--email you@example.com` to give Let's Encrypt an address to write to
-about the certificate.
+about the certificate. Leave the domain off and it asks for one; leave the
+answer blank and it installs only the binary.
 
 The script:
 
@@ -74,7 +75,7 @@ armada: downloaded https://blossom.ditto.pub/d254…e1a5 and checked its sha256,
 armada: installed armada 0.1.0 at /usr/local/bin/armada
 armada: created the armada user
 armada: wrote /etc/armada/armada.toml; every other setting has a default
-armada: started the armada service; getting a certificate for armada.example.com
+armada: started the armada service; waiting for https://armada.example.com/
 armada: armada is running at https://armada.example.com/
 ```
 
@@ -102,12 +103,17 @@ server's relay and Blossom server alongside Armada's public ones.
 
 ## Upgrading
 
-Run the installer again. Without a domain, it replaces the binary with the
-latest release and restarts the service:
+Run the installer again, with or without the domain:
 
 ```sh
 curl -fsSL <install.sh URL> | sudo sh
 ```
+
+It installs the latest release, refreshes the systemd unit, and restarts the
+service, starting it if it was stopped, then waits for HTTPS. If everything is
+already current and running, it changes nothing. Your config is never
+rewritten. A different domain from the config's is refused: to move domains,
+edit `public_url` and restart.
 
 `--version 0.1.0` installs a particular release instead, to go back to one.
 
