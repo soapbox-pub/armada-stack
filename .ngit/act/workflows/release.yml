@@ -5,11 +5,12 @@ name: Release
 # key, as .ngit/release.yaml describes. The binaries are also uploaded as run
 # artifacts first, so a failed publish still leaves them on the CI result.
 #
-# Secrets, provisioned for this repository on the coordinator:
-#   RELEASE_NBUNKSEC  an nbunksec for a remote signer session on the Soapbox
-#                     key (npub10qdp2…), which owns the application. Releases
-#                     signed by any other key are refused by `pubkey` in the
-#                     manifest.
+# Secrets, provisioned on the coordinator under its #SOAPBOX alias, which
+# covers every repository of the Soapbox key:
+#   NSYTE_BUNKER  an nbunksec for a remote signer session on the Soapbox key
+#                 (npub10qdp2…), which owns the application. The same session
+#                 publishes Armada's nsite, hence the name. Releases signed by
+#                 any other key are refused by `pubkey` in the manifest.
 
 on:
   push:
@@ -99,12 +100,12 @@ jobs:
 
       - name: Publish the release
         env:
-          RELEASE_NBUNKSEC: ${{ secrets.RELEASE_NBUNKSEC }}
+          NSYTE_BUNKER: ${{ secrets.NSYTE_BUNKER }}
         run: |
           set -eu
-          : "${RELEASE_NBUNKSEC:?Set the RELEASE_NBUNKSEC secret.}"
+          : "${NSYTE_BUNKER:?NSYTE_BUNKER is not set; ask the ngit-ci operator to provision it for #SOAPBOX.}"
           umask 077
-          printf '%s' "$RELEASE_NBUNKSEC" > "$RUNNER_TEMP/nbunksec"
+          printf '%s' "$NSYTE_BUNKER" > "$RUNNER_TEMP/nbunksec"
           # The checkout's remote is the coordinator's clone, so name the
           # repository; the version comes from the tag.
           ngit release publish --defaults \
