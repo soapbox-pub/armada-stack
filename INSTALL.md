@@ -7,50 +7,13 @@ Encrypt. You won't need a reverse proxy.
 
 ## What you need
 
-- A Linux server with a public IP address. 2 CPUs and 4 GB of RAM is plenty
-  to start. Ubuntu 24.04 is what this guide was tested on.
+- A Linux server with systemd and a public IP address, on x86_64 or aarch64
+  (ARM64). 2 CPUs and 4 GB of RAM is plenty to start.
 - A domain or subdomain you can point at it, such as `armada.example.com`.
 - Ports 80 and 443 open to the internet. Let's Encrypt checks port 80 when it
   issues the certificate.
 
-## 1. Download
-
-Each release has prebuilt binaries for Linux on x86_64 and on aarch64
-(ARM64). They're statically linked, so they run on any distribution.
-
-Releases are published on Nostr and signed by Soapbox's key,
-`npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj`. To find
-the latest release and its download links, use [ngit](https://ngit.dev/install).
-`ngit release` has to run inside a git repository, so make an empty one
-for it:
-
-```sh
-REPO=nostr://npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/git.shakespeare.diy/armada-stack
-git init -q /tmp/armada-releases && cd /tmp/armada-releases
-ngit release list --repo "$REPO"
-ngit release view armada-stack@0.1.0 --repo "$REPO" --verify
-```
-
-`view` prints each file's URL and sha256. `--verify` downloads every file and
-checks it. The links are Blossom URLs named by the file's hash, so they don't
-change once a release is out.
-
-For 0.1.0, download the binary for the server's architecture (`uname -m`
-says which) and the release's `SHA256SUMS`, then check one against the other:
-
-```sh
-# x86_64
-curl -fLo armada-0.1.0-linux-x86_64 https://blossom.ditto.pub/d2545811934f7c1eeffe28968ecba3056bae6b016aa5f50187cbc859202be1a5
-# aarch64
-curl -fLo armada-0.1.0-linux-aarch64 https://blossom.ditto.pub/5a2debc9dd2df2522749463b6585f5a088315a600b6ff83e78f9ac8342573d36
-
-curl -fLo SHA256SUMS https://blossom.ditto.pub/6e7a0bf1f73f11b31e18c4d7ec4d00ba31de09797a57cb0fa00f9e4b5b1298ef
-sha256sum --check --ignore-missing SHA256SUMS
-```
-
-To build it yourself instead, see [Building from source](#building-from-source).
-
-## 2. Point DNS at the server
+## 1. Point DNS at the server
 
 Create an `A` record for your domain with the server's IPv4 address. If the
 server has IPv6, add an `AAAA` record for it too.
@@ -65,7 +28,7 @@ Check it before going on:
 dig +short armada.example.com
 ```
 
-## 3. Open the firewall
+## 2. Open the firewall
 
 Allow inbound TCP 22 (SSH), 80, and 443. On Ubuntu with `ufw`:
 
@@ -79,63 +42,53 @@ ufw enable
 If your host has a cloud firewall, such as DigitalOcean's, open the same
 ports there.
 
-## 4. Install
+## 3. Install
 
-Install the binary and create a user for it to run as:
-
-```sh
-install -m 755 armada-0.1.0-linux-x86_64 /usr/local/bin/armada
-useradd --system --home-dir /var/lib/armada --shell /usr/sbin/nologin armada
-mkdir -p /etc/armada
-```
-
-Write `/etc/armada/armada.toml`:
-
-```toml
-storage_dir = "/var/lib/armada"
-public_url = "https://armada.example.com"
-
-[tls]
-acme = true
-# Optional: Let's Encrypt emails this address if something goes wrong
-# with the certificate.
-# email = "you@example.com"
-```
-
-That's all the configuration you need. Every other setting has a default;
-`armada.example.toml` lists and explains them all.
-
-## 5. Run it as a service
-
-Copy [`deploy/armada.service`](deploy/armada.service) to
-`/etc/systemd/system/armada.service`, then:
+On the server, run [`install.sh`](install.sh) as root with your domain:
 
 ```sh
-systemctl daemon-reload
-systemctl enable --now armada
-journalctl -u armada -f
+curl -fsSL <install.sh URL> | sudo sh -s -- armada.example.com
 ```
 
-On first start you should see, within a minute or so:
+From a copy of this repository, that's `sudo sh install.sh armada.example.com`.
+Add `--email you@example.com` to give Let's Encrypt an address to write to
+about the certificate.
+
+The script:
+
+1. Finds the latest release on Nostr relays and checks that it's signed by
+   Soapbox's key, `npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj`.
+2. Downloads the binary for the server's architecture and checks it against
+   the sha256 in that signed release.
+3. Installs it at `/usr/local/bin/armada`, creates an `armada` user, and
+   writes `/etc/armada/armada.toml`. An existing config is left alone.
+4. Installs the [`deploy/armada.service`](deploy/armada.service) unit, starts
+   it, and waits until the site answers over HTTPS.
+
+It needs Python 3 to check the signature, and installs it if the server
+doesn't have it. It finishes in about a minute:
 
 ```
-INFO armada::tls: no TLS certificate yet; asking the CA for one domain="armada.example.com" ...
-INFO armada::tls::acme: TLS certificate issued domain="armada.example.com" ...
-INFO armada::web::sync: deploying ... files=251 blobs=250 missing=250
-INFO armada::web::sync: version live ...
+armada: found armada-stack 0.1.0, released 2026-10-04, signed by Soapbox
+armada: downloaded https://blossom.ditto.pub/d254…e1a5 and checked its sha256, d254…e1a5
+armada: installed armada 0.1.0 at /usr/local/bin/armada
+armada: created the armada user
+armada: wrote /etc/armada/armada.toml; every other setting has a default
+armada: started the armada service; getting a certificate for armada.example.com
+armada: armada is running at https://armada.example.com/
 ```
 
 The certificate renews in the background. armada also checks the relays for
 new versions of the web app and deploys them on its own.
 
-## 6. Check it
+The config it writes is all armada needs; `armada.example.toml` lists and
+explains every other setting. After changing it, run `systemctl restart armada`.
+
+## 4. Check it
 
 ```sh
 # Plain HTTP redirects to HTTPS
 curl -sI http://armada.example.com/ | head -2
-
-# The web app
-curl -s -o /dev/null -w '%{http_code}\n' https://armada.example.com/
 
 # The relay's information document
 curl -s -H 'Accept: application/nostr+json' https://armada.example.com/
@@ -149,17 +102,14 @@ server's relay and Blossom server alongside Armada's public ones.
 
 ## Upgrading
 
-Download and check the new release's binary as in step 1, then put it in
-place and restart:
+Run the installer again. Without a domain, it replaces the binary with the
+latest release and restarts the service:
 
 ```sh
-install -m 755 armada-X.Y.Z-linux-x86_64 /usr/local/bin/armada.new
-mv /usr/local/bin/armada.new /usr/local/bin/armada
-systemctl restart armada
+curl -fsSL <install.sh URL> | sudo sh
 ```
 
-Installing under a new name and then moving it into place replaces the file
-in one step, so the running binary is never half-overwritten.
+`--version 0.1.0` installs a particular release instead, to go back to one.
 
 ## Backups
 
@@ -209,6 +159,75 @@ public_url = "https://armada.example.com"
 The proxy must pass WebSocket upgrades through, for the relay and `/rtc`.
 It must not buffer or limit request bodies below the Blossom upload size,
 which is 100 MB by default.
+
+## Installing by hand
+
+Without systemd, or to see each step, install armada yourself.
+
+**Get the binary.** Running `install.sh` with no domain installs the latest
+release's binary and nothing else. Or download a release directly. Release
+binaries are statically linked, so they run on any distribution. They're
+listed by [ngit](https://ngit.dev/install), which has to run inside a git
+repository:
+
+```sh
+REPO=nostr://npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/git.shakespeare.diy/armada-stack
+git init -q /tmp/armada-releases && cd /tmp/armada-releases
+ngit release list --repo "$REPO"
+ngit release view armada-stack@0.1.0 --repo "$REPO" --verify
+```
+
+`view` prints each file's URL and sha256, and `--verify` downloads and checks
+them. For 0.1.0, on x86_64 (use the aarch64 URL on ARM64):
+
+```sh
+# x86_64
+curl -fLo armada-0.1.0-linux-x86_64 https://blossom.ditto.pub/d2545811934f7c1eeffe28968ecba3056bae6b016aa5f50187cbc859202be1a5
+# aarch64
+curl -fLo armada-0.1.0-linux-aarch64 https://blossom.ditto.pub/5a2debc9dd2df2522749463b6585f5a088315a600b6ff83e78f9ac8342573d36
+
+curl -fLo SHA256SUMS https://blossom.ditto.pub/6e7a0bf1f73f11b31e18c4d7ec4d00ba31de09797a57cb0fa00f9e4b5b1298ef
+sha256sum --check --ignore-missing SHA256SUMS
+install -m 755 armada-0.1.0-linux-x86_64 /usr/local/bin/armada
+```
+
+**Configure it.** Create a user for it and write `/etc/armada/armada.toml`:
+
+```sh
+useradd --system --home-dir /var/lib/armada --shell /usr/sbin/nologin armada
+mkdir -p /etc/armada
+```
+
+```toml
+storage_dir = "/var/lib/armada"
+public_url = "https://armada.example.com"
+
+[tls]
+acme = true
+# email = "you@example.com"
+```
+
+**Run it.** Under systemd, copy [`deploy/armada.service`](deploy/armada.service)
+to `/etc/systemd/system/`, then:
+
+```sh
+systemctl daemon-reload
+systemctl enable --now armada
+journalctl -u armada -f
+```
+
+Elsewhere, run `/usr/local/bin/armada --config /etc/armada/armada.toml` as the
+`armada` user, with permission to bind ports 80 and 443 (for example
+`setcap cap_net_bind_service=+ep /usr/local/bin/armada`).
+
+To upgrade, install the new binary under a new name and move it into place,
+so the running one is never half-overwritten, then restart:
+
+```sh
+install -m 755 armada-X.Y.Z-linux-x86_64 /usr/local/bin/armada.new
+mv /usr/local/bin/armada.new /usr/local/bin/armada
+systemctl restart armada
+```
 
 ## Building from source
 
