@@ -278,7 +278,7 @@ impl Default for RelayConfig {
     fn default() -> Self {
         RelayConfig {
             max_message_length: 2 << 20,
-            max_subscriptions: 32,
+            max_subscriptions: 64,
             max_filters: 32,
             max_filter_values: 10_000,
             max_filter_values_per_ip: 200_000,
