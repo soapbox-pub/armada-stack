@@ -153,6 +153,31 @@ fn plain(path: &str) -> bool {
     !encoded && !path.contains('\\') && !path.contains("//") && path.split('/').all(|segment| segment != "." && segment != "..")
 }
 
+/// The protocol a request asks to upgrade to, if it does.
+fn upgrade_requested(headers: &HeaderMap) -> Option<HeaderValue> {
+    let connection = headers.get_all(header::CONNECTION).iter().filter_map(|value| value.to_str().ok());
+    let mut tokens = connection.flat_map(|value| value.split(',')).map(str::trim);
+    tokens.any(|token| token.eq_ignore_ascii_case("upgrade")).then(|| headers.get(header::UPGRADE).cloned()).flatten()
+}
+
+/// Remove the headers that describe one connection, not the message
+/// (RFC 9110 §7.6.1): they mean nothing on the next.
+fn strip_hop_by_hop(headers: &mut HeaderMap) {
+    let named: Vec<HeaderName> = headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .filter_map(|name| HeaderName::try_from(name.trim()).ok())
+        .collect();
+    for name in named {
+        headers.remove(name);
+    }
+    for name in ["connection", "keep-alive", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade"] {
+        headers.remove(name);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,30 +202,5 @@ mod tests {
         let trusting = Signaling::new("http://127.0.0.1:7880", true).unwrap();
         trusting.forwarded_for(&mut headers, "127.0.0.1".parse().unwrap());
         assert_eq!(headers["x-forwarded-for"], "203.0.113.9, 127.0.0.1");
-    }
-}
-
-/// The protocol a request asks to upgrade to, if it does.
-fn upgrade_requested(headers: &HeaderMap) -> Option<HeaderValue> {
-    let connection = headers.get_all(header::CONNECTION).iter().filter_map(|value| value.to_str().ok());
-    let mut tokens = connection.flat_map(|value| value.split(',')).map(str::trim);
-    tokens.any(|token| token.eq_ignore_ascii_case("upgrade")).then(|| headers.get(header::UPGRADE).cloned()).flatten()
-}
-
-/// Remove the headers that describe one connection, not the message
-/// (RFC 9110 §7.6.1): they mean nothing on the next.
-fn strip_hop_by_hop(headers: &mut HeaderMap) {
-    let named: Vec<HeaderName> = headers
-        .get_all(header::CONNECTION)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .filter_map(|name| HeaderName::try_from(name.trim()).ok())
-        .collect();
-    for name in named {
-        headers.remove(name);
-    }
-    for name in ["connection", "keep-alive", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade"] {
-        headers.remove(name);
     }
 }
