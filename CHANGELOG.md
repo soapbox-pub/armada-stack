@@ -36,6 +36,64 @@ A release's notes are its section here, so tag `vX.Y.Z` only once
   since they're held in memory while open. Armada's largest REQ lists about
   5,500.
 
+### Security
+
+- Without `public_url`, the relay took its own name from each request's
+  `Host`, so anyone could replay here a NIP-62 request to vanish that its
+  author had meant for another relay, deleting their events. Now it takes
+  only `ALL_RELAYS` requests then. armada warns at startup when
+  `public_url` is unset.
+- A request to vanish was carried out in full each time it was sent, in
+  the one write transaction, so resending one stalled every write. Now
+  one no newer than a request already taken costs nothing, and a new one
+  is carried out in bounded steps.
+- One event that couldn't be stored failed every other event in its batch.
+- A REQ's results are capped at 16 MiB. Clients that stop reading for a
+  minute, or go silent for two, are dropped; so are subscriptions whose
+  query falls 4,096 live events behind.
+- `relay.event_bytes_per_hour_per_ip` (256 MiB) bounds how fast one client
+  can fill the disk. Every message a connection sends costs one of 3,000 a
+  minute. Matching tags costs queries as examining events does.
+- An EVENT reusing a stored id with a bad signature was answered as a
+  duplicate, confirming a gift wrap was stored. Signatures must now be
+  lowercase hex.
+- Every listener — HTTPS, the port-80 redirect, and plain HTTP — now has a
+  30-second header timeout, which hyper skipped without a timer, and
+  closes connections idle for two minutes. There are at most 32,768
+  connections at once, and 256 from one address unless behind a proxy.
+- Blossom uploads time out after 15 minutes, or 30 seconds without data.
+  Every byte received counts against `blossom.upload_bytes_per_hour`, kept
+  or not, and a declared length is held against it while the upload runs.
+  At most 64 uploads and mirrors run at once, 4 per client. Uploads that
+  would leave less than `blossom.min_free_space` (1 GiB) on the disk are
+  refused. Tokens signed more than a day ago are refused, whatever their
+  expiration, and deletes are limited to 120 a minute per client.
+- The push service takes at most 1,200 new clients an hour, and creates
+  from one endpoint site 120 an hour; all clients' subscriptions may list
+  a million filter values; and pushes to one host are capped at 3,000 a
+  minute, so it can't be aimed at someone else's server.
+- An `X-Forwarded-For` entry that isn't an address is ignored for the
+  socket peer, and a port on one is dropped. armada says at startup what
+  trusting the header, the default behind a loopback listener, asks of
+  the proxy.
+- Blob downloads and pushes ignore proxies from the environment, which
+  would resolve names past the check for private addresses.
+- `/rtc` forwards only plain paths, and drops client-sent headers that
+  would tell the node someone else is the client.
+- `/_armada/env.js` is `Cache-Control: private` and varies by `Host`.
+- Failed deploys no longer keep what superseded versions downloaded, and
+  downloads can cross `web.max_site_size` by one file at most, not four.
+- `armada upgrade` and install.sh no longer install an older release than
+  the one installed unless given `--version`. `armada upgrade` refuses to
+  write the new binary in a directory others can write to.
+- install.sh makes `/etc/armada/armada.toml` readable only by root and the
+  armada user, as it can hold an AV node's `api_secret`. Run it again to
+  fix an existing install.
+- The systemd unit is hardened further: a syscall filter, no W^X memory,
+  private devices, and the kernel, `/proc`, and namespaces walled off.
+  `armada upgrade` installs the unit of the binary doing the upgrading, so
+  run it once more after upgrading to this release, or rerun install.sh.
+
 ## 0.2.0
 
 - `armada upgrade` installs the latest signed release over the running
