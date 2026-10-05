@@ -82,9 +82,11 @@ install_python() {
 }
 
 # Find the release, download the binary for $1 into $3/armada, and write
-# its version to $3/version. $2 is a version to insist on, or empty.
+# its version to $3/version. $2 is a version to insist on, or empty; $4 is
+# the version installed, or empty. Exits 3 if, not insisting on one, the
+# newest release found is older than what's installed.
 fetch_release() {
-	"$PYTHON" - "$1" "$2" "$3" <<'PYTHON'
+	"$PYTHON" - "$1" "$2" "$3" "$4" <<'PYTHON'
 import base64, hashlib, json, os, socket, ssl, struct, sys, time
 import urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -104,6 +106,10 @@ BLOSSOM = ["https://blossom.ditto.pub", "https://blossom.dreamith.to", "https://
 MAX_BINARY = 256 * 1024 * 1024
 MAX_MESSAGE = 8 * 1024 * 1024
 TIMEOUT = 10
+# How far in the future a release may be dated, as armada allows.
+MAX_FUTURE = 15 * 60
+# The exit status for "there's nothing newer than what's installed".
+NOTHING_NEWER = 3
 
 
 def log(message):
@@ -403,6 +409,10 @@ def tag(event, name):
     return None
 
 
+def tags(event, name):
+    return [t[1] for t in event.get("tags", []) if isinstance(t, list) and len(t) > 1 and t[0] == name]
+
+
 def version_key(version):
     """1.2.3 as (1, 2, 3), or None for anything that isn't plain numbers."""
     try:
@@ -417,6 +427,9 @@ def find_release(wanted):
     events = query_all({"kinds": [30063], "authors": [PUBKEY], "#i": [APP]})
     latest = {}
     for event in events:
+        # Relays needn't keep to the filter, so it's checked here too.
+        if event.get("kind") != 30063 or APP not in tags(event, "i") or event["created_at"] > time.time() + MAX_FUTURE:
+            continue
         d = tag(event, "d")
         # Each version is a replaceable event, so only its newest counts.
         if d and (d not in latest or event["created_at"] > latest[d]["created_at"]):
@@ -444,9 +457,10 @@ def find_asset(release, platform):
     ids = [t[1] for t in release["tags"] if len(t) > 1 and t[0] == "e"]
     application = "32267:{}:{}".format(PUBKEY, APP)
     for event in query_all({"ids": ids, "kinds": [3063], "authors": [PUBKEY]}):
-        applications = [t[1] for t in event["tags"] if len(t) > 1 and t[0] == "a"]
-        platforms = [t[1] for t in event["tags"] if len(t) > 1 and t[0] == "f"]
-        if application in applications and platform in platforms and tag(event, "version") == version:
+        # One the release names, not just any file event of Soapbox's.
+        if event.get("kind") != 3063 or event["id"] not in ids:
+            continue
+        if application in tags(event, "a") and platform in tags(event, "f") and tag(event, "version") == version:
             return event
     fail("Release {} has no build for {}.".format(version, platform))
 
@@ -493,7 +507,7 @@ def download(asset, destination):
 
 
 def main():
-    platform, wanted, directory = sys.argv[1], sys.argv[2], sys.argv[3]
+    platform, wanted, directory, installed = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
     release = find_release(wanted)
     version = tag(release, "version")
     log(
@@ -501,6 +515,11 @@ def main():
             APP, version, time.strftime("%Y-%m-%d", time.gmtime(release["created_at"]))
         )
     )
+    # A relay that's slow or kept from answering can leave an older release
+    # looking like the newest: never go back unless asked to by version.
+    if not wanted and version_key(installed) and version_key(version) < version_key(installed):
+        log("armada {} is installed, newer than {}; leaving it".format(installed, version))
+        sys.exit(NOTHING_NEWER)
     asset = find_asset(release, platform)
     url = download(asset, os.path.join(directory, "armada"))
     log("downloaded {} and checked its sha256, {}".format(url, tag(asset, "x")))
@@ -514,17 +533,30 @@ PYTHON
 
 write_config() {
 	mkdir -p "$(dirname "$CONFIG")"
-	{
-		echo "storage_dir = \"/var/lib/armada\""
-		echo "public_url = \"https://$DOMAIN\""
-		echo
-		echo "[tls]"
-		echo "acme = true"
-		if [ -n "$EMAIL" ]; then
-			echo "email = \"$EMAIL\""
-		fi
-	} >"$CONFIG"
+	(
+		umask 077
+		{
+			echo "storage_dir = \"/var/lib/armada\""
+			echo "public_url = \"https://$DOMAIN\""
+			echo
+			echo "[tls]"
+			echo "acme = true"
+			if [ -n "$EMAIL" ]; then
+				echo "email = \"$EMAIL\""
+			fi
+		} >"$CONFIG"
+	)
+	protect_config
 	say "wrote $CONFIG; every other setting has a default"
+}
+
+# The config can hold secrets, like an AV node's api_secret: it's root's to
+# write and the armada user's to read, and no one else's.
+protect_config() {
+	group=$(id -gn armada)
+	chown root:"$group" "$(dirname "$CONFIG")" "$CONFIG"
+	chmod 750 "$(dirname "$CONFIG")"
+	chmod 640 "$CONFIG"
 }
 
 # The systemd unit, as deploy/armada.service has it.
@@ -587,6 +619,7 @@ set_up_server() {
 	fi
 
 	if [ -e "$CONFIG" ]; then
+		protect_config
 		say "keeping the existing $CONFIG"
 	else
 		write_config
@@ -699,21 +732,34 @@ main() {
 		[ -n "$PYTHON" ] || die "Installed Python 3, but still can't find it."
 	fi
 
-	fetch_release "$PLATFORM" "$VERSION" "$TMP"
-	version=$(cat "$TMP/version")
-	chmod 755 "$TMP/armada"
-	[ "$("$TMP/armada" --version)" = "armada $version" ] ||
-		die "The downloaded binary doesn't say it's version $version."
-
-	if [ -x "$BIN" ] && cmp -s "$TMP/armada" "$BIN"; then
+	installed=
+	if [ -x "$BIN" ]; then
+		installed=$("$BIN" --version 2>/dev/null | sed -n 's/^armada //p') || installed=
+	fi
+	status=0
+	fetch_release "$PLATFORM" "$VERSION" "$TMP" "$installed" || status=$?
+	if [ "$status" -eq 3 ]; then
 		changed=false
-		say "armada $version is already installed at $BIN"
+	elif [ "$status" -ne 0 ]; then
+		exit "$status"
 	else
-		changed=true
-		mkdir -p "$(dirname "$BIN")"
-		cp "$TMP/armada" "$BIN.new"
-		mv -f "$BIN.new" "$BIN"
-		say "installed armada $version at $BIN"
+		version=$(cat "$TMP/version")
+		chmod 755 "$TMP/armada"
+		[ "$("$TMP/armada" --version)" = "armada $version" ] ||
+			die "The downloaded binary doesn't say it's version $version."
+
+		if [ -x "$BIN" ] && cmp -s "$TMP/armada" "$BIN"; then
+			changed=false
+			say "armada $version is already installed at $BIN"
+		else
+			changed=true
+			mkdir -p "$(dirname "$BIN")"
+			rm -f "$BIN.new"
+			cp "$TMP/armada" "$BIN.new"
+			chmod 755 "$BIN.new"
+			mv -f "$BIN.new" "$BIN"
+			say "installed armada $version at $BIN"
+		fi
 	fi
 	unit_text >"$TMP/unit"
 
@@ -725,7 +771,10 @@ main() {
 		if ! $changed && cmp -s "$TMP/unit" "$UNIT" && systemctl is-active --quiet armada </dev/null; then
 			return
 		fi
-		[ -e "$CONFIG" ] && DOMAIN=$(config_domain)
+		if [ -e "$CONFIG" ]; then
+			DOMAIN=$(config_domain)
+			id armada >/dev/null 2>&1 && protect_config
+		fi
 		start_service
 	else
 		say "to set up a server, run this again with its domain"

@@ -78,6 +78,13 @@ pub async fn run(options: Options) -> Result<()> {
     let release = pick_release(&releases, PUBKEY, options.version.as_deref())?;
     let version = release.tag("version").unwrap_or_default().to_string();
     say(&format!("found {APP} {version}, signed by Soapbox"));
+    // A relay that's slow or kept from answering can leave an older release
+    // looking like the newest: never go back unless asked to by version.
+    let older = is_older(&version, current);
+    if older && options.version.is_none() {
+        say(&format!("armada {current} is installed, newer than {version}: nothing to do"));
+        return Ok(());
+    }
 
     if options.check {
         if version == current {
@@ -92,6 +99,9 @@ pub async fn run(options: Options) -> Result<()> {
         say(&format!("armada {current} is already installed at {}", exe.display()));
         false
     } else {
+        if older {
+            say(&format!("installing {version}, older than the {current} installed, as asked"));
+        }
         let ids: Vec<String> = release.tags.iter().filter(|tag| tag.first().map(String::as_str) == Some("e")).filter_map(|tag| tag.get(1).cloned()).collect();
         let filter = Filter { ids, kinds: vec![ASSET_KIND], authors: vec![PUBKEY.into()], ..Default::default() };
         let assets = pool.query(vec![filter], &relays, QUERY_TIMEOUT, &cancel).await;
@@ -132,6 +142,11 @@ fn platform() -> Result<String> {
 /// 1.2.3 as [1, 2, 3], or None for anything that isn't plain numbers.
 fn version_key(version: &str) -> Option<Vec<u64>> {
     version.split('.').map(|part| part.parse().ok()).collect()
+}
+
+/// Whether `version` is older than `than`, both being plain numbers.
+fn is_older(version: &str, than: &str) -> bool {
+    matches!((version_key(version), version_key(than)), (Some(version), Some(than)) if version < than)
 }
 
 /// The newest release on the main channel, or the release named `wanted`.
@@ -188,16 +203,24 @@ fn pick_asset(events: &[Event], release: &Event, pubkey: &str, platform: &str) -
 }
 
 /// Download the asset beside `exe`, check it, and move it over `exe`.
+///
+/// The new binary is written and then run beside the old one, so anyone
+/// else who can write to that directory could swap in their own between
+/// its check and its run, as root. So such a directory is refused, and the
+/// file is made fresh, never through a link already there.
 async fn install(asset: &Event, version: &str, exe: &Path) -> Result<()> {
     let mut name = exe.file_name().context("this binary has no file name")?.to_os_string();
     name.push(".new");
     let new = exe.with_file_name(name);
+    let dir = exe.parent().context("this binary has no directory")?;
+    check_directory(dir)?;
     // Made here first, so a directory that can't be written stops this
     // before anything is downloaded.
-    create(&new).with_context(|| format!("Couldn't write {}. Run: sudo armada upgrade", new.display()))?;
+    let mut file = create(&new).with_context(|| format!("Couldn't write {}. Run: sudo armada upgrade", new.display()))?;
 
     let result = async {
-        let url = download(asset, &new).await?;
+        let url = download(asset, &mut file).await?;
+        drop(file);
         say(&format!("downloaded {url} and checked its sha256, {}", asset.tag("x").unwrap_or_default()));
         let output = Command::new(&new).arg("--version").stdin(Stdio::null()).output().context("running the downloaded binary")?;
         if String::from_utf8_lossy(&output.stdout).trim() != format!("armada {version}") {
@@ -212,13 +235,31 @@ async fn install(asset: &Event, version: &str, exe: &Path) -> Result<()> {
     result
 }
 
+/// A new file at `path`, replacing whatever's there, and refusing to
+/// follow a link someone may put there meanwhile.
 fn create(path: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o755).open(path)
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    std::fs::OpenOptions::new().write(true).create_new(true).mode(0o755).custom_flags(libc::O_NOFOLLOW).open(path)
 }
 
-/// Download the asset to `destination` from its URL, or else from a Blossom
-/// server by its hash, and return where it came from.
-async fn download(asset: &Event, destination: &Path) -> Result<String> {
+/// Refuse a directory someone other than this user (or root) could write
+/// to; see [`install`].
+fn check_directory(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(dir).with_context(|| format!("looking at {}", dir.display()))?;
+    let owner = metadata.uid();
+    if (owner != euid() && owner != 0) || metadata.mode() & 0o022 != 0 {
+        bail!("{} can be written by others, who could swap the new binary for their own before it's run. Install armada somewhere only you can write, like /usr/local/bin.", dir.display());
+    }
+    Ok(())
+}
+
+/// Download the asset into `destination` from its URL, or else from a
+/// Blossom server by its hash, and return where it came from.
+async fn download(asset: &Event, destination: &mut std::fs::File) -> Result<String> {
     let sha256 = asset.tag("x").map(str::to_ascii_lowercase).filter(|x| is_hex64(x)).context("The release doesn't give the binary's sha256.")?;
     let size = asset.tag("size").and_then(|size| size.parse::<u64>().ok());
     let urls = dedupe(asset.tag("url").map(String::from).into_iter().chain(BLOSSOM.iter().map(|server| blob_url(server, &sha256))));
@@ -232,9 +273,12 @@ async fn download(asset: &Event, destination: &Path) -> Result<String> {
     bail!("No server had a copy of the binary matching sha256 {sha256}.")
 }
 
-async fn fetch(http: &reqwest::Client, url: &str, destination: &Path, sha256: &str, size: Option<u64>) -> Result<()> {
+async fn fetch(http: &reqwest::Client, url: &str, file: &mut std::fs::File, sha256: &str, size: Option<u64>) -> Result<()> {
+    use std::io::Seek;
     let mut response = http.get(url).send().await?.error_for_status()?;
-    let mut file = create(destination)?;
+    // Whatever an earlier server sent goes.
+    file.set_len(0)?;
+    file.rewind()?;
     let mut digest = Sha256::new();
     let mut total = 0u64;
     while let Some(chunk) = response.chunk().await? {
@@ -379,6 +423,36 @@ mod tests {
         assert_eq!(version_key("1.10.2"), Some(vec![1, 10, 2]));
         assert!(version_key("1.10.2") > version_key("1.9.9"));
         assert_eq!(version_key("1.0.0-rc1"), None);
+        assert!(is_older("0.9.9", "0.10.0"));
+        assert!(!is_older("0.10.0", "0.10.0"));
+        assert!(!is_older("0.11.0", "0.10.0"));
+        // Nothing to compare by.
+        assert!(!is_older("0.9.0", "1.0.0-rc1"));
+    }
+
+    #[test]
+    fn makes_the_new_binary_afresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("elsewhere");
+        std::fs::write(&target, "keep me").unwrap();
+        let new = dir.path().join("armada.new");
+        std::os::unix::fs::symlink(&target, &new).unwrap();
+        // The link is replaced, not followed.
+        create(&new).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep me");
+        assert!(!std::fs::symlink_metadata(&new).unwrap().file_type().is_symlink());
+    }
+
+    #[test]
+    fn refuses_a_directory_others_can_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(check_directory(dir.path()).is_ok());
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(check_directory(dir.path()).is_err());
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(check_directory(dir.path()).is_err());
     }
 
     /// install.sh finds releases the same way, so it must look in the same
