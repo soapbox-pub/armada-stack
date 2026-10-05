@@ -70,7 +70,7 @@ pub async fn run(options: Options) -> Result<()> {
         bail!("Restarting the armada service needs root. Run: sudo armada upgrade");
     }
 
-    let pool = Pool::new(Arc::new(|_: &str| true));
+    let pool = Pool::new(Arc::new(|_: &str| true), None);
     let relays: Vec<String> = RELAYS.iter().map(|relay| relay.to_string()).collect();
     let cancel = CancellationToken::new();
     let filter = Filter { kinds: vec![RELEASE_KIND], authors: vec![PUBKEY.into()], i: vec![APP.into()], ..Default::default() };

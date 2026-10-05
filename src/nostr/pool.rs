@@ -9,6 +9,10 @@
 //! to the rule blob downloads follow: public addresses only. The check is made on
 //! the addresses the connection is then opened to, not on a lookup of its own
 //! that a rebinding name could answer differently.
+//!
+//! A relay at a `.onion` is reached over Tor, when armada runs it (see
+//! [`crate::tor`]). There's no address to check there: Tor finds the onion
+//! and never leaves its network to do it.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -17,16 +21,19 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
 use super::Event;
+use crate::tor::Tor;
 
 /// How long a relay with nothing asked of it stays connected.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const ONION_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
 
@@ -126,11 +133,13 @@ pub type Trusted = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 struct PoolInner {
     relays: Mutex<HashMap<String, mpsc::UnboundedSender<Command>>>,
     trusted: Trusted,
+    /// How relays at onions are reached, if they can be.
+    tor: Option<Tor>,
 }
 
 impl Pool {
-    pub fn new(trusted: Trusted) -> Pool {
-        Pool { inner: Arc::new(PoolInner { relays: Mutex::new(HashMap::new()), trusted }) }
+    pub fn new(trusted: Trusted, tor: Option<Tor>) -> Pool {
+        Pool { inner: Arc::new(PoolInner { relays: Mutex::new(HashMap::new()), trusted, tor }) }
     }
 
     fn relay(&self, url: &str) -> mpsc::UnboundedSender<Command> {
@@ -140,7 +149,7 @@ impl Pool {
         }
         let (tx, rx) = mpsc::unbounded_channel();
         relays.insert(url.to_string(), tx.clone());
-        tokio::spawn(run_relay(url.to_string(), rx, self.inner.trusted.clone()));
+        tokio::spawn(run_relay(url.to_string(), rx, self.inner.trusted.clone(), self.inner.tor.clone()));
         tx
     }
 
@@ -275,10 +284,14 @@ struct Subscription {
     done: bool,
 }
 
-type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+/// A TCP connection, or a stream over Tor.
+trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
+
+type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<Box<dyn Io>>>;
 
 /// One relay's connection, for as long as anything is asked of it.
-async fn run_relay(url: String, mut commands: mpsc::UnboundedReceiver<Command>, trusted: Trusted) {
+async fn run_relay(url: String, mut commands: mpsc::UnboundedReceiver<Command>, trusted: Trusted, tor: Option<Tor>) {
     let mut subs: HashMap<String, Subscription> = HashMap::new();
     let mut socket: Option<Socket> = None;
     let mut backoff = BACKOFF_MIN;
@@ -288,7 +301,7 @@ async fn run_relay(url: String, mut commands: mpsc::UnboundedReceiver<Command>, 
     loop {
         // Connect when there is something to ask and no wait in force.
         if socket.is_none() && !subs.is_empty() && retry_at.is_none_or(|at| Instant::now() >= at) {
-            match connect(&url, !trusted(&url)).await {
+            match connect(&url, !trusted(&url), tor.as_ref()).await {
                 Ok(mut ws) => {
                     backoff = BACKOFF_MIN;
                     retry_at = None;
@@ -405,8 +418,11 @@ async fn next_message(socket: &mut Option<Socket>) -> Option<Result<Message, tok
     }
 }
 
-async fn connect(url: &str, public_only: bool) -> Result<Socket, String> {
-    match tokio::time::timeout(CONNECT_TIMEOUT, open(url, public_only)).await {
+async fn connect(url: &str, public_only: bool, tor: Option<&Tor>) -> Result<Socket, String> {
+    // Over Tor, a connection is a circuit or two to build, and the first
+    // waits for Tor to join the network.
+    let timeout = if is_onion(url) { ONION_CONNECT_TIMEOUT } else { CONNECT_TIMEOUT };
+    match tokio::time::timeout(timeout, open(url, public_only, tor)).await {
         Ok(result) => result,
         Err(_) => Err("timed out".into()),
     }
@@ -415,11 +431,33 @@ async fn connect(url: &str, public_only: bool) -> Result<Socket, String> {
 /// Resolve a relay's name, connect to one of its addresses, and speak
 /// WebSocket over that. The resolving is done here rather than left to the
 /// WebSocket client so that the addresses checked are the ones dialed.
-async fn open(url: &str, public_only: bool) -> Result<Socket, String> {
+async fn open(url: &str, public_only: bool, tor: Option<&Tor>) -> Result<Socket, String> {
     let parsed = url::Url::parse(url).map_err(|e| e.to_string())?;
     let host = parsed.host_str().ok_or("no host")?;
     let port = parsed.port_or_known_default().ok_or("no port")?;
 
+    let stream: Box<dyn Io> = if is_onion(url) {
+        let tor = tor.ok_or_else(|| format!("{host} is an onion, and Tor is off"))?;
+        Box::new(tor.connect(host, port).await.map_err(|e| e.to_string())?)
+    } else {
+        Box::new(dial(host, port, public_only).await?)
+    };
+
+    let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(MAX_MESSAGE))
+        .max_frame_size(Some(MAX_MESSAGE));
+    let (ws, _) = tokio_tungstenite::client_async_tls_with_config(url, stream, Some(config), None).await.map_err(|e| e.to_string())?;
+    Ok(ws)
+}
+
+/// Whether a relay URL is at an onion.
+pub fn is_onion(url: &str) -> bool {
+    url::Url::parse(url).ok().and_then(|url| url.host_str().map(|host| host.trim_end_matches('.').to_ascii_lowercase().ends_with(".onion"))).unwrap_or(false)
+}
+
+/// A TCP connection to one of `host`'s addresses, public ones only if
+/// `public_only`.
+async fn dial(host: &str, port: u16, public_only: bool) -> Result<tokio::net::TcpStream, String> {
     let addresses = crate::net::resolve_all(host).await.map_err(|e| e.to_string())?;
     if public_only && !addresses.iter().copied().all(crate::net::is_public_address) {
         return Err(format!("{host} is not a public address"));
@@ -436,13 +474,7 @@ async fn open(url: &str, public_only: bool) -> Result<Socket, String> {
             Err(error) => last_error = error.to_string(),
         }
     }
-    let stream = stream.ok_or(last_error)?;
-
-    let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
-        .max_message_size(Some(MAX_MESSAGE))
-        .max_frame_size(Some(MAX_MESSAGE));
-    let (ws, _) = tokio_tungstenite::client_async_tls_with_config(url, stream, Some(config), None).await.map_err(|e| e.to_string())?;
-    Ok(ws)
+    stream.ok_or(last_error)
 }
 
 async fn send_req(ws: &mut Socket, id: &str, filters: &[Filter]) -> bool {
@@ -564,7 +596,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_dead_relay_does_not_hold_up_a_query() {
-        let pool = Pool::new(Arc::new(|_: &str| true));
+        let pool = Pool::new(Arc::new(|_: &str| true), None);
         let started = std::time::Instant::now();
         let events = pool
             .query(vec![Filter::default()], &["wss://127.0.0.1:1".into()], Duration::from_secs(10), &CancellationToken::new())
@@ -575,7 +607,16 @@ mod tests {
 
     #[tokio::test]
     async fn an_untrusted_relay_must_be_public() {
-        assert!(open("wss://127.0.0.1:1", true).await.unwrap_err().contains("not a public address"));
-        assert!(open("wss://localhost:1", true).await.unwrap_err().contains("not a public address"));
+        assert!(open("wss://127.0.0.1:1", true, None).await.err().unwrap().contains("not a public address"));
+        assert!(open("wss://localhost:1", true, None).await.err().unwrap().contains("not a public address"));
+    }
+
+    #[tokio::test]
+    async fn an_onion_needs_tor() {
+        let onion = "ws://dl6nglbofs66w2ctcqp3hdgw7lgql7b5xc3dqtj3oqjrcihztrqrkjyd.onion";
+        assert!(is_onion(onion) && is_onion(&format!("{}./", onion.to_uppercase())));
+        assert!(!is_onion("wss://onion.example.com") && !is_onion("not a url"));
+        // Never looked up in DNS, which would tell the resolver which onion.
+        assert!(open(onion, false, None).await.err().unwrap().contains("Tor is off"));
     }
 }

@@ -1,4 +1,5 @@
-//! Tor, built in: armada as an onion service.
+//! Tor, built in: armada as an onion service, and the way to relays that
+//! are onions themselves.
 //!
 //! Tor runs inside armada. It's Arti, the Tor Project's own implementation
 //! in Rust, so there's no daemon to install and no control port to secure.
@@ -25,7 +26,7 @@
 //! [`circuit_peer`]).
 //!
 //! Joining the network doesn't hold up starting: nothing waits for it but
-//! the onion service.
+//! the onion service and connections to onions.
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::Path;
@@ -109,6 +110,12 @@ impl Tor {
             anyhow!("Could not start Tor: {error}. Tor refuses a state directory others can write to; check the permissions of {} and the directories above it.", dir.display())
         })?;
         Ok(Tor { client })
+    }
+
+    /// A stream to `host`'s `port` over Tor, joining the network first if
+    /// it hasn't yet.
+    pub async fn connect(&self, host: &str, port: u16) -> Result<DataStream> {
+        Ok(self.client.connect((host, port)).await?)
     }
 
     /// Publish the onion service `key` is for, and hand over every stream a

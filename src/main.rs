@@ -120,7 +120,7 @@ async fn main() -> Result<()> {
     let names = origin::Names::new(config.public_url()?, onion.as_ref().map(|key| key.address.clone()));
 
     let cancel = CancellationToken::new();
-    let nostr = Arc::new(NostrService::new(config.web.relay_urls()));
+    let nostr = Arc::new(NostrService::new(config.web.relay_urls(), tor.clone()));
     let push = if config.push.enabled { Some(push::Push::open(&storage)?) } else { None };
     let mut client_env = web::env::ClientEnv::new(&config)?.with_onion(names.onion.clone());
     if let Some(push) = &push {

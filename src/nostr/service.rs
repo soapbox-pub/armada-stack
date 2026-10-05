@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::Event;
-use super::pool::{Filter, Pool};
+use super::pool::{Filter, Pool, is_onion};
 use crate::nsite::{NAMED_SITE_KIND, NsiteAddress, server_tags, write_relays};
 
 /// NIP-65 relay list.
@@ -53,18 +53,27 @@ struct CachedList {
 pub struct NostrService {
     pool: Pool,
     relays: Vec<String>,
+    /// Whether relays at onions can be reached.
+    onions: bool,
     relay_lists: Mutex<HashMap<String, CachedList>>,
     server_lists: Mutex<HashMap<String, CachedList>>,
 }
 
 impl NostrService {
     /// `relays` are the configured ones, in the spelling
-    /// [`crate::config::parse_relay_url`] gives them.
-    pub fn new(relays: Vec<String>) -> Self {
+    /// [`crate::config::parse_relay_url`] gives them. Relays at onions are
+    /// reached over `tor`, and without it are skipped.
+    pub fn new(relays: Vec<String>, tor: Option<crate::tor::Tor>) -> Self {
+        let onions = tor.is_some();
+        let (relays, skipped): (Vec<String>, Vec<String>) = relays.into_iter().partition(|relay| onions || !is_onion(relay));
+        for relay in skipped {
+            tracing::warn!(relay, "not using this relay: it's an onion, and Tor is off");
+        }
         let configured = Arc::new(relays.clone());
         Self {
-            pool: Pool::new(Arc::new(move |url: &str| configured.iter().any(|relay| relay == url))),
+            pool: Pool::new(Arc::new(move |url: &str| configured.iter().any(|relay| relay == url)), tor),
             relays,
+            onions,
             relay_lists: Mutex::new(HashMap::new()),
             server_lists: Mutex::new(HashMap::new()),
         }
@@ -88,7 +97,7 @@ impl NostrService {
         let filter = Filter { kinds: vec![RELAY_LIST_KIND], authors: vec![pubkey.to_string()], ..Default::default() };
         let events = self.query(vec![filter], &[], cancel).await;
         let value = match latest(&events) {
-            Some(event) => vet_relay_hints(&write_relays(event)).await,
+            Some(event) => vet_relay_hints(&write_relays(event), self.onions).await,
             None => Vec::new(),
         };
 
@@ -161,19 +170,22 @@ pub fn blob_url(server: &str, sha256: &str) -> String {
 }
 
 /// The relays from an author's list worth connecting to: well-formed
-/// `wss://` URLs on public addresses, at most [`MAX_AUTHOR_RELAYS`].
+/// `wss://` URLs on public addresses, and if `onions`, relays at onions,
+/// at most [`MAX_AUTHOR_RELAYS`].
 ///
 /// The list is written by whoever publishes the site. Checking here spends
 /// the few slots on relays that can pass; the pool checks again at connect,
 /// on the addresses it dials, which is what a rebinding name can't get past.
-pub async fn vet_relay_hints(urls: &[String]) -> Vec<String> {
-    let candidates: Vec<String> = dedupe(urls.iter().filter_map(|url| author_relay_url(url)))
+pub async fn vet_relay_hints(urls: &[String], onions: bool) -> Vec<String> {
+    let candidates: Vec<String> = dedupe(urls.iter().filter_map(|url| author_relay_url(url)).filter(|url| onions || !is_onion(url)))
         .into_iter()
         .take(MAX_AUTHOR_RELAYS * 4)
         .collect();
 
     let verdicts = futures_util::future::join_all(candidates.iter().map(|candidate| async move {
         match url::Url::parse(candidate) {
+            // Tor finds it, and never off its own network.
+            Ok(_) if is_onion(candidate) => true,
             Ok(url) => crate::net::is_public_url(&url).await.unwrap_or(false),
             Err(_) => false,
         }
@@ -183,9 +195,11 @@ pub async fn vet_relay_hints(urls: &[String]) -> Vec<String> {
     candidates.into_iter().zip(verdicts).filter(|(_, ok)| *ok).map(|(url, _)| url).take(MAX_AUTHOR_RELAYS).collect()
 }
 
-/// A relay an author named, if it's `wss://`: no relay worth naming lacks TLS.
+/// A relay an author named, if it's `wss://`: no relay worth naming lacks
+/// TLS. Except at an onion, where Tor encrypts and authenticates the
+/// connection itself, so `ws://` is usual.
 fn author_relay_url(input: &str) -> Option<String> {
-    crate::config::parse_relay_url(input).ok().filter(|url| url.starts_with("wss://"))
+    crate::config::parse_relay_url(input).ok().filter(|url| url.starts_with("wss://") || is_onion(url))
 }
 
 fn normalize_server(server: &str) -> Option<String> {
@@ -235,6 +249,11 @@ mod tests {
             "wss://1.1.1.1".to_string(),
             "wss://[::1]".to_string(),
         ];
-        assert_eq!(vet_relay_hints(&hints).await, ["wss://1.1.1.1"]);
+        assert_eq!(vet_relay_hints(&hints, true).await, ["wss://1.1.1.1"]);
+
+        let onion = "ws://dl6nglbofs66w2ctcqp3hdgw7lgql7b5xc3dqtj3oqjrcihztrqrkjyd.onion".to_string();
+        let hints = vec![onion.clone(), "wss://1.1.1.1".to_string()];
+        assert_eq!(vet_relay_hints(&hints, true).await, [onion.as_str(), "wss://1.1.1.1"]);
+        assert_eq!(vet_relay_hints(&hints, false).await, ["wss://1.1.1.1"]);
     }
 }
