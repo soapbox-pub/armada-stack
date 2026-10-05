@@ -17,15 +17,27 @@ use http::{Extensions, HeaderMap};
 /// rightmost `X-Forwarded-For` entry, the one the proxy appended:
 /// everything left of it came from the client, which could otherwise rotate
 /// its key at will.
+///
+/// The entry has to be an address, with or without a port as some proxies
+/// add: anything else is taken for a proxy that doesn't append one, and
+/// the socket peer is used, rather than keying the client by text it may
+/// have written itself.
 pub fn client_address(headers: &HeaderMap, extensions: &Extensions, trust_proxy: bool) -> Option<String> {
     if trust_proxy {
         let forwarded = headers.get_all("x-forwarded-for").iter().next_back();
-        let last = forwarded.and_then(|value| value.to_str().ok()).and_then(|value| value.rsplit(',').next()).map(str::trim);
-        if let Some(last) = last.filter(|last| !last.is_empty()) {
-            return Some(last.to_string());
+        let last = forwarded.and_then(|value| value.to_str().ok()).and_then(|value| value.rsplit(',').next());
+        if let Some(address) = last.and_then(forwarded_address) {
+            return Some(address.to_string());
         }
     }
     extensions.get::<ConnectInfo<SocketAddr>>().map(|ConnectInfo(peer)| peer.ip().to_string())
+}
+
+/// An `X-Forwarded-For` entry's address: `203.0.113.9`, `203.0.113.9:4000`,
+/// `2001:db8::1`, or `[2001:db8::1]:4000`.
+fn forwarded_address(entry: &str) -> Option<IpAddr> {
+    let entry = entry.trim();
+    entry.parse::<IpAddr>().ok().or_else(|| entry.parse::<SocketAddr>().ok().map(|address| address.ip()))
 }
 
 /// [`key`] for the address a request came from; see [`client_address`].
@@ -295,5 +307,18 @@ mod tests {
         assert_eq!(client_address(&headers, &extensions, false).as_deref(), Some("127.0.0.1"));
         assert_eq!(client_address(&HeaderMap::new(), &extensions, true).as_deref(), Some("127.0.0.1"));
         assert_eq!(client_address(&headers, &Extensions::new(), false), None);
+
+        // A port some proxies add is dropped; anything not an address is
+        // the peer's.
+        let via = |value: &'static str| {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-forwarded-for", value.parse().unwrap());
+            client_address(&headers, &extensions, true)
+        };
+        assert_eq!(via("203.0.113.9:4000").as_deref(), Some("203.0.113.9"));
+        assert_eq!(via("[2001:db8::1]:4000").as_deref(), Some("2001:db8::1"));
+        assert_eq!(via("2001:db8::1").as_deref(), Some("2001:db8::1"));
+        assert_eq!(via("unknown").as_deref(), Some("127.0.0.1"));
+        assert_eq!(via("6.6.6.6, made-up").as_deref(), Some("127.0.0.1"));
     }
 }

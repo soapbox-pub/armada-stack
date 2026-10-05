@@ -120,6 +120,14 @@ async fn main() -> Result<()> {
     if config.trust_proxy == Some(true) && config.listen().ip().is_unspecified() {
         tracing::warn!("trust_proxy is on while listening on every interface: anyone reaching armada directly can forge X-Forwarded-For.");
     }
+    if config.trust_proxy.is_none() && config.trusts_proxy() {
+        tracing::warn!(
+            "trust_proxy is on, since armada listens on loopback: each client is told apart by the last X-Forwarded-For entry, which your proxy has to append (nginx: proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for). If it doesn't, set trust_proxy = false, or every client shares one set of limits."
+        );
+    }
+    if config.public_url.is_none() {
+        tracing::warn!("public_url isn't set, so armada takes its own name from each request's Host header. Set it to the URL clients reach armada at.");
+    }
 
     tokio::spawn({
         let cancel = cancel.clone();
