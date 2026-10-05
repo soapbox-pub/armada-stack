@@ -656,6 +656,15 @@ async fn describes_itself() {
     assert_eq!(info["supported_nips"], json!([1, 9, 11, 40, 62]));
     assert_eq!(info["limitation"]["restricted_writes"], true);
     assert_eq!(info["limitation"]["max_limit"], 500);
+    // Without `public_url`, at the origin it was asked at.
+    assert_eq!(info["icon"], "http://localhost/_armada/icon.png");
+    assert_eq!(info["banner"], "http://localhost/_armada/banner.png");
+
+    let harness = Harness::at(RelayConfig::default(), "https://armada.example.com").await;
+    let request = Request::builder().uri("/").header("accept", "application/nostr+json").header("host", "other.example.org").body(axum::body::Body::empty()).unwrap();
+    let body = harness.relay.clone().oneshot(request).await.unwrap().into_body().collect().await.unwrap().to_bytes();
+    let info: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(info["icon"], "https://armada.example.com/_armada/icon.png");
 }
 
 /// NIP-46 runs between a client's throwaway key and a remote signer: each

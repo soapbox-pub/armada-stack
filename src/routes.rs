@@ -207,6 +207,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_relays_images_answer_before_there_is_a_site() {
+        let harness = harness();
+        for path in ["/_armada/icon.png", "/_armada/banner.png"] {
+            let (status, headers, _) = harness.send(Method::GET, path, &[]).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(headers["content-type"], "image/png");
+            let etag = headers["etag"].to_str().unwrap().to_string();
+            let (status, _, _) = harness.send(Method::GET, path, &[("if-none-match", &etag)]).await;
+            assert_eq!(status, StatusCode::NOT_MODIFIED, "{path}");
+        }
+    }
+
+    #[tokio::test]
     async fn the_relay_speaks_websockets_at_the_root() {
         let harness = harness();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

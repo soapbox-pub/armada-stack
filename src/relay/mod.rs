@@ -48,9 +48,11 @@ use tokio::sync::{Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::RelayConfig;
+use crate::origin::request_origin;
 use crate::ratelimit;
 use crate::storage::Storage;
 use crate::nostr::Event;
+use crate::web::brand::{BANNER_PATH, ICON_PATH};
 use clients::Clients;
 use filter::Filter;
 use monitors::{Hub, Link};
@@ -71,6 +73,8 @@ struct Shared {
     /// the relay doesn't know its own name, so takes only requests to
     /// vanish from `ALL_RELAYS`.
     authority: Option<Arc<str>>,
+    /// Where NIP-11's icon and banner are, when it's set.
+    public_url: Option<url::Url>,
     /// Whether to believe `X-Forwarded-For`; see [`crate::config::Config::trust_proxy`].
     trust_proxy: bool,
     clients: Arc<Clients>,
@@ -97,7 +101,8 @@ impl Relay {
         Ok(Relay {
             shared: Arc::new(Shared {
                 config: config.clone(),
-                authority: public_url.and_then(|url| policy::authority(url.as_str())).map(Arc::from),
+                authority: public_url.as_ref().and_then(|url| policy::authority(url.as_str())).map(Arc::from),
+                public_url,
                 trust_proxy,
                 clients: Clients::new(config),
                 store,
@@ -138,8 +143,11 @@ impl Relay {
                 upgrade.max_message_size(max).max_frame_size(max).on_upgrade(move |socket| conn::serve(shared, socket, authority, slot)).into_response()
             }
             Err(_) if wants_nip11(&parts.headers) => {
-                let headers = [(header::CONTENT_TYPE, "application/nostr+json"), (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
-                (headers, info(&shared.config).to_string()).into_response()
+                // Its image URLs are the request's origin's unless
+                // `public_url` is set, so it varies with `Host`.
+                let origin = request_origin(shared.public_url.as_ref(), &parts.headers);
+                let headers = [(header::CONTENT_TYPE, "application/nostr+json"), (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"), (header::VARY, "Host")];
+                (headers, info(&shared.config, &origin.base).to_string()).into_response()
             }
             Err(rejection) => rejection.into_response(),
         }
@@ -257,11 +265,13 @@ fn wants_nip11(headers: &HeaderMap) -> bool {
     headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()).is_some_and(|accept| accept.contains("application/nostr+json"))
 }
 
-/// The relay's NIP-11 document.
-fn info(config: &RelayConfig) -> serde_json::Value {
+/// The relay's NIP-11 document, as served from `origin`.
+fn info(config: &RelayConfig, origin: &str) -> serde_json::Value {
     serde_json::json!({
         "name": "Armada",
         "description": "The relay of a self-hosted Armada.",
+        "icon": format!("{origin}{ICON_PATH}"),
+        "banner": format!("{origin}{BANNER_PATH}"),
         "software": "armada-stack",
         "version": env!("CARGO_PKG_VERSION"),
         "supported_nips": [1, 9, 11, 40, 62],

@@ -5,6 +5,9 @@ A release's notes are its section here, so tag `vX.Y.Z` only once
 
 ## Unreleased
 
+- The relay's NIP-11 document has an `icon` and a `banner`: Armada's logo
+  and social card, built into the binary and served at
+  `/_armada/icon.png` and `/_armada/banner.png`, whatever site is live.
 - A built-in Web Push service, `[push]`, on by default. It speaks
   nostr-push2's protocol (kind 25742), so the web app needs no changes:
   `window.ENV` points `NOSTR_PUSH2_PUBKEY` and `NOSTR_PUSH2_RELAYS` at it.

@@ -5,6 +5,7 @@
 //! from there. No dashboard, no API, no host routing: every request that
 //! isn't the relay's or the Blossom server's is for that one site.
 
+pub mod brand;
 mod csp;
 mod db;
 #[cfg(test)]

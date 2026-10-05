@@ -14,6 +14,7 @@ use bytes::Bytes;
 use http::header::{self, HeaderMap, HeaderValue};
 use http::{Method, Request, Response, StatusCode};
 
+use super::brand;
 use super::csp::{DEFAULT_CSP, denies_framing};
 use super::env::{ClientEnv, ENV_PATH};
 use super::site::{ASSETS, Site};
@@ -87,6 +88,9 @@ impl SiteServer {
         // there's no site to load it.
         if path == ENV_PATH {
             return self.env_script(method, request);
+        }
+        if let Some(image) = brand::serve(method, path, request) {
+            return image;
         }
 
         let Some(site) = site else {
