@@ -8,6 +8,13 @@ A release's notes are its section here, so tag `vX.Y.Z` only once
 - install.sh sets up a new server again. It enabled the systemd unit before
   copying it in, so on a server without one it stopped, silently, after
   writing the config.
+- Until the web app has downloaded, a browser gets an Armada page, with
+  the app's animated crest and ASCII sea, that says how far the download
+  has got and opens the app once it's live, rather than a line of text.
+  Other requests still get the plain 503. It asks
+  `/_armada/status.json`, which says the stage (`searching`, `not_found`,
+  `downloading` with counts, `failed`, or `live`) and never why a deploy
+  failed; that's in the log.
 - armada says when Tor has published the onion, and warns when Tor reports
   a problem with it. Publishing can take several minutes after a start, and
   until then the onion can't be reached; it used to say it was serving the

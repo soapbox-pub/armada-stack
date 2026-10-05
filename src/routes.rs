@@ -98,6 +98,7 @@ mod tests {
             blobs: storage.blobs.clone(),
             naddr: http::HeaderValue::from_static("naddr"),
             env: Default::default(),
+            progress: Default::default(),
         });
         let relay = Relay::open(&config.relay, Default::default(), false, &storage, &cancel).unwrap();
         let blossom = Blossom::open(&config.blossom, Default::default(), false, &storage, &cancel).unwrap();
@@ -217,6 +218,46 @@ mod tests {
             let (status, _, _) = harness.send(Method::GET, path, &[("if-none-match", &etag)]).await;
             assert_eq!(status, StatusCode::NOT_MODIFIED, "{path}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_browser_waiting_for_the_site_gets_a_page_that_waits_with_it() {
+        let harness = harness();
+        let navigation = [("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")];
+        for path in ["/", "/some/route"] {
+            let (status, headers, body) = harness.send(Method::GET, path, &navigation).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
+            assert_eq!(headers["content-type"], "text/html; charset=utf-8");
+            assert_eq!(headers["cache-control"], "no-store");
+            assert_eq!(headers["retry-after"], "30");
+            assert!(body.contains(r#"<script src="/_armada/loading.js"></script>"#), "{body}");
+            // The default policy allows no inline script, so there mustn't be one.
+            assert!(!body.contains("<script>"));
+            assert!(headers["content-security-policy"].to_str().unwrap().contains("script-src 'self'"));
+        }
+        let (status, _, body) = harness.send(Method::HEAD, "/", &navigation).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.is_empty());
+
+        // Anything else still gets the line of text.
+        let (status, headers, body) = harness.send(Method::GET, "/assets/app.js", &[("accept", "*/*")]).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(headers["content-type"], "text/plain; charset=utf-8");
+        assert!(body.contains("not finished downloading"));
+
+        let (status, headers, body) = harness.send(Method::GET, "/_armada/loading.js", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["content-type"], "text/javascript; charset=utf-8");
+        assert!(body.contains("/_armada/status.json"));
+        let etag = headers["etag"].to_str().unwrap().to_string();
+        let (status, _, _) = harness.send(Method::GET, "/_armada/loading.js", &[("if-none-match", &etag)]).await;
+        assert_eq!(status, StatusCode::NOT_MODIFIED);
+
+        let (status, headers, body) = harness.send(Method::GET, "/_armada/status.json", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["content-type"], "application/json");
+        assert_eq!(headers["cache-control"], "no-store");
+        assert_eq!(body, r#"{"state":"searching"}"#);
     }
 
     #[tokio::test]

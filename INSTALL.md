@@ -100,7 +100,9 @@ curl -s https://armada.example.com/_armada/env.js
 ```
 
 Then open `https://armada.example.com` in a browser. The app uses this
-server's relay and Blossom server alongside Armada's public ones.
+server's relay and Blossom server alongside Armada's public ones. On a new
+server the app takes half a minute or so to download; until then the page
+says how far it's got, and opens the app by itself once it's ready.
 
 ## Tor
 

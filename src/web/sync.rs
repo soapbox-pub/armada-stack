@@ -26,6 +26,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::db::{Status, Version, WebDb};
+use super::progress::{Progress, Stage};
 use super::prune::prune;
 use super::site::Site;
 use crate::blobs::BlobStore;
@@ -69,6 +70,8 @@ pub struct SyncWorker {
     pub settings: SyncSettings,
     /// What the web service serves; swapped when a version goes live.
     pub live: Arc<ArcSwapOption<Site>>,
+    /// Where the worker is, for the page shown until something is live.
+    pub progress: Arc<Progress>,
 }
 
 impl SyncWorker {
@@ -99,9 +102,13 @@ impl SyncWorker {
             tokio::select! {
                 _ = cancel.cancelled() => return,
                 _ = resync.tick() => {
+                    self.progress.set(Stage::Searching);
                     match self.nostr.fetch_manifest(&self.address, &cancel).await {
                         Some(event) => self.ingest(event).await,
-                        None => tracing::warn!(naddr = self.address.naddr(), "no relay has the site's manifest"),
+                        None => {
+                            self.progress.set(Stage::NotFound);
+                            tracing::warn!(naddr = self.address.naddr(), "no relay has the site's manifest");
+                        }
                     }
                     // A fresh run of attempts: whatever failed before may work now.
                     retry = None;
@@ -177,6 +184,7 @@ impl SyncWorker {
             Ok(()) => Ok(()),
             Err(error) if cancel.is_cancelled() => Err(error),
             Err(error) => {
+                self.progress.set(Stage::Failed);
                 let message = error.to_string();
                 self.db(move |db| db.set_status(&id, Status::Failed, Some(&message))).await?;
                 // What versions forgotten since left behind goes, so deploys
@@ -213,6 +221,7 @@ impl SyncWorker {
         let missing: Vec<BlobHash> = present.iter().filter(|(_, size)| size.is_none()).map(|(sha, _)| *sha).collect();
 
         tracing::info!(event_id = event.id, files = files.len(), blobs = hashes.len(), missing = missing.len(), "deploying");
+        self.progress.set(Stage::Downloading { done: hashes.len() - missing.len(), total: hashes.len() });
 
         // Already on disk, perhaps from an interrupted deploy, but not
         // necessarily compressed.
@@ -296,6 +305,7 @@ impl SyncWorker {
                 Some(size) => {
                     bytes += size;
                     done += 1;
+                    self.progress.downloaded_one();
                     in_a_row = 0;
                     if done % 50 == 0 {
                         tracing::info!(done, total, "downloading blobs");

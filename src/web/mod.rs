@@ -12,6 +12,8 @@ mod db;
 mod e2e;
 pub mod env;
 mod inject;
+mod loading;
+pub mod progress;
 mod prune;
 pub mod serve;
 mod site;
@@ -30,6 +32,7 @@ use crate::config::WebConfig;
 use crate::nostr::service::NostrSource;
 use crate::storage::Storage;
 use db::WebDb;
+use progress::Progress;
 use env::ClientEnv;
 use serve::SiteServer;
 use site::Site;
@@ -66,12 +69,14 @@ impl Web {
             tracing::info!(event_id = site.event_id, files = site.files.len(), "serving the stored version");
         }
         let live = Arc::new(ArcSwapOption::from(live.map(Arc::new)));
+        let progress = Arc::new(Progress::default());
 
         let server = Arc::new(SiteServer {
             live: live.clone(),
             blobs: blobs.clone(),
             naddr: HeaderValue::from_str(&address.naddr()).expect("an naddr is a valid header"),
             env,
+            progress: progress.clone(),
         });
         let worker = SyncWorker {
             address,
@@ -87,6 +92,7 @@ impl Web {
                 retry_backoff: Duration::from_secs(5),
             },
             live,
+            progress,
         };
         Ok(Web { server, worker })
     }

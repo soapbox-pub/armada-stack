@@ -17,6 +17,8 @@ use http::{Method, Request, Response, StatusCode};
 use super::brand;
 use super::csp::{DEFAULT_CSP, denies_framing};
 use super::env::{ClientEnv, ENV_PATH};
+use super::loading;
+use super::progress::Progress;
 use super::site::{ASSETS, Site};
 use crate::blobs::{BlobStore, Encoding, Variants};
 use crate::hash::BlobHash;
@@ -40,6 +42,8 @@ pub struct SiteServer {
     pub naddr: HeaderValue,
     /// What [`ENV_PATH`] says.
     pub env: ClientEnv,
+    /// How far the sync worker has got, for [`loading::STATUS_PATH`].
+    pub progress: Arc<Progress>,
 }
 
 type Reply = Response<Body>;
@@ -111,12 +115,21 @@ impl SiteServer {
         if let Some(image) = brand::serve(method, path, request) {
             return image;
         }
+        if path == loading::STATUS_PATH {
+            return loading::status(method, site.is_some(), self.progress.get());
+        }
+        if let Some(script) = loading::script(method, path, request) {
+            return script;
+        }
 
         let Some(site) = site else {
+            if loading::wants_page(request) {
+                return loading::page(method);
+            }
             return Response::builder()
                 .status(StatusCode::SERVICE_UNAVAILABLE)
                 .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-                .header(header::RETRY_AFTER, "30")
+                .header(header::RETRY_AFTER, loading::RETRY_AFTER)
                 .body(Body::from("The site has not finished downloading yet. Try again in a moment."))
                 .expect("response");
         };

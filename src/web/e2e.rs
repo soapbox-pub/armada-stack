@@ -327,5 +327,23 @@ async fn a_missing_blob_fails_the_deploy_and_says_why() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(headers["retry-after"], "30");
     assert_eq!(headers["content-security-policy"], super::csp::DEFAULT_CSP);
+    // The page waiting for the site says it failed, and nothing of why: once
+    // the retries are spent, until the next resync.
+    eventually("the status saying it failed", async || web.get("/_armada/status.json", &[]).await.2 == br#"{"state":"failed"}"#).await;
+    web.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_status_follows_the_site_from_nowhere_to_live() {
+    let harness = Harness::new().await;
+    let web = harness.start(vec![], true).await;
+    let status = async || String::from_utf8(web.get("/_armada/status.json", &[]).await.2).unwrap();
+
+    eventually("no relay having the site", async || status().await == r#"{"state":"not_found"}"#).await;
+
+    let manifest = harness.publish(crate::util::now() - 60, &[("/index.html", "hello"), ("/app.js", "1")]);
+    web.updates.send(manifest).await.unwrap();
+    eventually("the site going live", async || status().await == r#"{"state":"live"}"#).await;
+    assert_eq!(web.get("/", &[("accept", "text/html")]).await.2, b"hello");
     web.stop().await;
 }
