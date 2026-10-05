@@ -87,28 +87,32 @@ fn run(store: &Store, hub: &Hub, rx: Receiver<Submission>) {
 
 fn write(store: &Store, hub: &Hub, batch: Vec<Submission>) {
     let outcomes = match store_batch(store, &batch) {
-        Ok(outcomes) => outcomes,
-        Err(error) => {
-            tracing::error!(%error, events = batch.len(), "could not store events");
-            for submission in &batch {
-                let id = hex::encode(EventView::new(&submission.record).expect("a record").id());
-                submission.reply.send(Outbound::Text(ok(&id, false, "error: could not store the event")));
-            }
-            return;
+        Ok(outcomes) => outcomes.into_iter().map(Ok).collect(),
+        // One event's failure fails the transaction, and with it everyone
+        // else's in the batch. So each goes again in one of its own, and
+        // only the one that can't be stored is refused.
+        Err(error) if batch.len() > 1 => {
+            tracing::warn!(%error, events = batch.len(), "could not store a batch; storing its events one at a time");
+            batch.iter().map(|submission| store_batch(store, std::slice::from_ref(submission)).map(|mut outcome| outcome.remove(0))).collect()
         }
+        Err(error) => vec![Err(error)],
     };
 
     let mut live = Vec::new();
     for (submission, outcome) in batch.into_iter().zip(outcomes) {
         let id = hex::encode(EventView::new(&submission.record).expect("a record").id());
         let (accepted, message) = match outcome {
-            Outcome::Stored(_) | Outcome::Vanished => (true, ""),
-            Outcome::Duplicate => (true, "duplicate: already have this event"),
-            Outcome::Replaced => (false, "duplicate: already have a newer version of this event"),
-            Outcome::Deleted => (false, "blocked: this event has been deleted"),
+            Ok(Outcome::Stored(_) | Outcome::Vanished) => (true, ""),
+            Ok(Outcome::Duplicate) => (true, "duplicate: already have this event"),
+            Ok(Outcome::Replaced) => (false, "duplicate: already have a newer version of this event"),
+            Ok(Outcome::Deleted) => (false, "blocked: this event has been deleted"),
+            Err(error) => {
+                tracing::error!(%error, %id, "could not store an event");
+                (false, "error: could not store the event")
+            }
         };
         submission.reply.send(Outbound::Text(ok(&id, accepted, message)));
-        if let Outcome::Stored(seq) = outcome {
+        if let Ok(Outcome::Stored(seq)) = outcome {
             live.push(Live::new(submission.record, seq));
         }
     }
@@ -194,6 +198,36 @@ mod tests {
 
         let txn = store.read().unwrap();
         assert_eq!(store.len(&txn).unwrap(), 2);
+    }
+
+    /// An event that can't be stored is refused alone, not with the rest
+    /// of its batch.
+    #[tokio::test]
+    async fn one_failure_fails_only_its_own_event() {
+        let dir = tempfile::tempdir().unwrap();
+        // Room for small events, not for a big one.
+        let store = Arc::new(Store::open(dir.path(), 1 << 20).unwrap());
+        let hub = Hub::spawn(1);
+        let (link, mut rx, _) = Link::new(16);
+        let batch: Vec<Event> = vec![
+            Event::sign(ALICE, 100, 1, vec![], "small"),
+            Event::sign(ALICE, 100, 1, vec![], &"x".repeat(2 << 20)),
+            Event::sign(ALICE, 100, 1, vec![], "also small"),
+        ];
+        let submissions = batch.iter().map(|event| Submission { record: record::encode(event), reply: link.clone() }).collect();
+        let (writing, written) = (store.clone(), hub.clone());
+        // As on the writer's own thread: broadcasting blocks.
+        tokio::task::spawn_blocking(move || write(&writing, &written, submissions)).await.unwrap();
+        let mut oks = Vec::new();
+        while oks.len() < 3 {
+            if let Outbound::Text(text) = rx.recv().await.unwrap() {
+                oks.push(text);
+            }
+        }
+        assert_eq!(oks[0], ok(&batch[0].id, true, ""));
+        assert_eq!(oks[1], ok(&batch[1].id, false, "error: could not store the event"));
+        assert_eq!(oks[2], ok(&batch[2].id, true, ""));
+        assert_eq!(store.len(&store.read().unwrap()).unwrap(), 2);
     }
 
     /// A backlog of more than one sweep's worth goes in one go, not one
