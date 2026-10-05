@@ -3,7 +3,7 @@
 A release's notes are its section here, so tag `vX.Y.Z` only once
 `## X.Y.Z` exists: publishing fails without it.
 
-## Unreleased
+## 0.3.0
 
 - Tor, built in, with no tor daemon to install. armada is served as an
   onion service by default, at an address made on first start; `armada
@@ -20,7 +20,6 @@ A release's notes are its section here, so tag `vX.Y.Z` only once
   and those in an nsite author's relay list, so the site can be followed on
   relays that are only onions. An author's may be `ws://`.
 - Building needs Rust 1.92.
-
 - The relay's NIP-11 document has an `icon` and a `banner`: Armada's logo
   and social card, built into the binary and served at
   `/_armada/icon.png` and `/_armada/banner.png`, whatever site is live.
