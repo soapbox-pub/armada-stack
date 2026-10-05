@@ -58,7 +58,7 @@ async fn serve_tls(state: Arc<State>, router: Router) -> (SocketAddr, tokio_util
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let cancel = CancellationToken::new();
-    tokio::spawn(serve(listener, server_config(state), router, cancel.clone()));
+    tokio::spawn(serve(listener, Some(server_config(state)), router, super::Limits::new(false), cancel.clone()));
     (address, cancel.drop_guard())
 }
 
@@ -297,7 +297,7 @@ async fn pebble() {
     let cancel = CancellationToken::new();
     let _guard = cancel.clone().drop_guard();
     let tls = TcpListener::bind("127.0.0.1:5001").await.unwrap();
-    tokio::spawn(serve(tls, server_config(state.clone()), Router::new(), cancel.clone()));
+    tokio::spawn(serve(tls, Some(server_config(state.clone())), Router::new(), super::Limits::new(false), cancel.clone()));
     let http = TcpListener::bind("127.0.0.1:5002").await.unwrap();
     let redirect = redirect::router("armada.test".into(), state.clone());
     tokio::spawn(async move { axum::serve(http, redirect).await });

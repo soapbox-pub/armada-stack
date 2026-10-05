@@ -28,7 +28,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
 use crate::storage::Storage;
-pub use serve::serve;
+pub use serve::{Limits, serve};
 use store::Store;
 
 /// The ALPN protocol a CA's TLS-ALPN-01 validation offers (RFC 8737).

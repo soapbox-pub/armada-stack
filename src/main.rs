@@ -132,22 +132,23 @@ async fn main() -> Result<()> {
 
     let (web, sync) = web.start(cancel.clone());
     let router = routes::router(routes::Services { web, relay, blossom, av });
+    let behind_proxy = config.trusts_proxy();
     let served = match tls {
         Some(tls) => {
             if let Some(redirect_listener) = redirect_listener {
                 let redirect = tls.redirect_router();
-                let shutdown = cancel.clone().cancelled_owned();
+                let cancel = cancel.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = axum::serve(redirect_listener, redirect).with_graceful_shutdown(shutdown).await {
+                    if let Err(error) = tls::serve(redirect_listener, None, redirect, tls::Limits::new(behind_proxy), cancel).await {
                         tracing::error!("serving the HTTPS redirect: {error}");
                     }
                 });
             }
             let config = tls.server_config();
             tls.start(cancel.clone());
-            tls::serve(listener, config, router, cancel.clone()).await
+            tls::serve(listener, Some(config), router, tls::Limits::new(behind_proxy), cancel.clone()).await
         }
-        None => axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(cancel.clone().cancelled_owned()).await,
+        None => tls::serve(listener, None, router, tls::Limits::new(behind_proxy), cancel.clone()).await,
     };
     // However serving ended, the rest stops with it.
     cancel.cancel();
