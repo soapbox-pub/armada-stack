@@ -81,10 +81,26 @@ impl Limits {
     }
 }
 
+/// Where connections come from: a TCP listener, or Tor's onion streams.
+pub trait Accept: Send {
+    type Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static;
+
+    /// The next connection, and the address it's counted against.
+    fn accept(&mut self) -> impl Future<Output = io::Result<(Self::Stream, SocketAddr)>> + Send;
+}
+
+impl Accept for TcpListener {
+    type Stream = TcpStream;
+
+    fn accept(&mut self) -> impl Future<Output = io::Result<(TcpStream, SocketAddr)>> + Send {
+        TcpListener::accept(self)
+    }
+}
+
 /// Serve `router` until `cancel` fires: over TLS with `tls`, or else plain
 /// HTTP. Requests carry the client's address as [`ConnectInfo`], as under
 /// `axum::serve`.
-pub async fn serve(listener: TcpListener, tls: Option<Arc<rustls::ServerConfig>>, router: Router, limits: Limits, cancel: CancellationToken) -> io::Result<()> {
+pub async fn serve<A: Accept>(mut listener: A, tls: Option<Arc<rustls::ServerConfig>>, router: Router, limits: Limits, cancel: CancellationToken) -> io::Result<()> {
     let acceptor = tls.map(TlsAcceptor::from);
     let mut builder = auto::Builder::new(TokioExecutor::new());
     builder.http1().timer(TokioTimer::new()).header_read_timeout(limits.header_timeout);
@@ -135,7 +151,7 @@ pub async fn serve(listener: TcpListener, tls: Option<Arc<rustls::ServerConfig>>
 
 /// A connection's TLS handshake, or `None` if it took too long, failed, or
 /// was only a CA validating a challenge, which needs nothing more.
-async fn handshake(acceptor: &TlsAcceptor, stream: TcpStream) -> Option<tokio_rustls::server::TlsStream<TcpStream>> {
+async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(acceptor: &TlsAcceptor, stream: S) -> Option<tokio_rustls::server::TlsStream<S>> {
     let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await.ok()?.ok()?;
     (stream.get_ref().1.alpn_protocol() != Some(ACME_TLS_ALPN)).then_some(stream)
 }
