@@ -65,6 +65,7 @@ created_at_upper_limit = 900
 events_per_minute = 600
 # Per IPv4 address or IPv6 /64, across its connections. 0 for no limit.
 max_connections_per_ip = 50
+max_queries_per_ip = 4
 events_per_minute_per_ip = 1200
 # Reserved address space, not disk.
 map_size = 274877906944

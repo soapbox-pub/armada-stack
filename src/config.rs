@@ -152,6 +152,10 @@ pub struct RelayConfig {
     /// Connections one client may have open at once, by IPv4 address or
     /// IPv6 /64. 0 for no limit.
     pub max_connections_per_ip: usize,
+    /// Queries one client may have running or waiting for a core at once,
+    /// across all its connections, by IPv4 address or IPv6 /64. The rest
+    /// wait their turn. 0 for no limit.
+    pub max_queries_per_ip: usize,
     /// Events one client may publish a minute across all its connections,
     /// in bursts of as many, by IPv4 address or IPv6 /64. 0 for no limit.
     pub events_per_minute_per_ip: u32,
@@ -272,6 +276,7 @@ impl Default for RelayConfig {
             created_at_upper_limit: 900,
             events_per_minute: 600,
             max_connections_per_ip: 50,
+            max_queries_per_ip: 4,
             events_per_minute_per_ip: 1200,
             max_authed_keys: None,
             map_size: 256 << 30,

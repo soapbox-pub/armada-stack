@@ -360,6 +360,34 @@ async fn shares_an_event_budget_across_an_addresss_connections() {
     assert_eq!(c.publish(&note(ALICE, "5")).await[3], "rate-limited: slow down");
 }
 
+/// Queries replaced, closed, or left behind by a closed connection give
+/// back their client's place, so the next one runs.
+#[tokio::test]
+async fn gives_back_query_places() {
+    let harness = Harness::new(RelayConfig { max_queries_per_ip: 1, ..RelayConfig::default() }).await;
+    let mut a = harness.client().await;
+    a.publish(&note(ALICE, "x")).await;
+    let filter = json!({"kinds": [STATUS]});
+    for _ in 0..50 {
+        a.send(json!(["REQ", "same", filter])).await;
+    }
+    for n in 0..50 {
+        a.send(json!(["REQ", n.to_string(), filter])).await;
+        a.send(json!(["CLOSE", n.to_string()])).await;
+    }
+    let mut gone = harness.client().await;
+    for n in 0..20 {
+        gone.send(json!(["REQ", n.to_string(), filter])).await;
+    }
+    drop(gone);
+
+    let mut b = harness.client().await;
+    assert_eq!(b.query("last", &[filter]).await.len(), 1);
+    // The last of the replaced ones still answers. (The closed ones may
+    // have too, if they finished before their CLOSE was read.)
+    while a.recv().await != json!(["EOSE", "same"]) {}
+}
+
 #[tokio::test]
 async fn refuses_a_client_with_no_address() {
     let harness = Harness::new(RelayConfig::default()).await;

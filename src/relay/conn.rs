@@ -20,6 +20,10 @@
 //! after — a shard can deliver an event committed just before the snapshot
 //! well after EOSE — so nothing is missed between the two and nothing is
 //! sent twice.
+//!
+//! A query stops as soon as nobody wants its results: when its subscription
+//! is closed or replaced, or the connection goes. Until it does it holds one
+//! of its client's few query places ([`Slot::queries`]) and a core.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -30,6 +34,7 @@ use futures_util::stream::{SplitSink, StreamExt};
 use futures_util::SinkExt;
 use serde_json::Value;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 
 use super::Shared;
 use super::clients::Slot;
@@ -65,6 +70,8 @@ struct Sub {
     pending: Option<Vec<(u64, Arc<str>)>>,
     /// The query's snapshot: stored events below this were sent with it.
     floor: u64,
+    /// Stops its query.
+    cancel: CancellationToken,
 }
 
 struct Session {
@@ -79,6 +86,8 @@ struct Session {
     slot: Slot,
     /// What this relay is called, as [`policy::authority`] puts it.
     authority: Arc<str>,
+    /// Stops every query of this connection's, once it goes.
+    cancel: CancellationToken,
 }
 
 type QueryDone = (Arc<str>, anyhow::Result<Results>);
@@ -90,7 +99,7 @@ pub async fn serve(shared: Arc<Shared>, socket: WebSocket, authority: Arc<str>, 
     shared.hub.connect(id, link.clone()).await;
     let tokens = TokenBucket::new(shared.config.events_per_minute, Instant::now());
     let cancel = shared.cancel.clone();
-    let mut session = Session { shared, id, link, sink, subs: HashMap::new(), tokens, slot, authority };
+    let mut session = Session { shared, id, link, sink, subs: HashMap::new(), tokens, slot, authority, cancel: CancellationToken::new() };
     let mut queries: JoinSet<QueryDone> = JoinSet::new();
 
     loop {
@@ -117,6 +126,9 @@ pub async fn serve(shared: Arc<Shared>, socket: WebSocket, authority: Arc<str>, 
         }
     }
 
+    // Dropping `queries` drops their tasks, but not what they left running
+    // on the blocking pool.
+    session.cancel.cancel();
     session.shared.hub.disconnect(id).await;
     let _ = session.sink.close().await;
 }
@@ -147,14 +159,21 @@ impl Session {
             },
             Some("CLOSE") => {
                 if let Some(sub) = message.get(1).and_then(Value::as_str) {
-                    self.subs.remove(sub);
-                    self.shared.hub.unsubscribe(self.id, sub).await;
+                    self.end(sub).await;
                 }
                 Ok(())
             }
             Some(other) => self.notice(&format!("unsupported: {other} messages")).await,
             None => self.notice("invalid: a message must start with its type").await,
         }
+    }
+
+    /// Close a subscription, and stop its query.
+    async fn end(&mut self, sub: &str) {
+        if let Some(sub) = self.subs.remove(sub) {
+            sub.cancel.cancel();
+        }
+        self.shared.hub.unsubscribe(self.id, sub).await;
     }
 
     async fn on_event(&mut self, event: Option<&Value>) -> Result<(), Gone> {
@@ -233,8 +252,7 @@ impl Session {
         let filters = match message[2..].iter().map(scoped).collect::<Result<Vec<_>, _>>() {
             Ok(filters) => filters,
             Err(error) => {
-                self.subs.remove(&sub);
-                self.shared.hub.unsubscribe(self.id, &sub).await;
+                self.end(&sub).await;
                 return self.closed(&sub, &error).await;
             }
         };
@@ -244,22 +262,38 @@ impl Session {
 
         let name: Arc<str> = sub.as_str().into();
         let json = serde_json::to_string(&sub).expect("strings serialize");
-        self.subs.insert(sub, Sub { name: name.clone(), json, pending: Some(Vec::new()), floor: 0 });
+        let cancel = self.cancel.child_token();
+        let replaced = self.subs.insert(sub, Sub { name: name.clone(), json, pending: Some(Vec::new()), floor: 0, cancel: cancel.clone() });
+        if let Some(replaced) = replaced {
+            replaced.cancel.cancel();
+        }
         // Live first, then the query: see the module docs. Queued from here
         // rather than the query's task, so a later CLOSE or REQ of the same id
         // reaches the shard after it.
         let installed = self.shared.hub.subscribe(self.id, name.clone(), filters.clone()).await;
 
         let shared = self.shared.clone();
+        let place = self.slot.queries.clone();
         queries.spawn(async move {
-            let results = async {
+            let query = async {
                 installed.await?;
-                let _permit = shared.queries.clone().acquire_owned().await?;
-                let store = shared.store.clone();
-                let max_limit = shared.config.max_limit;
-                Ok(tokio::task::spawn_blocking(move || query::run(&store, &filters, max_limit, now())).await??)
+                // One of the client's own places first, then a core.
+                let place = match place {
+                    Some(places) => Some(places.acquire_owned().await?),
+                    None => None,
+                };
+                let core = shared.queries.clone().acquire_owned().await?;
+                let (store, max_limit, cancel) = (shared.store.clone(), shared.config.max_limit, cancel.clone());
+                Ok(tokio::task::spawn_blocking(move || {
+                    // Held until the query stops, which may be a moment
+                    // after it's cancelled.
+                    let _held = (place, core);
+                    query::run(&store, &filters, max_limit, now(), &cancel)
+                })
+                .await??)
             };
-            (name, results.await)
+            let results = cancel.run_until_cancelled(query).await.unwrap_or_else(|| Err(anyhow::anyhow!("cancelled")));
+            (name, results)
         });
         Ok(())
     }
@@ -271,8 +305,7 @@ impl Session {
             Ok(results) => results,
             Err(error) => {
                 tracing::error!(%error, "a query failed");
-                self.subs.remove(&*name);
-                self.shared.hub.unsubscribe(self.id, &name).await;
+                self.end(&name).await;
                 return self.closed(&name, "error: could not run the query").await;
             }
         };

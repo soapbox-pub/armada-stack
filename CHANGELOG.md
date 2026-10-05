@@ -20,6 +20,11 @@ A release's notes are its section here, so tag `vX.Y.Z` only once
   `NOSTR_PUSH2_RELAYS` in `[web.env]` to keep using another push service.
 - The relay takes kind 25742, which only filters that name its author or
   `#p` recipient can read.
+- A relay query stops once its subscription is closed or replaced, or its
+  connection goes, rather than running to the end for nobody. Each client
+  address may have `relay.max_queries_per_ip` (4) queries running or
+  waiting for a core at once, and a REQ's filters together examine at most
+  200,000 events, so one client can't keep everyone else's REQs waiting.
 
 ## 0.2.0
 

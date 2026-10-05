@@ -9,8 +9,14 @@
 //!
 //! A scan opens a cursor per key, each starting at `until` and walking back
 //! in time, and merges them newest first until `since` or the limit.
+//!
+//! A REQ's filters share one budget of records to examine, and stop early
+//! once nobody wants their results: the subscription was closed or
+//! replaced, or its connection went away.
 
 use std::collections::{BinaryHeap, HashSet};
+
+use tokio_util::sync::CancellationToken;
 
 use super::filter::Filter;
 use super::lmdb::{Cursor, Db, Result, Txn};
@@ -26,6 +32,13 @@ const MAX_AUTHOR_KINDS: usize = 1024;
 /// how long one of those can hold a reader.
 const MAX_EXAMINED: usize = 100_000;
 
+/// The most records all of one REQ's filters may examine together, so that
+/// adding filters doesn't add to how long a REQ can hold a core.
+const MAX_EXAMINED_PER_REQ: usize = 200_000;
+
+/// How many records go by between looks at whether the query is cancelled.
+const CANCEL_CHECK: usize = 256;
+
 /// The most extra events read past the limit to order a tie at the boundary.
 const MAX_TIES: usize = 1000;
 
@@ -37,8 +50,37 @@ pub struct Results {
     pub events: Vec<String>,
 }
 
-/// Run a REQ's filters. Each one's limit is capped at `max_limit`.
-pub fn run(store: &Store, filters: &[Filter], max_limit: u64, now: i64) -> Result<Results> {
+/// Records left to examine, until they run out or `cancel` fires.
+struct Budget<'a> {
+    left: usize,
+    spent: usize,
+    cancel: &'a CancellationToken,
+}
+
+impl Budget<'_> {
+    /// Spend one, or `false` if there's none left.
+    fn spend(&mut self) -> bool {
+        if self.left == 0 {
+            return false;
+        }
+        self.spent += 1;
+        if self.spent.is_multiple_of(CANCEL_CHECK) && self.cancel.is_cancelled() {
+            self.left = 0;
+            return false;
+        }
+        self.left -= 1;
+        true
+    }
+}
+
+/// Run a REQ's filters. Each one's limit is capped at `max_limit`. Once
+/// `cancel` fires it stops soon, with whatever it found so far, which
+/// nobody should send.
+pub fn run(store: &Store, filters: &[Filter], max_limit: u64, now: i64, cancel: &CancellationToken) -> Result<Results> {
+    run_within(store, filters, max_limit, now, Budget { left: MAX_EXAMINED_PER_REQ, spent: 0, cancel })
+}
+
+fn run_within(store: &Store, filters: &[Filter], max_limit: u64, now: i64, mut budget: Budget) -> Result<Results> {
     let txn = store.read()?;
     let next_seq = store.next_seq(&txn)?;
     let mut seen = HashSet::new();
@@ -48,7 +90,10 @@ pub fn run(store: &Store, filters: &[Filter], max_limit: u64, now: i64) -> Resul
         if filter.never || limit == 0 {
             continue;
         }
-        for (seq, view) in run_filter(store, &txn, filter, limit, now)? {
+        if budget.left == 0 || budget.cancel.is_cancelled() {
+            break;
+        }
+        for (seq, view) in run_filter(store, &txn, filter, limit, now, &mut budget)? {
             if seen.insert(seq) {
                 events.push(view.to_json());
             }
@@ -57,11 +102,14 @@ pub fn run(store: &Store, filters: &[Filter], max_limit: u64, now: i64) -> Resul
     Ok(Results { next_seq, events })
 }
 
-fn run_filter<'t>(store: &Store, txn: &'t Txn, filter: &Filter, limit: usize, now: i64) -> Result<Vec<(u64, EventView<'t>)>> {
+fn run_filter<'t>(store: &Store, txn: &'t Txn, filter: &Filter, limit: usize, now: i64, budget: &mut Budget) -> Result<Vec<(u64, EventView<'t>)>> {
     let mut found = Vec::new();
 
     if let Some(ids) = &filter.ids {
         for id in ids {
+            if !budget.spend() {
+                break;
+            }
             let Some(seq) = store.seq_of(txn, id)? else { continue };
             if let Some(view) = store.load(txn, seq)?.filter(|view| filter.matches(view) && !view.is_expired(now) && policy::visible(view, filter)) {
                 found.push((seq, view));
@@ -69,7 +117,7 @@ fn run_filter<'t>(store: &Store, txn: &'t Txn, filter: &Filter, limit: usize, no
         }
     } else {
         let plan = plan(store, txn, filter)?;
-        scan(store, txn, filter, &plan, limit, now, &mut found)?;
+        scan(store, txn, filter, &plan, limit, now, budget, &mut found)?;
     }
 
     // Newest first; on a tie, the lowest id first (NIP-01).
@@ -168,7 +216,7 @@ fn stamp_of(entry: Option<(&[u8], &[u8])>) -> Option<Stamp> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn scan<'t>(store: &Store, txn: &'t Txn, filter: &Filter, plan: &Plan, limit: usize, now: i64, found: &mut Vec<(u64, EventView<'t>)>) -> Result<()> {
+fn scan<'t>(store: &Store, txn: &'t Txn, filter: &Filter, plan: &Plan, limit: usize, now: i64, budget: &mut Budget, found: &mut Vec<(u64, EventView<'t>)>) -> Result<()> {
     let mut sources = Vec::new();
     let mut heap = BinaryHeap::new();
     for key in &plan.keys {
@@ -199,7 +247,7 @@ fn scan<'t>(store: &Store, txn: &'t Txn, filter: &Filter, plan: &Plan, limit: us
             break;
         }
         examined += 1;
-        if examined > MAX_EXAMINED {
+        if examined > MAX_EXAMINED || !budget.spend() {
             break;
         }
 
@@ -225,7 +273,7 @@ mod tests {
 
     fn ids(store: &Store, filters: &[Value], max_limit: u64) -> Vec<String> {
         let filters: Vec<Filter> = filters.iter().map(|f| Filter::parse(f).unwrap()).collect();
-        let results = run(store, &filters, max_limit, 1_000_000).unwrap();
+        let results = run(store, &filters, max_limit, 1_000_000, &CancellationToken::new()).unwrap();
         results.events.iter().map(|json| serde_json::from_str::<Event>(json).unwrap().id).collect()
     }
 
@@ -336,6 +384,42 @@ mod tests {
             let expected: Vec<String> = expected.iter().take(limit).map(|e| e.id.clone()).collect();
             assert_eq!(ids(&store, std::slice::from_ref(&filter), 500), expected, "{filter}");
         }
+    }
+
+    #[test]
+    fn shares_one_budget_across_a_reqs_filters() {
+        let (_dir, store) = open();
+        for i in 0..5 {
+            put(&store, &Event::sign(ALICE, 100 + i, 1, vec![], ""));
+            put(&store, &Event::sign(BOB, 100 + i, 7, vec![], ""));
+        }
+        let filters: Vec<Filter> = [json!({"kinds": [1]}), json!({"kinds": [7]})].iter().map(|f| Filter::parse(f).unwrap()).collect();
+        let cancel = CancellationToken::new();
+        let budget = |left| Budget { left, spent: 0, cancel: &cancel };
+        assert_eq!(run_within(&store, &filters, 100, 1_000_000, budget(100)).unwrap().events.len(), 10);
+        // The first filter spends most of it.
+        assert_eq!(run_within(&store, &filters, 100, 1_000_000, budget(7)).unwrap().events.len(), 7);
+        assert_eq!(run_within(&store, &filters, 100, 1_000_000, budget(3)).unwrap().events.len(), 3);
+    }
+
+    #[test]
+    fn stops_once_cancelled() {
+        let (_dir, store) = open();
+        for i in 0..(CANCEL_CHECK as i64 * 2) {
+            put(&store, &Event::sign(ALICE, 100 + i, 1, vec![], ""));
+        }
+        let filters = [Filter::parse(&json!({"kinds": [1]})).unwrap()];
+        let cancel = CancellationToken::new();
+        // Partway through, at its next look.
+        let mut budget = Budget { left: usize::MAX, spent: 0, cancel: &cancel };
+        for _ in 0..CANCEL_CHECK - 10 {
+            assert!(budget.spend());
+        }
+        cancel.cancel();
+        assert_eq!(std::iter::from_fn(|| budget.spend().then_some(())).count(), 9);
+        assert!(!budget.spend());
+        // Before it starts, at once.
+        assert!(run(&store, &filters, 1000, 1_000_000, &cancel).unwrap().events.is_empty());
     }
 
     #[test]

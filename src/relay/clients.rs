@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use parking_lot::Mutex;
+use tokio::sync::Semaphore;
 
 use crate::config::RelayConfig;
 use crate::ratelimit::TokenBucket;
@@ -20,6 +21,7 @@ const SWEEP_FLOOR: usize = 1024;
 
 pub struct Clients {
     max_connections: usize,
+    max_queries: usize,
     events_per_minute: u32,
     table: Mutex<Table>,
 }
@@ -34,6 +36,8 @@ struct Table {
 struct Client {
     connections: usize,
     events: TokenBucket,
+    /// Its queries' places, if they're limited.
+    queries: Option<Arc<Semaphore>>,
 }
 
 impl Client {
@@ -47,12 +51,17 @@ impl Client {
 pub struct Slot {
     clients: Arc<Clients>,
     key: String,
+    /// The client's queries' places, shared by all its connections, if
+    /// they're limited: a query takes one before it waits for a core, so one
+    /// client can't fill the queue for them.
+    pub queries: Option<Arc<Semaphore>>,
 }
 
 impl Clients {
     pub fn new(config: &RelayConfig) -> Arc<Clients> {
         Arc::new(Clients {
             max_connections: config.max_connections_per_ip,
+            max_queries: config.max_queries_per_ip,
             events_per_minute: config.events_per_minute_per_ip,
             table: Mutex::new(Table { clients: HashMap::new(), sweep_at: SWEEP_FLOOR }),
         })
@@ -66,12 +75,17 @@ impl Clients {
             table.clients.retain(|_, client| !client.is_idle(now));
             table.sweep_at = (table.clients.len() * 2).max(SWEEP_FLOOR);
         }
-        let client = table.clients.entry(key.clone()).or_insert_with(|| Client { connections: 0, events: TokenBucket::new(self.events_per_minute, now) });
+        let client = table.clients.entry(key.clone()).or_insert_with(|| Client {
+            connections: 0,
+            events: TokenBucket::new(self.events_per_minute, now),
+            queries: (self.max_queries != 0).then(|| Arc::new(Semaphore::new(self.max_queries))),
+        });
         if self.max_connections != 0 && client.connections >= self.max_connections {
             return None;
         }
         client.connections += 1;
-        Some(Slot { clients: self.clone(), key })
+        let queries = client.queries.clone();
+        Some(Slot { clients: self.clone(), key, queries })
     }
 
     #[cfg(test)]
@@ -134,6 +148,20 @@ mod tests {
         assert!(a.take_event(now) && a.take_event(now) && b.take_event(now));
         assert!(!b.take_event(now));
         assert!(!a.take_event(now));
+    }
+
+    #[test]
+    fn shares_query_places() {
+        let clients = Clients::new(&RelayConfig { max_queries_per_ip: 2, ..RelayConfig::default() });
+        let now = Instant::now();
+        let a = clients.connect("a".into(), now).unwrap();
+        let b = clients.connect("a".into(), now).unwrap();
+        let _first = a.queries.clone().unwrap().try_acquire_owned().unwrap();
+        let _second = b.queries.clone().unwrap().try_acquire_owned().unwrap();
+        assert!(a.queries.clone().unwrap().try_acquire_owned().is_err());
+        // Others aren't charged for it.
+        assert!(clients.connect("b".into(), now).unwrap().queries.clone().unwrap().try_acquire_owned().is_ok());
+        assert!(Clients::new(&RelayConfig { max_queries_per_ip: 0, ..RelayConfig::default() }).connect("a".into(), now).unwrap().queries.is_none());
     }
 
     #[test]
