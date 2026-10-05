@@ -12,6 +12,7 @@ mod net;
 mod nostr;
 mod nsite;
 mod origin;
+mod push;
 mod ratelimit;
 mod relay;
 mod routes;

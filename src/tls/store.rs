@@ -11,8 +11,6 @@
 //!
 //! Both hold private keys, so they're readable by armada's user alone.
 
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,6 +19,8 @@ use instant_acme::AccountCredentials;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::sign::CertifiedKey;
+
+use crate::util::write_private;
 
 pub struct Store {
     dir: PathBuf,
@@ -116,19 +116,3 @@ fn read_if_exists(path: &Path) -> Result<Option<Vec<u8>>> {
     }
 }
 
-/// Write `bytes` to `path` readable by its owner alone, replacing whatever
-/// was there in one step so a crash never leaves half a key.
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    let temporary = path.with_extension("tmp");
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&temporary)
-        .with_context(|| format!("Could not write {}", temporary.display()))?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    std::fs::rename(&temporary, path).with_context(|| format!("Could not write {}", path.display()))?;
-    Ok(())
-}

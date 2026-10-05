@@ -1,12 +1,33 @@
 //! Small helpers used throughout.
 
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use anyhow::Context;
 use rand::RngCore;
 
 /// Now, in epoch seconds.
 pub fn now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+/// Write `bytes` to `path` readable by its owner alone, replacing whatever
+/// was there in one step so a crash never leaves half a key.
+pub fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let temporary = path.with_extension("tmp");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&temporary)
+        .with_context(|| format!("Could not write {}", temporary.display()))?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    std::fs::rename(&temporary, path).with_context(|| format!("Could not write {}", path.display()))?;
+    Ok(())
 }
 
 /// `n` random bytes as hex.

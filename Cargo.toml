@@ -11,6 +11,7 @@ name = "armada"
 path = "src/main.rs"
 
 [dependencies]
+aes-gcm = "0.10"
 anyhow = "1"
 arc-swap = "1"
 axum = { version = "0.8", features = ["ws"] }
@@ -36,6 +37,7 @@ libc = "0.2"
 lmdb-master-sys = "0.2.6"
 lru = "0.12"
 memmap2 = "0.9"
+p256 = { version = "0.13", features = ["ecdsa", "ecdh"] }
 parking_lot = "0.12"
 rand = "0.9"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "crypto"] }
@@ -57,7 +59,6 @@ url = "2"
 x509-parser = "0.18"
 
 [dev-dependencies]
-aes-gcm = "0.10"
 http-body-util = "0.1"
 tempfile = "3"
 time = "0.3"

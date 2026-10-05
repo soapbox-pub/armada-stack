@@ -62,6 +62,7 @@ impl Event {
 }
 
 /// The public key of a hex secret key.
+#[cfg(test)]
 pub fn public_key(secret: &str) -> String {
     let keypair = Keypair::from_seckey_str_global(secret).expect("a valid secret key");
     hex::encode(keypair.x_only_public_key().0.serialize())

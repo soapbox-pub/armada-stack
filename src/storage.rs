@@ -6,6 +6,8 @@
 //!   relay/          LMDB: the relay's events
 //!   blossom/        LMDB: the Blossom server's blob records and owners
 //!   blossom/blobs/  the Blossom server's own blob store
+//!   push/           LMDB: the push service's clients
+//!   push/key        the push service's Nostr secret key, made on first start
 //!   blobs/          the content-addressed blob store the site is served from
 //! ```
 //!

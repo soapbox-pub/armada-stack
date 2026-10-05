@@ -176,11 +176,6 @@ impl Internal {
     /// once it's live. Stored events aren't looked up. Filters are scoped as
     /// a client's are, and errors are the reason a client would be given.
     pub async fn subscribe(&self, conn: ConnId, sub: &str, filters: &[Value]) -> Result<(), String> {
-        let scoped = |value| {
-            let mut filter = Filter::parse(value)?;
-            policy::scope(&mut filter)?;
-            Ok::<_, String>(filter)
-        };
         let filters = filters.iter().map(scoped).collect::<Result<Vec<_>, _>>()?;
         let _ = self.shared.hub.subscribe(conn, sub.into(), filters).await.await;
         Ok(())
@@ -199,6 +194,18 @@ impl Internal {
         let (reply, _, _) = Link::new(1);
         self.shared.writer.submit(writer::Submission { record, reply }).is_ok()
     }
+}
+
+/// A filter as a client's REQ would have it, or why it's refused.
+fn scoped(value: &Value) -> Result<Filter, String> {
+    let mut filter = Filter::parse(value)?;
+    policy::scope(&mut filter)?;
+    Ok(filter)
+}
+
+/// Whether [`Internal::subscribe`] would take a filter, and if not, why.
+pub fn check_filter(value: &Value) -> Result<(), String> {
+    scoped(value).map(drop)
 }
 
 /// Whether a request is the relay's: a WebSocket upgrade or a NIP-11
