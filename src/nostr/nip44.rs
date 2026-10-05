@@ -51,10 +51,10 @@ fn encrypt_with_nonce(conversation_key: &[u8; 32], plaintext: &str, nonce: &[u8;
     if len == 0 || len > MAX_PLAINTEXT {
         return None;
     }
-    let mut padded = Vec::with_capacity(2 + crate::relay::padded_len(len));
+    let mut padded = Vec::with_capacity(2 + crate::relay::nip44::padded_len(len));
     padded.extend_from_slice(&(len as u16).to_be_bytes());
     padded.extend_from_slice(plaintext.as_bytes());
-    padded.resize(2 + crate::relay::padded_len(len), 0);
+    padded.resize(2 + crate::relay::nip44::padded_len(len), 0);
 
     let (key, chacha_nonce, hmac_key) = message_keys(conversation_key, nonce);
     ChaCha20::new(&key.into(), &chacha_nonce.into()).apply_keystream(&mut padded);
@@ -86,7 +86,7 @@ pub fn decrypt(conversation_key: &[u8; 32], payload: &str) -> Option<String> {
     let mut padded = ciphertext.to_vec();
     ChaCha20::new(&key.into(), &chacha_nonce.into()).apply_keystream(&mut padded);
     let len = u16::from_be_bytes([padded[0], padded[1]]) as usize;
-    if len == 0 || padded.len() != 2 + crate::relay::padded_len(len) {
+    if len == 0 || padded.len() != 2 + crate::relay::nip44::padded_len(len) {
         return None;
     }
     String::from_utf8(padded[2..2 + len].to_vec()).ok()
@@ -129,7 +129,7 @@ mod tests {
         for len in [1, 32, 33, 1000, MAX_PLAINTEXT] {
             let plaintext = "x".repeat(len);
             let payload = encrypt(&key, &plaintext).unwrap();
-            assert!(crate::relay::is_v2_payload(&payload));
+            assert!(crate::relay::nip44::is_v2_payload(&payload));
             assert_eq!(decrypt(&key, &payload).unwrap(), plaintext);
         }
         assert!(encrypt(&key, "").is_none());

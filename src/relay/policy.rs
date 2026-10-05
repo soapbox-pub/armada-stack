@@ -23,6 +23,9 @@ pub const GIFT_WRAP: u16 = 1059;
 const ANNOUNCEMENT: u16 = 3314;
 pub const EPHEMERAL_GIFT_WRAP: u16 = 21059;
 pub const NIP46: u16 = 24133;
+/// A request to a push service or its answer, in nostr-push2's protocol;
+/// see [`crate::push`].
+pub const PUSH_RPC: u16 = 25742;
 pub const APP_DATA: u16 = 30078;
 const INVITE_BUNDLE: u16 = 33301;
 
@@ -47,6 +50,7 @@ pub const KINDS: &[u16] = &[
     16767,
     EPHEMERAL_GIFT_WRAP,
     NIP46,
+    PUSH_RPC,
     30030,
     APP_DATA,
     30315,
@@ -99,7 +103,7 @@ pub fn expiration(event: &Event, now: i64) -> Option<u32> {
 pub enum Access {
     Anyone,
     /// Any filter that names its author or its `p` recipient, for gift
-    /// wraps and NIP-46 messages: there's no sweeping up everyone's by
+    /// wraps, NIP-46 messages, and push requests: there's no sweeping up everyone's by
     /// asking for them all. Who asks isn't known, and isn't asked: a
     /// relay that has readers sign in to read their own learns which
     /// address each key reads from, which plain REQs never tell it.
@@ -108,7 +112,7 @@ pub enum Access {
 
 pub fn access(kind: u16) -> Access {
     match kind {
-        GIFT_WRAP | EPHEMERAL_GIFT_WRAP | NIP46 => Access::Named,
+        GIFT_WRAP | EPHEMERAL_GIFT_WRAP | NIP46 | PUSH_RPC => Access::Named,
         _ => Access::Anyone,
     }
 }
@@ -186,8 +190,8 @@ pub fn validate(event: &Event, now: i64, relay: &str) -> Result<(), String> {
     }
 
     match kind {
-        GIFT_WRAP | EPHEMERAL_GIFT_WRAP | NIP46 => {
-            envelope_tags(event, kind != NIP46)?;
+        GIFT_WRAP | EPHEMERAL_GIFT_WRAP | NIP46 | PUSH_RPC => {
+            envelope_tags(event, is_gift_wrap(kind))?;
             content(event, Content::Nip44)
         }
         0 | 10304 => content(event, Content::JsonObject),
@@ -450,7 +454,7 @@ mod tests {
 
     #[test]
     fn refuses_other_kinds() {
-        for kind in [1, 4, 7, 9, 1111, 20001, 22242, 25742, 30023, 39000] {
+        for kind in [1, 4, 7, 9, 1111, 20001, 22242, 30023, 39000] {
             assert!(refused(kind, &[], "").starts_with("blocked:"), "{kind}");
         }
     }
@@ -459,7 +463,7 @@ mod tests {
     fn envelopes_are_strict() {
         let p = public_key(BOB);
         let wrap = payload(500);
-        for kind in [GIFT_WRAP, EPHEMERAL_GIFT_WRAP, NIP46] {
+        for kind in [GIFT_WRAP, EPHEMERAL_GIFT_WRAP, NIP46, PUSH_RPC] {
             ok(kind, &[&["p", &p]], &wrap);
             ok(kind, &[&["p", &p], &["expiration", "1800000000"]], &wrap);
             refused(kind, &[], &wrap);
@@ -634,8 +638,8 @@ mod tests {
             scope(&mut filter).map(|()| filter)
         };
 
-        // Gift wraps and NIP-46, by author or recipient.
-        for kind in [GIFT_WRAP, EPHEMERAL_GIFT_WRAP, NIP46] {
+        // Gift wraps, NIP-46, and push requests, by author or recipient.
+        for kind in [GIFT_WRAP, EPHEMERAL_GIFT_WRAP, NIP46, PUSH_RPC] {
             assert!(scope(serde_json::json!({"kinds": [kind], "authors": [bob]})).is_ok());
             assert!(scope(serde_json::json!({"kinds": [kind], "#p": [bob]})).is_ok());
             assert!(scope(serde_json::json!({"kinds": [kind], "authors": [bob, alice], "#p": [bob]})).is_ok());

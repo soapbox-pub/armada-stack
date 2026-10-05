@@ -23,6 +23,7 @@ struct Harness {
     _dir: tempfile::TempDir,
     url: String,
     relay: Router,
+    handle: Relay,
     _cancel: tokio_util::sync::DropGuard,
 }
 
@@ -37,11 +38,12 @@ impl Harness {
         let cancel = CancellationToken::new();
         let relay = Relay::open(&config, None, trust_proxy, &Storage::allowing_private(dir.path()), &cancel).unwrap();
         let router = relay.router();
+        let handle = relay.clone();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
         let served = router.clone();
         tokio::spawn(async move { axum::serve(listener, served.into_make_service_with_connect_info::<std::net::SocketAddr>()).await });
-        Harness { _dir: dir, url, relay: router, _cancel: cancel.drop_guard() }
+        Harness { _dir: dir, url, relay: router, handle, _cancel: cancel.drop_guard() }
     }
 
     async fn client(&self) -> Client {
@@ -555,4 +557,35 @@ async fn carries_nip46_between_parties_that_name_themselves() {
 
     // Kept briefly, for a party that reconnects.
     assert_eq!(stranger.query("late", &[json!({"kinds": [24133], "#p": [signer]})]).await, [request]);
+}
+
+/// A service inside armada sees new events under a client's rules, and
+/// publishes its own.
+#[tokio::test]
+async fn serves_internal_connections() {
+    let harness = Harness::new(RelayConfig::default()).await;
+    let internal = harness.handle.internal();
+    let (conn, mut rx, _) = internal.connect(16).await;
+    let bob = crate::nostr::event::public_key(BOB);
+    assert!(internal.subscribe(conn, "s", &[json!({"kinds": [1059]})]).await.unwrap_err().starts_with("restricted:"));
+    internal.subscribe(conn, "s", &[json!({"kinds": [1059], "#p": [bob]})]).await.unwrap();
+
+    let mut alice = harness.client().await;
+    let wrap = Event::sign(ALICE, now(), 1059, tags(&[&["p", &bob]]), &nip44::payload(100));
+    alice.publish(&wrap).await;
+    match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.unwrap().unwrap() {
+        Outbound::Event { sub, json, .. } => {
+            assert_eq!(&*sub, "s");
+            assert_eq!(serde_json::from_str::<Event>(&json).unwrap(), wrap);
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+
+    // What it publishes reaches clients.
+    let mut carol = harness.client().await;
+    assert!(carol.query("mine", &[json!({"kinds": [1059], "#p": [bob]})]).await.len() == 1);
+    let reply = Event::sign(CAROL, now(), 1059, tags(&[&["p", &bob]]), &nip44::payload(100));
+    assert!(internal.publish(&reply));
+    assert_eq!(carol.recv().await, json!(["EVENT", "mine", reply]));
+    internal.disconnect(conn).await;
 }

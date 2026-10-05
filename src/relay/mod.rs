@@ -5,8 +5,11 @@
 //! It takes the kinds Armada uses and nothing else, each checked against
 //! rules of its own ([`policy`]). Anyone may publish them, within the
 //! limits in [`RelayConfig`] — per connection, and per client address
-//! ([`clients`]) — and read them, but gift wraps and NIP-46 messages are
-//! only found by filters that name their author or recipient.
+//! ([`clients`]) — and read them, but gift wraps, NIP-46 messages, and
+//! push requests are only found by filters that name their author or
+//! recipient.
+//!
+//! Services inside armada reach it through [`Internal`], without a socket.
 //!
 //! - [`store`] keeps events in LMDB as compact [`record`]s, with
 //!   duplicate-sorted indexes (over [`lmdb`], since heed can't seek within
@@ -23,7 +26,7 @@ mod conn;
 mod filter;
 mod lmdb;
 mod monitors;
-mod nip44;
+pub mod nip44;
 mod policy;
 mod query;
 mod record;
@@ -31,7 +34,7 @@ mod store;
 mod writer;
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -40,18 +43,21 @@ use axum::extract::Request;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::response::{IntoResponse, Response};
 use http::{HeaderMap, Method, StatusCode, header};
-use tokio::sync::Semaphore;
+use serde_json::Value;
+use tokio::sync::{Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::RelayConfig;
 use crate::ratelimit;
 use crate::storage::Storage;
+use crate::nostr::Event;
 use clients::Clients;
-use monitors::Hub;
+use filter::Filter;
+use monitors::{Hub, Link};
 use store::Store;
 use writer::Writer;
 
-pub use nip44::{is_v2_payload, padded_len};
+pub use monitors::{ConnId, Outbound};
 
 #[derive(Clone)]
 pub struct Relay {
@@ -134,6 +140,64 @@ impl Relay {
             }
             Err(rejection) => rejection.into_response(),
         }
+    }
+}
+
+/// The relay as services inside armada use it: connections of their own,
+/// without a socket, whose subscriptions see each new event as a client's
+/// would and under the same rules, and a way to publish events.
+#[derive(Clone)]
+pub struct Internal {
+    shared: Arc<Shared>,
+}
+
+impl Relay {
+    pub fn internal(&self) -> Internal {
+        Internal { shared: self.shared.clone() }
+    }
+}
+
+impl Internal {
+    /// A new connection. New events for its subscriptions arrive on the
+    /// receiver, until it falls `capacity` behind and the token fires;
+    /// after that it gets nothing more, and should be replaced.
+    pub async fn connect(&self, capacity: usize) -> (ConnId, mpsc::Receiver<Outbound>, CancellationToken) {
+        let id = self.shared.next_conn.fetch_add(1, Ordering::Relaxed);
+        let (link, rx, overflow) = Link::new(capacity);
+        self.shared.hub.connect(id, link).await;
+        (id, rx, overflow)
+    }
+
+    pub async fn disconnect(&self, conn: ConnId) {
+        self.shared.hub.disconnect(conn).await;
+    }
+
+    /// Open a subscription to new events, replacing any of the same id,
+    /// once it's live. Stored events aren't looked up. Filters are scoped as
+    /// a client's are, and errors are the reason a client would be given.
+    pub async fn subscribe(&self, conn: ConnId, sub: &str, filters: &[Value]) -> Result<(), String> {
+        let scoped = |value| {
+            let mut filter = Filter::parse(value)?;
+            policy::scope(&mut filter)?;
+            Ok::<_, String>(filter)
+        };
+        let filters = filters.iter().map(scoped).collect::<Result<Vec<_>, _>>()?;
+        let _ = self.shared.hub.subscribe(conn, sub.into(), filters).await.await;
+        Ok(())
+    }
+
+    pub async fn unsubscribe(&self, conn: ConnId, sub: &str) {
+        self.shared.hub.unsubscribe(conn, sub).await;
+    }
+
+    /// Queue an event for the writer, as a client's would be once checked.
+    /// It's trusted: neither validated nor verified. Returns whether the
+    /// writer had room.
+    pub fn publish(&self, event: &Event) -> bool {
+        let record = record::encode_expiring(event, policy::expiration(event, crate::util::now()));
+        // Nothing reads the `OK`.
+        let (reply, _, _) = Link::new(1);
+        self.shared.writer.submit(writer::Submission { record, reply }).is_ok()
     }
 }
 
