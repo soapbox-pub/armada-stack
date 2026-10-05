@@ -5,6 +5,20 @@ A release's notes are its section here, so tag `vX.Y.Z` only once
 
 ## Unreleased
 
+- Calls, built in. armada carries LiveKit 1.13.7 and runs it itself, as the
+  node its AV broker places calls on, so a new server has voice and video
+  with nothing to install. Its signaling goes through armada at `/rtc`;
+  **open 7881/tcp and 7882/udp** for the media. Its key and secret are made
+  on first start, in `livekit/` in the storage directory. `[av] livekit =
+  false` turns it off, and a node in `[[av.nodes]]` on armada's own origin
+  takes its place. It needs `public_url`. The binary is about 20 MB larger.
+- `window.ENV` gives `CONCORD_AV_SERVERS` as this armada alone, rather than
+  this armada then armada.buzz.
+- install.sh raises the kernel's UDP buffer limits for LiveKit, in
+  `/etc/sysctl.d/60-armada.conf`. The service unit no longer hides the rest
+  of `/proc` (`ProcSubset=pid`), which LiveKit reads the machine's load from;
+  install.sh installs the new unit, or copy `deploy/armada.service` in.
+
 - `window.ENV` names the web app's relays and Blossom servers the way
   Armada now reads them: `RELAYS` and `BLOSSOM_SERVERS`, armada's own first,
   in place of `APP_RELAYS`, `COMMUNITY_RELAYS`, `APP_BLOSSOM_SERVERS` and

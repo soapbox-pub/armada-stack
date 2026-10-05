@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
     }
     init_logging();
 
-    let config::Loaded { config, source, storage_dir } = Config::load(cli.config.as_deref(), &Environment::current())?;
+    let config::Loaded { mut config, source, storage_dir } = Config::load(cli.config.as_deref(), &Environment::current())?;
     match &source {
         Some(path) => tracing::info!(config = %path.display(), "config loaded"),
         None => tracing::info!("no config file found; using the defaults"),
@@ -119,6 +119,13 @@ async fn main() -> Result<()> {
     };
     let names = origin::Names::new(config.public_url()?, onion.as_ref().map(|key| key.address.clone()));
 
+    // Before anything reads the AV nodes, so the built-in LiveKit is one.
+    let livekit = av::builtin::LiveKit::prepare(&config, &storage)?;
+    if let (Some(livekit), Some(public_url)) = (&livekit, config.public_url()?) {
+        config.av.nodes.push(livekit.node(&public_url));
+        config.validate_av()?;
+    }
+
     let cancel = CancellationToken::new();
     let nostr = Arc::new(NostrService::new(config.web.relay_urls(), tor.clone()));
     let push = if config.push.enabled { Some(push::Push::open(&storage)?) } else { None };
@@ -137,8 +144,9 @@ async fn main() -> Result<()> {
     }
     let av = av::Av::open(&config, &cancel)?;
     if av.is_some() {
-        tracing::info!(nodes = config.av.nodes.len(), "offering AV");
+        tracing::info!(nodes = config.av.nodes.len(), built_in = livekit.is_some(), "offering AV");
     }
+    let livekit = livekit.map(|livekit| livekit.start(cancel.clone()));
     if config.trust_proxy == Some(true) && config.listen().ip().is_unspecified() {
         tracing::warn!("trust_proxy is on while listening on every interface: anyone reaching armada directly can forge X-Forwarded-For.");
     }
@@ -194,6 +202,9 @@ async fn main() -> Result<()> {
     // However serving ended, the rest stops with it.
     cancel.cancel();
     let _ = sync.await;
+    if let Some(livekit) = livekit {
+        let _ = livekit.await;
+    }
     served.context("serving")?;
     Ok(())
 }

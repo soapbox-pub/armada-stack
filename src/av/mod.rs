@@ -20,6 +20,7 @@
 //!
 //! Nothing is logged per request.
 
+pub mod builtin;
 mod fleet;
 mod grant;
 mod livekit;

@@ -225,13 +225,16 @@ pub struct BlossomConfig {
 }
 
 /// A blind Concord AV broker (CORD-07 §2), handing out seats on LiveKit
-/// servers run alongside. Off unless at least one node is configured.
+/// servers: the one built into armada, and any listed here.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AvConfig {
     /// The LiveKit servers rooms are placed on. Each is an independent
     /// deployment; a room's name picks which one it lands on.
     pub nodes: Vec<AvNode>,
+    /// Run the LiveKit built into armada as a node on armada's own origin
+    /// (see [`crate::av::builtin`]), unless a node in `nodes` is there.
+    pub livekit: bool,
     /// Seconds a LiveKit token lasts. Clients use one for a whole call and
     /// never fetch another, so it must outlive a long call.
     pub token_ttl: u64,
@@ -284,6 +287,7 @@ impl Default for AvConfig {
     fn default() -> Self {
         AvConfig {
             nodes: Vec::new(),
+            livekit: true,
             token_ttl: 6 * 60 * 60,
             max_skew: 60,
             replay_ttl: 240,
@@ -550,7 +554,7 @@ impl Config {
         Ok(())
     }
 
-    fn validate_av(&self) -> Result<()> {
+    pub(crate) fn validate_av(&self) -> Result<()> {
         let av = &self.av;
         if av.nodes.is_empty() {
             return Ok(());

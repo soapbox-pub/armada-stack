@@ -35,8 +35,9 @@ ProtectKernelLogs=true
 ProtectControlGroups=true
 ProtectClock=true
 ProtectHostname=true
+# Other processes hidden, but not the rest of /proc: the built-in LiveKit
+# reads the machine's load from it to report how busy it is.
 ProtectProc=invisible
-ProcSubset=pid
 # IP for everything it serves and fetches; netlink for resolving names.
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 RestrictNamespaces=true

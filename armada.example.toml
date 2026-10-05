@@ -38,8 +38,8 @@ keep_versions = 60
 # What the web app is told through window.ENV, at /_armada/env.js, by the
 # names Armada reads. Unset, armada's own relay and Blossom server (preferred
 # for uploads) join Armada's public ones as RELAYS and BLOSSOM_SERVERS, and
-# its AV broker joins Armada's, once public_url or a public Host says where
-# armada is reached. A name set here replaces that; "" brings back Armada's
+# its AV broker is CONCORD_AV_SERVERS alone, once public_url or a public Host
+# says where armada is reached. A name set here replaces that; "" brings back Armada's
 # own default, except for CONCORD_AV_SERVERS, which "" turns off.
 #
 # RELAYS is every relay the app uses by default: account data, search, new
@@ -48,7 +48,6 @@ keep_versions = 60
 # indexes at login, a git index). To lean on this armada's services alone:
 # [web.env]
 # RELAYS = "wss://armada.example.com"
-# CONCORD_AV_SERVERS = "https://armada.example.com"
 # Keep a public Blossom server besides this one, which takes only encrypted
 # blobs: avatars, banners and emoji are uploaded in the clear.
 # BLOSSOM_SERVERS = "https://armada.example.com/,https://blossom.ditto.pub/"
@@ -113,9 +112,14 @@ enabled = true
 # C Tor's format, so back it up to keep the address.
 onion_service = true
 
-# A blind Concord AV broker (CORD-07 §2) for LiveKit servers you run. Off
-# until a node is listed; needs public_url. See deploy/livekit.yaml.
+# Voice and video calls: a blind Concord AV broker (CORD-07 §2), placing
+# calls on LiveKit. Needs public_url, and 7881/tcp and 7882/udp open.
 [av]
+# Run the LiveKit built into armada, with deploy/livekit.yaml, as the node on
+# armada's own origin. Its key and secret are made on first start, in
+# livekit/ in storage_dir. A node in [[av.nodes]] on armada's own origin
+# takes its place.
+livekit = true
 # Seconds a token lasts. At most 86400.
 token_ttl = 21600
 max_skew = 60
@@ -124,7 +128,8 @@ replay_ttl = 240
 rate_limit_per_minute = 60
 health_interval = 15
 
-# One LiveKit server; list several to share calls between them.
+# LiveKit servers you run, besides or instead of the built-in one; list
+# several to share calls between them.
 # [[av.nodes]]
 # A bare wss:// origin. If it's armada's own, armada forwards /rtc to api_url.
 # url = "wss://armada.example.com"

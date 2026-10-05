@@ -1,9 +1,10 @@
 name: Release
 
 # On a version tag (vX.Y.Z): test, build static Linux binaries for x86_64 and
-# aarch64, and publish them as an ngit release (NIP-82) signed by the Soapbox
-# key, as .ngit/release.yaml describes. The binaries are also uploaded as run
-# artifacts first, so a failed publish still leaves them on the CI result.
+# aarch64 with LiveKit built in, and publish them as an ngit release (NIP-82)
+# signed by the Soapbox key, as .ngit/release.yaml describes. The binaries
+# are also uploaded as run artifacts first, so a failed publish still leaves
+# them on the CI result.
 #
 # Secrets, provisioned on the coordinator under its #SOAPBOX alias, which
 # covers every repository of the Soapbox key:
@@ -27,6 +28,11 @@ jobs:
       ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
       ZIGBUILD_VERSION: 0.23.4
       ZIGBUILD_SHA256: 9e3cf73485edbd45905c8aadbc0fdf869c7ddc3848f0c898229f2680db52e44b
+      # The LiveKit built into armada (src/av/builtin.rs): its release
+      # tarballs, from the release's checksums.txt.
+      LIVEKIT_VERSION: 1.13.7
+      LIVEKIT_AMD64_SHA256: 6634aeeb2fb1366b6723708ae4320b9d5408106a4c63457c5e845ae3979c90e2
+      LIVEKIT_ARM64_SHA256: 5d167fdf52cf43c0c72972f25325364479f41f854bfef651056eab2504da5de9
     steps:
       - uses: actions/checkout@v4
 
@@ -68,6 +74,21 @@ jobs:
           echo "$tools/zig-x86_64-linux-$ZIG_VERSION" >> "$GITHUB_PATH"
           echo "$tools/cargo-zigbuild-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
 
+      - name: Download LiveKit
+        run: |
+          set -eu
+          dir="$RUNNER_TEMP/livekit"
+          for arch in amd64 arm64; do
+            mkdir -p "$dir/$arch"
+            curl -fsSL -o "$dir/$arch.tar.gz" "https://github.com/livekit/livekit/releases/download/v$LIVEKIT_VERSION/livekit_${LIVEKIT_VERSION}_linux_$arch.tar.gz"
+            case "$arch" in
+              amd64) sha="$LIVEKIT_AMD64_SHA256" ;;
+              arm64) sha="$LIVEKIT_ARM64_SHA256" ;;
+            esac
+            echo "$sha  $dir/$arch.tar.gz" | sha256sum -c -
+            tar -xzf "$dir/$arch.tar.gz" -C "$dir/$arch" livekit-server
+          done
+
       - name: Test
         run: cargo test --locked
 
@@ -83,7 +104,12 @@ jobs:
           zig version
           cargo-zigbuild --version
           mkdir -p dist
+          export ARMADA_LIVEKIT_VERSION="$LIVEKIT_VERSION"
           for arch in x86_64 aarch64; do
+            case "$arch" in
+              x86_64) export ARMADA_LIVEKIT="$RUNNER_TEMP/livekit/amd64/livekit-server" ;;
+              aarch64) export ARMADA_LIVEKIT="$RUNNER_TEMP/livekit/arm64/livekit-server" ;;
+            esac
             cargo zigbuild --release --locked --target "$arch-unknown-linux-musl"
             cp "${CARGO_TARGET_DIR:-target}/$arch-unknown-linux-musl/release/armada" "dist/armada-$VERSION-linux-$arch"
           done

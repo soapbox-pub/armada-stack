@@ -1,5 +1,8 @@
-# A LiveKit server for armada's AV broker to place calls on. Run it with its
-# keys in the environment, so no secret lives in this file:
+# The LiveKit armada runs itself, built in (src/av/builtin.rs), uses this
+# file as it is, with its keys in the environment.
+#
+# To run LiveKit yourself instead, with its keys in the environment so no
+# secret lives in this file:
 #
 #   LIVEKIT_KEYS="APIxxxxxxxxxxxx: <secret>" livekit-server --config livekit.yaml
 #
@@ -49,3 +52,7 @@ room:
 
 logging:
   level: info
+  # The server API's own log, which would note the broker's health check
+  # every few seconds.
+  component_levels:
+    api: warn

@@ -591,8 +591,9 @@ ProtectKernelLogs=true
 ProtectControlGroups=true
 ProtectClock=true
 ProtectHostname=true
+# Other processes hidden, but not the rest of /proc: the built-in LiveKit
+# reads the machine's load from it to report how busy it is.
 ProtectProc=invisible
-ProcSubset=pid
 # IP for everything it serves and fetches; netlink for resolving names.
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 RestrictNamespaces=true
@@ -631,6 +632,17 @@ sys.exit(1)
 PYTHON
 }
 
+# Let the built-in LiveKit have the UDP buffers it asks for: every call's
+# media shares one socket, and the kernel's default drops packets under load.
+tune_udp() {
+	sysctl_file=/etc/sysctl.d/60-armada.conf
+	[ -e "$sysctl_file" ] && return
+	[ -d /etc/sysctl.d ] || return
+	printf '%s\n' "# For the LiveKit built into armada; see install.sh." \
+		"net.core.rmem_max = 5000000" "net.core.wmem_max = 5000000" >"$sysctl_file"
+	sysctl -q -p "$sysctl_file" </dev/null >/dev/null 2>&1 || true
+}
+
 set_up_server() {
 	[ -d /run/systemd/system ] ||
 		die "Setting up a server needs systemd. INSTALL.md says how to run armada without it."
@@ -648,6 +660,8 @@ set_up_server() {
 	else
 		write_config
 	fi
+
+	tune_udp
 
 	# On a new server there's no unit to enable until it's copied in.
 	cp "$TMP/unit" "$UNIT"

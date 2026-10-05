@@ -41,8 +41,6 @@ const ARMADA_RELAYS: &[&str] = &["wss://relay.ditto.pub", "wss://relay.dreamith.
 /// The first of `BLOSSOM_SERVERS` is preferred for uploads, so armada's own
 /// goes first.
 const ARMADA_BLOSSOM_SERVERS: &[&str] = &["https://blossom.ditto.pub/", "https://blossom.dreamith.to/", "https://blossom.primal.net/"];
-/// `CONCORD_AV_SERVERS`' default, in `src/lib/platform.ts`.
-const ARMADA_AV_SERVERS: &[&str] = &["https://armada.buzz"];
 
 #[derive(Default)]
 pub struct ClientEnv {
@@ -95,7 +93,8 @@ impl ClientEnv {
         // Not on the onion: calls go peer to peer over WebRTC, which Tor
         // can't carry, so offering them there would only leak the client.
         if self.av && !self.names.is_onion(origin) {
-            values.insert("CONCORD_AV_SERVERS".to_string(), join(origin.base.clone(), ARMADA_AV_SERVERS));
+            // This armada's broker alone: calls here stay here.
+            values.insert("CONCORD_AV_SERVERS".to_string(), origin.base.clone());
         }
         if let Some(pubkey) = &self.push {
             values.insert("NOSTR_PUSH2_PUBKEY".to_string(), pubkey.clone());
@@ -184,7 +183,7 @@ mod tests {
         };
         let values = ClientEnv::new(&config).unwrap().values(&host("other.example.org"));
         assert_eq!(values["RELAYS"].split(',').next(), Some("wss://armada.example.com"));
-        assert_eq!(values["CONCORD_AV_SERVERS"], "https://armada.example.com,https://armada.buzz");
+        assert_eq!(values["CONCORD_AV_SERVERS"], "https://armada.example.com");
     }
 
     #[test]

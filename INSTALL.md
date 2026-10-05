@@ -1,7 +1,7 @@
 # Installing armada
 
 `armada` is one binary that serves Armada's web app, a Nostr relay, a Blossom
-server, and optionally a Concord AV broker, all from one domain. This guide
+server, and voice and video calls, all from one domain. This guide
 sets it up on a Linux server with its own HTTPS certificate from Let's
 Encrypt. You won't need a reverse proxy.
 
@@ -11,7 +11,7 @@ Encrypt. You won't need a reverse proxy.
   (ARM64). 2 CPUs and 4 GB of RAM is plenty to start.
 - A domain or subdomain you can point at it, such as `armada.example.com`.
 - Ports 80 and 443 open to the internet. Let's Encrypt checks port 80 when it
-  issues the certificate.
+  issues the certificate. Calls also need 7881/tcp and 7882/udp.
 
 ## 1. Point DNS at the server
 
@@ -30,12 +30,15 @@ dig +short armada.example.com
 
 ## 2. Open the firewall
 
-Allow inbound TCP 22 (SSH), 80, and 443. On Ubuntu with `ufw`:
+Allow inbound TCP 22 (SSH), 80, 443 and 7881, and UDP 7882. The last two
+carry calls' audio and video. On Ubuntu with `ufw`:
 
 ```sh
 ufw allow OpenSSH
 ufw allow 80/tcp
 ufw allow 443/tcp
+ufw allow 7881/tcp
+ufw allow 7882/udp
 ufw enable
 ```
 
@@ -65,6 +68,8 @@ The script:
    writes `/etc/armada/armada.toml`. An existing config is left alone.
 4. Installs the [`deploy/armada.service`](deploy/armada.service) unit, starts
    it, and waits until the site answers over HTTPS.
+5. Raises the kernel's UDP buffer limits for calls, in
+   `/etc/sysctl.d/60-armada.conf`.
 
 It needs Python 3 to check the signature, and installs it if the server
 doesn't have it. It finishes in about a minute:
@@ -185,25 +190,34 @@ tar -C /var/lib -czf armada-backup.tar.gz armada
 systemctl start armada
 ```
 
-## Voice and video calls (optional)
+## Voice and video calls
 
-Calls need a [LiveKit](https://livekit.io) server for armada to broker calls
-on. They're off until one is configured. To run LiveKit on the same machine:
+Calls run on [LiveKit](https://livekit.io), which is built into armada: it
+runs it beside itself and brokers calls on it, with nothing to install. The
+app is pointed at this server for calls, and nowhere else. LiveKit's
+signaling goes through armada at `wss://<domain>/rtc`; only the media ports,
+7881/tcp and 7882/udp, have to be open (step 2). Its key and secret are made
+on first start, in `livekit/` in the storage directory.
 
-1. Install `livekit-server` and generate an API key and secret for it.
-2. Run it with [`deploy/livekit.yaml`](deploy/livekit.yaml). The comments in
-   that file explain each setting. Its signaling stays on loopback, and
-   armada forwards `wss://<domain>/rtc` to it.
-3. Open 7881/tcp and 7882/udp for media.
-4. Add the node to `armada.toml` and restart armada:
+Calls aren't offered over the onion, nor without `public_url`.
 
-   ```toml
-   [[av.nodes]]
-   url = "wss://armada.example.com"
-   api_url = "http://127.0.0.1:7880"
-   api_key = "APIxxxxxxxxxxxx"
-   api_secret = "..."
-   ```
+To run LiveKit yourself instead, on this machine or others, turn the
+built-in one off and list your nodes:
+
+```toml
+[av]
+livekit = false
+
+[[av.nodes]]
+url = "wss://armada.example.com"
+api_url = "http://127.0.0.1:7880"
+api_key = "APIxxxxxxxxxxxx"
+api_secret = "..."
+```
+
+[`deploy/livekit.yaml`](deploy/livekit.yaml) is the config the built-in one
+runs with, and explains each setting. A node on armada's own origin, as
+above, takes the built-in one's place even without `livekit = false`.
 
 ## Behind a reverse proxy instead
 
