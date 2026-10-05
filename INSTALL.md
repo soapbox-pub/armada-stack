@@ -103,19 +103,28 @@ server's relay and Blossom server alongside Armada's public ones.
 
 ## Upgrading
 
-Run the installer again, with or without the domain:
+```sh
+sudo armada upgrade
+```
+
+It finds the latest release on Nostr the way the installer does, trusting
+only Soapbox's signature, and checks the binary against the sha256 in that
+release before moving it into place. Then it refreshes the systemd unit and
+restarts the service, starting it if it was stopped. If everything is already
+current and running, it changes nothing. Your config is never rewritten.
+
+`armada upgrade --check` only says whether there's a newer release, and
+`--version 0.1.0` installs a particular release instead, to go back to one.
+
+armada 0.1.0 has no `upgrade` command, so upgrade from it, or from anywhere,
+by running the installer again, with or without the domain:
 
 ```sh
 curl -fsSL https://armada.buzz/install.sh | sudo sh
 ```
 
-It installs the latest release, refreshes the systemd unit, and restarts the
-service, starting it if it was stopped, then waits for HTTPS. If everything is
-already current and running, it changes nothing. Your config is never
-rewritten. A different domain from the config's is refused: to move domains,
-edit `public_url` and restart.
-
-`--version 0.1.0` installs a particular release instead, to go back to one.
+It does the same, and also waits for HTTPS to answer. A different domain from
+the config's is refused: to move domains, edit `public_url` and restart.
 
 ## Backups
 
@@ -226,8 +235,10 @@ Elsewhere, run `/usr/local/bin/armada --config /etc/armada/armada.toml` as the
 `armada` user, with permission to bind ports 80 and 443 (for example
 `setcap cap_net_bind_service=+ep /usr/local/bin/armada`).
 
-To upgrade, install the new binary under a new name and move it into place,
-so the running one is never half-overwritten, then restart:
+To upgrade, run `sudo armada upgrade`, which replaces whichever binary you
+run it as and restarts the service if it's set up as above. By hand, install
+the new binary under a new name and move it into place, so the running one is
+never half-overwritten, then restart:
 
 ```sh
 install -m 755 armada-X.Y.Z-linux-x86_64 /usr/local/bin/armada.new

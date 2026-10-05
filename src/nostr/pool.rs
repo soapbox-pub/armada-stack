@@ -47,10 +47,13 @@ const MAX_FUTURE: i64 = 15 * 60;
 /// A NIP-01 filter, as the subset this sends.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Filter {
+    pub ids: Vec<String>,
     pub kinds: Vec<i64>,
     pub authors: Vec<String>,
     /// `#d` values.
     pub d: Vec<String>,
+    /// `#i` values.
+    pub i: Vec<String>,
     pub since: Option<i64>,
     pub limit: Option<u64>,
 }
@@ -58,10 +61,16 @@ pub struct Filter {
 impl Filter {
     pub fn to_json(&self) -> Value {
         let mut filter = serde_json::Map::new();
+        if !self.ids.is_empty() {
+            filter.insert("ids".into(), json!(self.ids));
+        }
         filter.insert("kinds".into(), json!(self.kinds));
         filter.insert("authors".into(), json!(self.authors));
         if !self.d.is_empty() {
             filter.insert("#d".into(), json!(self.d));
+        }
+        if !self.i.is_empty() {
+            filter.insert("#i".into(), json!(self.i));
         }
         if let Some(since) = self.since {
             filter.insert("since".into(), json!(since));
@@ -75,11 +84,19 @@ impl Filter {
     /// Whether an event is one this filter asked for. Relays are not trusted
     /// to have applied it.
     pub fn matches(&self, event: &Event) -> bool {
-        (self.kinds.is_empty() || self.kinds.contains(&event.kind))
+        (self.ids.is_empty() || self.ids.contains(&event.id))
+            && (self.kinds.is_empty() || self.kinds.contains(&event.kind))
             && (self.authors.is_empty() || self.authors.contains(&event.pubkey))
             && (self.d.is_empty() || event.tag("d").is_some_and(|d| self.d.iter().any(|want| want == d)))
+            && (self.i.is_empty() || has_tag_value(event, "i", &self.i))
             && self.since.is_none_or(|since| event.created_at >= since)
     }
+}
+
+/// Whether any of the event's `name` tags has one of `values`, as a relay
+/// matches a `#name` filter.
+fn has_tag_value(event: &Event, name: &str, values: &[String]) -> bool {
+    event.tags.iter().any(|tag| tag.first().map(String::as_str) == Some(name) && tag.get(1).is_some_and(|value| values.contains(value)))
 }
 
 /// What a relay said about one subscription.
@@ -493,11 +510,23 @@ mod tests {
     fn filters() {
         let secret = "0000000000000000000000000000000000000000000000000000000000000001";
         let event = Event::sign(secret, 100, 35128, vec![vec!["d".into(), "docs".into()]], "");
-        let filter = Filter { kinds: vec![35128], authors: vec![event.pubkey.clone()], d: vec!["docs".into()], since: Some(50), limit: None };
+        let filter = Filter { kinds: vec![35128], authors: vec![event.pubkey.clone()], d: vec!["docs".into()], since: Some(50), ..Default::default() };
         assert!(filter.matches(&event));
         assert!(!Filter { d: vec!["blog".into()], ..filter.clone() }.matches(&event));
         assert!(!Filter { since: Some(200), ..filter.clone() }.matches(&event));
         assert_eq!(filter.to_json(), json!({ "kinds": [35128], "authors": [event.pubkey], "#d": ["docs"], "since": 50 }));
+
+        let tagged = Event::sign(secret, 100, 30063, vec![vec!["i".into(), "other".into()], vec!["i".into(), "app".into()]], "");
+        let by_tag = Filter { i: vec!["app".into()], ..Default::default() };
+        assert!(by_tag.matches(&tagged));
+        assert!(!by_tag.matches(&event));
+        let by_id = Filter { ids: vec![tagged.id.clone()], ..Default::default() };
+        assert!(by_id.matches(&tagged));
+        assert!(!by_id.matches(&event));
+        assert_eq!(
+            Filter { ids: vec!["a".into()], kinds: vec![3063], authors: vec!["p".into()], i: vec!["app".into()], ..Default::default() }.to_json(),
+            json!({ "ids": ["a"], "kinds": [3063], "authors": ["p"], "#i": ["app"] })
+        );
     }
 
     #[test]

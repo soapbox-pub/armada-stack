@@ -1,0 +1,398 @@
+//! `armada upgrade`: replace this binary with the latest signed release, and
+//! restart the service if one is set up, as rerunning install.sh does.
+//!
+//! Releases are found on Nostr and trusted only if signed by Soapbox's key.
+//! The binary is checked against the sha256 in its signed release, and asked
+//! its version, before it's moved into place. install.sh does the same in
+//! Python, with the same key, relays, and servers; a test keeps them alike.
+
+use std::collections::HashMap;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
+
+use crate::nostr::Event;
+use crate::nostr::event::is_hex64;
+use crate::nostr::pool::{Filter, Pool};
+use crate::nostr::service::{blob_url, dedupe};
+
+/// Soapbox's key: releases signed by anyone else are ignored.
+const PUBKEY: &str = "781a1527055f74c1f70230f10384609b34548f8ab6a0a6caa74025827f9fdae5";
+const APP: &str = "armada-stack";
+const RELAYS: &[&str] = &[
+    "wss://relay.ditto.pub",
+    "wss://relay.dreamith.to",
+    "wss://git.shakespeare.diy",
+    "wss://relay.ngit.dev",
+    "wss://relay.primal.net",
+];
+/// Asked for the binary by its hash when the URL in its release fails.
+const BLOSSOM: &[&str] = &["https://blossom.ditto.pub", "https://blossom.dreamith.to", "https://blossom.primal.net"];
+
+/// NIP-82 software release, file, and application.
+const RELEASE_KIND: i64 = 30063;
+const ASSET_KIND: i64 = 3063;
+const APPLICATION_KIND: i64 = 32267;
+
+const MAX_BINARY: u64 = 256 * 1024 * 1024;
+const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a restarted service is given before it's asked if it's running.
+const SETTLE_TIME: Duration = Duration::from_secs(3);
+
+/// Where install.sh puts the binary, and the unit that runs it from there.
+const BIN: &str = "/usr/local/bin/armada";
+const UNIT: &str = "/etc/systemd/system/armada.service";
+const DEPLOY_UNIT: &str = include_str!("../deploy/armada.service");
+
+pub struct Options {
+    /// A release to install instead of the latest.
+    pub version: Option<String>,
+    /// Only say whether there's a newer release.
+    pub check: bool,
+}
+
+pub async fn run(options: Options) -> Result<()> {
+    let platform = platform()?;
+    let current = env!("CARGO_PKG_VERSION");
+    let exe = std::env::current_exe().context("finding this binary")?;
+    // The service runs BIN, so it's only restarted when that's what's upgraded.
+    let service = service_installed();
+    let runs_this = std::fs::canonicalize(BIN).is_ok_and(|bin| bin == exe);
+    if !options.check && service && runs_this && euid() != 0 {
+        bail!("Restarting the armada service needs root. Run: sudo armada upgrade");
+    }
+
+    let pool = Pool::new(Arc::new(|_: &str| true));
+    let relays: Vec<String> = RELAYS.iter().map(|relay| relay.to_string()).collect();
+    let cancel = CancellationToken::new();
+    let filter = Filter { kinds: vec![RELEASE_KIND], authors: vec![PUBKEY.into()], i: vec![APP.into()], ..Default::default() };
+    let releases = pool.query(vec![filter], &relays, QUERY_TIMEOUT, &cancel).await;
+    let release = pick_release(&releases, PUBKEY, options.version.as_deref())?;
+    let version = release.tag("version").unwrap_or_default().to_string();
+    say(&format!("found {APP} {version}, signed by Soapbox"));
+
+    if options.check {
+        if version == current {
+            say(&format!("armada {current} is installed: nothing to do"));
+        } else {
+            say(&format!("armada {current} is installed; to install {version}, run: sudo armada upgrade"));
+        }
+        return Ok(());
+    }
+
+    let changed = if version == current {
+        say(&format!("armada {current} is already installed at {}", exe.display()));
+        false
+    } else {
+        let ids: Vec<String> = release.tags.iter().filter(|tag| tag.first().map(String::as_str) == Some("e")).filter_map(|tag| tag.get(1).cloned()).collect();
+        let filter = Filter { ids, kinds: vec![ASSET_KIND], authors: vec![PUBKEY.into()], ..Default::default() };
+        let assets = pool.query(vec![filter], &relays, QUERY_TIMEOUT, &cancel).await;
+        let asset = pick_asset(&assets, &release, PUBKEY, &platform)?;
+        install(&asset, &version, &exe).await?;
+        say(&format!("installed armada {version} at {}", exe.display()));
+        true
+    };
+
+    if service && runs_this {
+        refresh_service(changed)?;
+    } else if service && changed {
+        say(&format!("the armada service runs {BIN}, not {}; leaving it alone", exe.display()));
+    }
+    Ok(())
+}
+
+fn say(message: &str) {
+    eprintln!("armada: {message}");
+}
+
+fn euid() -> u32 {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+/// The release platform this binary runs on, as the `f` tag names it.
+fn platform() -> Result<String> {
+    if std::env::consts::OS != "linux" {
+        bail!("armada's releases are for Linux.");
+    }
+    match std::env::consts::ARCH {
+        arch @ ("x86_64" | "aarch64") => Ok(format!("linux-{arch}")),
+        arch => bail!("There's no release for {arch} yet; INSTALL.md says how to build from source."),
+    }
+}
+
+/// 1.2.3 as [1, 2, 3], or None for anything that isn't plain numbers.
+fn version_key(version: &str) -> Option<Vec<u64>> {
+    version.split('.').map(|part| part.parse().ok()).collect()
+}
+
+/// The newest release on the main channel, or the release named `wanted`.
+fn pick_release(events: &[Event], pubkey: &str, wanted: Option<&str>) -> Result<Event> {
+    // Each version is an addressable event, so only its newest counts.
+    let mut latest: HashMap<&str, &Event> = HashMap::new();
+    for event in events.iter().filter(|event| event.kind == RELEASE_KIND && event.pubkey == pubkey && event.verify()) {
+        let Some(d) = event.tag("d") else { continue };
+        if latest.get(d).is_none_or(|kept| event.created_at > kept.created_at) {
+            latest.insert(d, event);
+        }
+    }
+    let releases = latest.into_iter().filter_map(|(d, event)| {
+        let version = event.tag("version")?;
+        (d == format!("{APP}@{version}")).then_some((version, event))
+    });
+
+    if let Some(wanted) = wanted {
+        return releases
+            .into_iter()
+            .find(|(version, _)| *version == wanted)
+            .map(|(_, event)| event.clone())
+            .with_context(|| format!("There's no release {wanted} of {APP}."));
+    }
+    releases
+        .filter(|(_, event)| event.tag("c") == Some("main"))
+        .filter_map(|(version, event)| Some((version_key(version)?, event)))
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, event)| event.clone())
+        .with_context(|| format!("Couldn't find a release of {APP} signed by Soapbox on any relay."))
+}
+
+/// The release's file event for `platform`.
+fn pick_asset(events: &[Event], release: &Event, pubkey: &str, platform: &str) -> Result<Event> {
+    let version = release.tag("version");
+    let values = |event: &'_ Event, name: &str| -> Vec<String> {
+        event.tags.iter().filter(|tag| tag.first().map(String::as_str) == Some(name)).filter_map(|tag| tag.get(1).cloned()).collect()
+    };
+    let ids = values(release, "e");
+    let application = format!("{APPLICATION_KIND}:{pubkey}:{APP}");
+    events
+        .iter()
+        .find(|event| {
+            event.kind == ASSET_KIND
+                && event.pubkey == pubkey
+                && ids.contains(&event.id)
+                && values(event, "a").contains(&application)
+                && values(event, "f").iter().any(|f| f == platform)
+                && event.tag("version") == version
+                && event.verify()
+        })
+        .cloned()
+        .with_context(|| format!("Release {} has no build for {platform}.", version.unwrap_or_default()))
+}
+
+/// Download the asset beside `exe`, check it, and move it over `exe`.
+async fn install(asset: &Event, version: &str, exe: &Path) -> Result<()> {
+    let mut name = exe.file_name().context("this binary has no file name")?.to_os_string();
+    name.push(".new");
+    let new = exe.with_file_name(name);
+    // Made here first, so a directory that can't be written stops this
+    // before anything is downloaded.
+    create(&new).with_context(|| format!("Couldn't write {}. Run: sudo armada upgrade", new.display()))?;
+
+    let result = async {
+        let url = download(asset, &new).await?;
+        say(&format!("downloaded {url} and checked its sha256, {}", asset.tag("x").unwrap_or_default()));
+        let output = Command::new(&new).arg("--version").stdin(Stdio::null()).output().context("running the downloaded binary")?;
+        if String::from_utf8_lossy(&output.stdout).trim() != format!("armada {version}") {
+            bail!("The downloaded binary doesn't say it's version {version}.");
+        }
+        std::fs::rename(&new, exe).with_context(|| format!("moving {} to {}", new.display(), exe.display()))
+    }
+    .await;
+    if result.is_err() {
+        let _ = std::fs::remove_file(&new);
+    }
+    result
+}
+
+fn create(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o755).open(path)
+}
+
+/// Download the asset to `destination` from its URL, or else from a Blossom
+/// server by its hash, and return where it came from.
+async fn download(asset: &Event, destination: &Path) -> Result<String> {
+    let sha256 = asset.tag("x").map(str::to_ascii_lowercase).filter(|x| is_hex64(x)).context("The release doesn't give the binary's sha256.")?;
+    let size = asset.tag("size").and_then(|size| size.parse::<u64>().ok());
+    let urls = dedupe(asset.tag("url").map(String::from).into_iter().chain(BLOSSOM.iter().map(|server| blob_url(server, &sha256))));
+    let http = reqwest::Client::builder().user_agent("armada-upgrade").timeout(DOWNLOAD_TIMEOUT).build()?;
+    for url in urls.iter().filter(|url| url.starts_with("https://")) {
+        match fetch(&http, url, destination, &sha256, size).await {
+            Ok(()) => return Ok(url.clone()),
+            Err(error) => say(&format!("couldn't download {url}: {error:#}")),
+        }
+    }
+    bail!("No server had a copy of the binary matching sha256 {sha256}.")
+}
+
+async fn fetch(http: &reqwest::Client, url: &str, destination: &Path, sha256: &str, size: Option<u64>) -> Result<()> {
+    let mut response = http.get(url).send().await?.error_for_status()?;
+    let mut file = create(destination)?;
+    let mut digest = Sha256::new();
+    let mut total = 0u64;
+    while let Some(chunk) = response.chunk().await? {
+        total += chunk.len() as u64;
+        if total > MAX_BINARY {
+            bail!("larger than {MAX_BINARY} bytes");
+        }
+        digest.update(&chunk);
+        file.write_all(&chunk)?;
+    }
+    file.sync_all()?;
+    if hex::encode(digest.finalize()) != sha256 {
+        bail!("its sha256 doesn't match the release's");
+    }
+    if let Some(size) = size
+        && total != size
+    {
+        bail!("sent {total} bytes; the release says {size}");
+    }
+    Ok(())
+}
+
+fn service_installed() -> bool {
+    Path::new("/run/systemd/system").is_dir() && Path::new(UNIT).exists()
+}
+
+/// The unit as install.sh writes it: deploy/armada.service from [Unit] on.
+fn unit_text() -> &'static str {
+    &DEPLOY_UNIT[DEPLOY_UNIT.find("[Unit]").unwrap_or(0)..]
+}
+
+/// Bring the unit up to date and restart the service, unless nothing changed
+/// and it's running.
+fn refresh_service(changed: bool) -> Result<()> {
+    let unit_changed = std::fs::read_to_string(UNIT).ok().as_deref() != Some(unit_text());
+    if !changed && !unit_changed && systemctl(&["is-active", "--quiet", "armada"])? {
+        return Ok(());
+    }
+    if unit_changed {
+        write_unit(Path::new(UNIT))?;
+        say(&format!("refreshed {UNIT}"));
+    }
+    if !systemctl(&["daemon-reload"])? || !systemctl(&["restart", "armada"])? {
+        bail!("Couldn't restart the armada service. See what armada says with: journalctl -u armada -e");
+    }
+    std::thread::sleep(SETTLE_TIME);
+    if !systemctl(&["is-active", "--quiet", "armada"])? {
+        bail!("The armada service didn't stay up. See what armada says with: journalctl -u armada -e");
+    }
+    say("restarted the armada service");
+    Ok(())
+}
+
+fn write_unit(path: &Path) -> Result<()> {
+    let mut new = PathBuf::from(path);
+    new.set_extension("service.new");
+    std::fs::write(&new, unit_text()).with_context(|| format!("writing {}", new.display()))?;
+    std::fs::rename(&new, path).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Whether `systemctl args` succeeded.
+fn systemctl(args: &[&str]) -> Result<bool> {
+    let status = Command::new("systemctl").args(args).stdin(Stdio::null()).stdout(Stdio::null()).status().context("running systemctl")?;
+    Ok(status.success())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nostr::event::public_key;
+
+    const SECRET: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+
+    fn tags(pairs: &[(&str, &str)]) -> Vec<Vec<String>> {
+        pairs.iter().map(|(name, value)| vec![name.to_string(), value.to_string()]).collect()
+    }
+
+    fn release(version: &str, channel: &str, created_at: i64, extra: &[(&str, &str)]) -> Event {
+        let d = format!("{APP}@{version}");
+        let mut pairs = vec![("d", d.as_str()), ("i", APP), ("version", version), ("c", channel)];
+        pairs.extend_from_slice(extra);
+        Event::sign(SECRET, created_at, RELEASE_KIND, tags(&pairs), "")
+    }
+
+    #[test]
+    fn picks_the_newest_main_release() {
+        let pubkey = public_key(SECRET);
+        let events = vec![
+            release("0.9.0", "main", 1, &[]),
+            release("0.10.0", "main", 2, &[]),
+            release("0.11.0", "beta", 3, &[]),
+            release("1.0.0-rc1", "main", 4, &[]),
+        ];
+        let picked = pick_release(&events, &pubkey, None).unwrap();
+        assert_eq!(picked.tag("version"), Some("0.10.0"));
+        assert_eq!(pick_release(&events, &pubkey, Some("0.11.0")).unwrap().tag("version"), Some("0.11.0"));
+        assert!(pick_release(&events, &pubkey, Some("2.0.0")).is_err());
+        // Anyone else's releases are ignored.
+        assert!(pick_release(&events, PUBKEY, None).is_err());
+    }
+
+    #[test]
+    fn takes_only_the_newest_of_each_version_and_only_authentic_ones() {
+        let pubkey = public_key(SECRET);
+        // 0.2.0 was later moved off main.
+        let events = vec![release("0.1.0", "main", 1, &[]), release("0.2.0", "main", 2, &[]), release("0.2.0", "beta", 3, &[])];
+        assert_eq!(pick_release(&events, &pubkey, None).unwrap().tag("version"), Some("0.1.0"));
+
+        let mut forged = release("0.3.0", "main", 4, &[]);
+        forged.created_at += 1;
+        assert_eq!(pick_release(&[events[0].clone(), forged], &pubkey, None).unwrap().tag("version"), Some("0.1.0"));
+
+        // A d tag that doesn't name the version it claims.
+        let mismatched = Event::sign(SECRET, 5, RELEASE_KIND, tags(&[("d", "armada-stack@9.0.0"), ("version", "0.4.0"), ("c", "main")]), "");
+        assert_eq!(pick_release(&[events[0].clone(), mismatched], &pubkey, None).unwrap().tag("version"), Some("0.1.0"));
+    }
+
+    #[test]
+    fn picks_the_asset_for_the_platform() {
+        let pubkey = public_key(SECRET);
+        let application = format!("{APPLICATION_KIND}:{pubkey}:{APP}");
+        let asset = |platform: &str, version: &str, created_at: i64| {
+            Event::sign(SECRET, created_at, ASSET_KIND, tags(&[("a", &application), ("f", platform), ("version", version), ("x", &"0".repeat(64))]), "")
+        };
+        let x86 = asset("linux-x86_64", "1.0.0", 1);
+        let arm = asset("linux-aarch64", "1.0.0", 1);
+        let stale = asset("linux-x86_64", "0.9.0", 1);
+        // One the release doesn't name.
+        let stray = asset("linux-aarch64", "1.0.0", 2);
+        let release = release("1.0.0", "main", 1, &[("e", &x86.id), ("e", &arm.id), ("e", &stale.id)]);
+        let events = vec![stale.clone(), stray.clone(), x86.clone(), arm.clone()];
+
+        assert_eq!(pick_asset(&events, &release, &pubkey, "linux-x86_64").unwrap().id, x86.id);
+        assert_eq!(pick_asset(&events, &release, &pubkey, "linux-aarch64").unwrap().id, arm.id);
+        assert!(pick_asset(&events, &release, &pubkey, "linux-riscv64").is_err());
+        assert!(pick_asset(&[stale], &release, &pubkey, "linux-x86_64").is_err());
+        assert!(pick_asset(&[stray], &release, &pubkey, "linux-aarch64").is_err());
+    }
+
+    #[test]
+    fn versions() {
+        assert_eq!(version_key("1.10.2"), Some(vec![1, 10, 2]));
+        assert!(version_key("1.10.2") > version_key("1.9.9"));
+        assert_eq!(version_key("1.0.0-rc1"), None);
+    }
+
+    /// install.sh finds releases the same way, so it must look in the same
+    /// places for the same signer.
+    #[test]
+    fn install_sh_agrees() {
+        let script = include_str!("../install.sh");
+        assert!(script.contains(&format!("PUBKEY = \"{PUBKEY}\"\n")));
+        assert!(script.contains(&format!("APP = \"{APP}\"\n")));
+        let relays: String = RELAYS.iter().map(|relay| format!("    \"{relay}\",\n")).collect();
+        assert!(script.contains(&format!("RELAYS = [\n{relays}]\n")), "install.sh's RELAYS differ");
+        let servers: Vec<String> = BLOSSOM.iter().map(|server| format!("\"{server}\"")).collect();
+        assert!(script.contains(&format!("BLOSSOM = [{}]\n", servers.join(", "))), "install.sh's BLOSSOM differs");
+        assert!(script.contains(&format!("BIN={BIN}\n")));
+        assert!(script.contains(&format!("UNIT={UNIT}\n")));
+    }
+}

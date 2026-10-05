@@ -148,7 +148,7 @@ pub fn manifest_filter(address: &NsiteAddress, since: Option<i64>) -> Filter {
         authors: vec![address.pubkey.clone()],
         d: if address.kind == NAMED_SITE_KIND { vec![address.identifier.clone()] } else { Vec::new() },
         since,
-        limit: None,
+        ..Default::default()
     }
 }
 

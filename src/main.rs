@@ -17,6 +17,7 @@ mod relay;
 mod routes;
 mod storage;
 mod tls;
+mod upgrade;
 mod util;
 mod web;
 
@@ -42,16 +43,37 @@ struct Cli {
     /// and /etc/armada/armada.toml]
     #[arg(short, long, value_name = "PATH")]
     config: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Install the latest signed release over this binary, and restart the
+    /// armada service if one is set up
+    Upgrade {
+        /// Install this release instead of the latest
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
+        /// Only say whether there's a newer release
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    init_logging();
 
     // rustls needs one crypto provider chosen for the process; relays and
     // Blossom servers are both reached over it.
     let _ = rustls::crypto::ring::default_provider().install_default();
+
+    if let Some(Command::Upgrade { version, check }) = cli.command {
+        return upgrade::run(upgrade::Options { version, check }).await;
+    }
+    init_logging();
 
     let config::Loaded { config, source, storage_dir } = Config::load(cli.config.as_deref(), &Environment::current())?;
     match &source {
