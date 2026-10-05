@@ -16,6 +16,11 @@ pub const KIND: i64 = 24242;
 /// clocks run a little fast.
 const CLOCK_SKEW: i64 = 60;
 
+/// How long ago a token may have been signed, whatever its `expiration`
+/// says: one that's seen can be replayed until it's too old, and nothing
+/// else stops a client from making that the year 3000.
+pub const MAX_TOKEN_AGE: i64 = 24 * 60 * 60;
+
 /// BUD-11 asks for base64url, but clients send standard base64 too
 /// (`btoa`), padded or not. Both alphabets are accepted either way.
 const URL_SAFE: GeneralPurpose = GeneralPurpose::new(
@@ -92,15 +97,17 @@ fn values<'a>(event: &'a Event, name: &'a str) -> impl Iterator<Item = &'a Strin
     event.tags.iter().filter(move |tag| tag.first().is_some_and(|n| n == name)).filter_map(|tag| tag.get(1))
 }
 
+/// The signature last, as the costliest check: a token that fails any
+/// other doesn't cost one.
 fn check(event: &Event, verb: &str, host: Option<&str>, now: i64) -> Result<(), AuthError> {
     if event.kind != KIND {
         return Err(invalid(format!("Authorization event must be kind {KIND}.")));
     }
-    if !event.verify() {
-        return Err(invalid("Authorization event has an invalid signature."));
-    }
     if event.created_at > now + CLOCK_SKEW {
         return Err(invalid("Authorization event is from the future."));
+    }
+    if event.created_at < now - MAX_TOKEN_AGE {
+        return Err(invalid("Authorization event is too old; sign a new one."));
     }
     let expiration = event.tag("expiration").and_then(|value| value.trim().parse::<i64>().ok());
     match expiration {
@@ -117,6 +124,9 @@ fn check(event: &Event, verb: &str, host: Option<&str>, now: i64) -> Result<(), 
         if !servers.any(|server| Some(server.to_ascii_lowercase()) == ours) {
             return Err(invalid("Authorization event is for another server."));
         }
+    }
+    if !event.verify() {
+        return Err(invalid("Authorization event has an invalid signature."));
     }
     Ok(())
 }
@@ -179,6 +189,11 @@ pub mod tests {
         // From the future, beyond the allowed skew.
         assert!(auth(&token(SECRET, NOW + 600, good), "upload", None).is_err());
         assert!(auth(&token(SECRET, NOW + 30, good), "upload", None).is_ok());
+        // Signed too long ago, whatever its expiration.
+        let far = (NOW + 1_000_000_000).to_string();
+        let ages = |age: i64| auth(&token(SECRET, NOW - age, &[&["t", "upload"], &["expiration", &far]]), "upload", None);
+        assert!(ages(MAX_TOKEN_AGE).is_ok());
+        assert_eq!(ages(MAX_TOKEN_AGE + 1).unwrap_err().reason(), "Authorization event is too old; sign a new one.");
         // Expired, or no expiration at all.
         let past = (NOW - 1).to_string();
         assert!(auth(&token(SECRET, NOW - 100, &[&["t", "upload"], &["expiration", &past]]), "upload", None).is_err());
