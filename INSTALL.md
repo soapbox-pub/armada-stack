@@ -70,9 +70,9 @@ It needs Python 3 to check the signature, and installs it if the server
 doesn't have it. It finishes in about a minute:
 
 ```
-armada: found armada-stack 0.1.0, released 2026-10-04, signed by Soapbox
-armada: downloaded https://blossom.ditto.pub/d254…e1a5 and checked its sha256, d254…e1a5
-armada: installed armada 0.1.0 at /usr/local/bin/armada
+armada: found armada-stack 0.2.0, released 2026-10-05, signed by Soapbox
+armada: downloaded https://blossom.ditto.pub/6363…8794 and checked its sha256, 6363…8794
+armada: installed armada 0.2.0 at /usr/local/bin/armada
 armada: created the armada user
 armada: wrote /etc/armada/armada.toml; every other setting has a default
 armada: started the armada service; waiting for https://armada.example.com/
@@ -189,21 +189,21 @@ repository:
 REPO=nostr://npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/git.shakespeare.diy/armada-stack
 git init -q /tmp/armada-releases && cd /tmp/armada-releases
 ngit release list --repo "$REPO"
-ngit release view armada-stack@0.1.0 --repo "$REPO" --verify
+ngit release view armada-stack@0.2.0 --repo "$REPO" --verify
 ```
 
 `view` prints each file's URL and sha256, and `--verify` downloads and checks
-them. For 0.1.0, on x86_64 (use the aarch64 URL on ARM64):
+them. For 0.2.0, on x86_64 (use the aarch64 URL on ARM64):
 
 ```sh
 # x86_64
-curl -fLo armada-0.1.0-linux-x86_64 https://blossom.ditto.pub/d2545811934f7c1eeffe28968ecba3056bae6b016aa5f50187cbc859202be1a5
+curl -fLo armada-0.2.0-linux-x86_64 https://blossom.ditto.pub/6363a8c7a51993d1e7d8158e934ff8c807251ce42cd35f8c7bde46526a858794
 # aarch64
-curl -fLo armada-0.1.0-linux-aarch64 https://blossom.ditto.pub/5a2debc9dd2df2522749463b6585f5a088315a600b6ff83e78f9ac8342573d36
+curl -fLo armada-0.2.0-linux-aarch64 https://blossom.ditto.pub/f24f68bc08620fbeca4c0d54b6f2c8f5b402a0501e4bc9d7d4abaa3912fdcc50
 
-curl -fLo SHA256SUMS https://blossom.ditto.pub/6e7a0bf1f73f11b31e18c4d7ec4d00ba31de09797a57cb0fa00f9e4b5b1298ef
+curl -fLo SHA256SUMS https://blossom.ditto.pub/5c3f113eac80a38ab5e4cf29bce33e97e15128704a9f6c66ead673934e4c0a18
 sha256sum --check --ignore-missing SHA256SUMS
-install -m 755 armada-0.1.0-linux-x86_64 /usr/local/bin/armada
+install -m 755 armada-0.2.0-linux-x86_64 /usr/local/bin/armada
 ```
 
 **Configure it.** Create a user for it and write `/etc/armada/armada.toml`:
