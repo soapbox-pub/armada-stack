@@ -56,7 +56,7 @@ use tokio_util::sync::CancellationToken;
 use crate::blobs::{BlobStore, DownloadError, DownloadReason, Staged};
 use crate::config::BlossomConfig;
 use crate::hash::BlobHash;
-use crate::origin::{Origin, request_origin};
+use crate::origin::{Names, Origin, request_origin};
 use crate::ratelimit::{self, RateLimiter};
 use crate::storage::Storage;
 use crate::util::{http_date, now};
@@ -120,7 +120,7 @@ pub struct Blossom {
 struct Server {
     db: BlossomDb,
     blobs: BlobStore,
-    public_url: Option<url::Url>,
+    names: Names,
     max_blob_size: u64,
     /// Whether to believe `X-Forwarded-For`; see [`crate::config::Config::trust_proxy`].
     trust_proxy: bool,
@@ -142,10 +142,10 @@ struct Server {
 }
 
 impl Blossom {
-    /// Open the server's index and store. `public_url` is the origin clients
-    /// reach it at, if configured; mirrors in progress are abandoned once
+    /// Open the server's index and store. `names` are the origins clients
+    /// reach it at, where known; mirrors in progress are abandoned once
     /// `cancel` fires.
-    pub fn open(config: &BlossomConfig, public_url: Option<url::Url>, trust_proxy: bool, storage: &Storage, cancel: &CancellationToken) -> Result<Blossom> {
+    pub fn open(config: &BlossomConfig, names: Names, trust_proxy: bool, storage: &Storage, cancel: &CancellationToken) -> Result<Blossom> {
         let db = BlossomDb::open(storage)?;
         let blobs = storage.blob_store("blossom/blobs");
         blobs.clear_temp();
@@ -153,7 +153,7 @@ impl Blossom {
             server: Arc::new(Server {
                 db,
                 blobs,
-                public_url,
+                names,
                 max_blob_size: config.max_blob_size,
                 trust_proxy,
                 uploads: limiter(config.uploads_per_minute.into(), Duration::from_secs(60)),
@@ -674,7 +674,7 @@ impl Server {
     /// Where the request reached this server: the origin blob URLs are built
     /// on, and the domain `server` tags must name.
     fn origin(&self, headers: &HeaderMap) -> Origin {
-        request_origin(self.public_url.as_ref(), headers)
+        request_origin(&self.names, headers)
     }
 }
 

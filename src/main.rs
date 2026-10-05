@@ -18,6 +18,7 @@ mod relay;
 mod routes;
 mod storage;
 mod tls;
+mod tor;
 mod upgrade;
 mod util;
 mod web;
@@ -61,6 +62,8 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Print the onion address armada is served at over Tor
+    Onion,
 }
 
 #[tokio::main]
@@ -71,8 +74,10 @@ async fn main() -> Result<()> {
     // Blossom servers are both reached over it.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    if let Some(Command::Upgrade { version, check }) = cli.command {
-        return upgrade::run(upgrade::Options { version, check }).await;
+    match cli.command {
+        Some(Command::Upgrade { version, check }) => return upgrade::run(upgrade::Options { version, check }).await,
+        Some(Command::Onion) => return print_onion(cli.config.as_deref()),
+        None => {}
     }
     init_logging();
 
@@ -98,19 +103,35 @@ async fn main() -> Result<()> {
         _ => None,
     };
 
+    let tor = match config.tor.enabled {
+        true => match tor::Tor::open(&storage.service_dir("tor")?).await {
+            Ok(tor) => Some(tor),
+            Err(error) => {
+                tracing::error!("{error:#} Carrying on without Tor.");
+                None
+            }
+        },
+        false => None,
+    };
+    let onion = match &tor {
+        Some(_) if config.tor.serves_onion() => Some(tor::OnionKey::load_or_create(&storage.service_dir("tor")?)?),
+        _ => None,
+    };
+    let names = origin::Names::new(config.public_url()?, onion.as_ref().map(|key| key.address.clone()));
+
     let cancel = CancellationToken::new();
     let nostr = Arc::new(NostrService::new(config.web.relay_urls()));
     let push = if config.push.enabled { Some(push::Push::open(&storage)?) } else { None };
-    let mut client_env = web::env::ClientEnv::new(&config)?;
+    let mut client_env = web::env::ClientEnv::new(&config)?.with_onion(names.onion.clone());
     if let Some(push) = &push {
         client_env = client_env.with_push(push.pubkey());
     }
     let web = web::Web::open(&config.web, client_env, &storage, nostr).await?;
-    let blossom = blossom::Blossom::open(&config.blossom, config.public_url()?, config.trusts_proxy(), &storage, &cancel)?;
+    let blossom = blossom::Blossom::open(&config.blossom, names.clone(), config.trusts_proxy(), &storage, &cancel)?;
     blossom.start();
-    let relay = relay::Relay::open(&config.relay, config.public_url()?, config.trusts_proxy(), &storage, &cancel)?;
+    let relay = relay::Relay::open(&config.relay, names.clone(), config.trusts_proxy(), &storage, &cancel)?;
     if let Some(push) = push {
-        let relay_url = config.public_url()?.and_then(|url| origin::public_origin(Some(&url), &http::HeaderMap::new())).map(|origin| origin.websocket());
+        let relay_url = config.public_url()?.and_then(|url| origin::public_origin(&Some(url).into(), &http::HeaderMap::new())).map(|origin| origin.websocket());
         let options = push::Options { relay_url, subject: config.push_subject()?, public_only: true };
         push.start(relay.internal(), options, cancel.clone())?;
     }
@@ -141,6 +162,17 @@ async fn main() -> Result<()> {
 
     let (web, sync) = web.start(cancel.clone());
     let router = routes::router(routes::Services { web, relay, blossom, av });
+    if let (Some(tor), Some(key)) = (&tor, onion) {
+        let router = tor::router(router.clone(), &key.address);
+        let onions = tor.serve(key, cancel.clone());
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            // Each circuit is limited as one client, so per address.
+            if let Err(error) = tls::serve(onions, None, router, tls::Limits::new(false), cancel).await {
+                tracing::error!("serving the onion service: {error}");
+            }
+        });
+    }
     let behind_proxy = config.trusts_proxy();
     let served = match tls {
         Some(tls) => {
@@ -176,10 +208,30 @@ async fn bind(address: SocketAddr) -> Result<TcpListener> {
     })
 }
 
+/// `armada onion`.
+fn print_onion(config: Option<&std::path::Path>) -> Result<()> {
+    let config::Loaded { config, storage_dir, .. } = Config::load(config, &Environment::current())?;
+    if !config.tor.serves_onion() {
+        anyhow::bail!("armada isn't served over Tor: [tor] enabled or onion_service is off.");
+    }
+    match tor::OnionKey::load(&storage_dir.join("tor"))? {
+        Some(key) => println!("{}", key.address),
+        None => anyhow::bail!("There's no onion address yet. armada makes one the first time it starts."),
+    }
+    Ok(())
+}
+
+/// Tor's crates, whose news is only wanted when something's wrong.
+const TOR_CRATES: &[&str] = &["arti_client", "tor_chanmgr", "tor_circmgr", "tor_dirmgr", "tor_guardmgr", "tor_hsclient", "tor_hsservice", "tor_keymgr", "tor_memquota", "tor_netdir", "tor_persist", "tor_proto"];
+
 /// Human-readable logs by default; `LOG_FORMAT=json` for one JSON object per
-/// line. `RUST_LOG` picks the level, `info` if unset.
+/// line. `RUST_LOG` picks the level, `info` if unset, with Tor's own only
+/// at `warn`.
 fn init_logging() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        let quiet: Vec<String> = TOR_CRATES.iter().map(|name| format!("{name}=warn")).collect();
+        EnvFilter::new(format!("info,{}", quiet.join(",")))
+    });
     if std::env::var("LOG_FORMAT").as_deref() == Ok("json") {
         tracing_subscriber::fmt().json().flatten_event(true).with_env_filter(filter).init();
     } else {

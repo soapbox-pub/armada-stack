@@ -99,8 +99,8 @@ mod tests {
             naddr: http::HeaderValue::from_static("naddr"),
             env: Default::default(),
         });
-        let relay = Relay::open(&config.relay, None, false, &storage, &cancel).unwrap();
-        let blossom = Blossom::open(&config.blossom, None, false, &storage, &cancel).unwrap();
+        let relay = Relay::open(&config.relay, Default::default(), false, &storage, &cancel).unwrap();
+        let blossom = Blossom::open(&config.blossom, Default::default(), false, &storage, &cancel).unwrap();
         let router = router(Services { web, relay, blossom, av: None });
         Harness { _dir: dir, router, _cancel: cancel.drop_guard() }
     }

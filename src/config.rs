@@ -58,6 +58,31 @@ pub struct Config {
     pub av: AvConfig,
     pub push: PushConfig,
     pub tls: TlsConfig,
+    pub tor: TorConfig,
+}
+
+/// Tor, built in; see [`crate::tor`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TorConfig {
+    /// Run Tor inside armada, so relays at `.onion` addresses can be reached.
+    pub enabled: bool,
+    /// Serve armada as an onion service too, at an address made on first
+    /// start and kept in `tor/hs_ed25519_secret_key` under `storage_dir`.
+    pub onion_service: bool,
+}
+
+impl Default for TorConfig {
+    fn default() -> Self {
+        TorConfig { enabled: true, onion_service: true }
+    }
+}
+
+impl TorConfig {
+    /// Whether to publish the onion service.
+    pub fn serves_onion(&self) -> bool {
+        self.enabled && self.onion_service
+    }
 }
 
 /// A Web Push service for the web app, speaking nostr-push2's protocol,
@@ -651,6 +676,9 @@ mod tests {
         let config = Config::parse("").unwrap();
         assert_eq!(config.listen().port(), 8080);
         assert!(!config.tls.acme);
+        assert!(config.tor.enabled && config.tor.serves_onion());
+        assert!(!Config::parse("[tor]\nenabled = false").unwrap().tor.serves_onion());
+        assert!(!Config::parse("[tor]\nonion_service = false").unwrap().tor.serves_onion());
         assert_eq!(config.public_url().unwrap(), None);
         assert!(config.web.auto_update);
         assert_eq!(config.web.relay_urls(), ["wss://relay.ditto.pub", "wss://relay.dreamith.to"]);

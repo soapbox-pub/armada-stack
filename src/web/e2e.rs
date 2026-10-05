@@ -101,10 +101,14 @@ impl Harness {
     }
 
     async fn start_keeping(&self, manifests: Vec<Event>, auto_update: bool, keep_versions: usize) -> Running {
+        self.start_with(manifests, auto_update, keep_versions, Default::default()).await
+    }
+
+    async fn start_with(&self, manifests: Vec<Event>, auto_update: bool, keep_versions: usize, env: super::env::ClientEnv) -> Running {
         let (tx, rx) = mpsc::channel(8);
         let nostr = Arc::new(FakeNostr { manifests: Mutex::new(manifests), updates: Mutex::new(Some(rx)), server: self.server.clone() });
         let config = WebConfig { nsite: self.address.naddr(), auto_update, keep_versions, ..WebConfig::default() };
-        let mut web = Web::open(&config, Default::default(), &Storage::allowing_private(self.dir.path()), nostr).await.unwrap();
+        let mut web = Web::open(&config, env, &Storage::allowing_private(self.dir.path()), nostr).await.unwrap();
         web.worker.settings.retry_backoff = Duration::from_millis(10);
 
         let router = web.router();
@@ -215,6 +219,32 @@ async fn a_published_site_is_downloaded_and_served() {
     assert_eq!(headers["content-type"], "text/javascript; charset=utf-8");
     assert_eq!(body, b"self.ENV = {};\n");
 
+    web.stop().await;
+}
+
+/// Tor Browser is offered the onion for pages, over HTTPS, and nothing else.
+#[tokio::test(flavor = "multi_thread")]
+async fn pages_name_the_onion() {
+    let onion = "dl6nglbofs66w2ctcqp3hdgw7lgql7b5xc3dqtj3oqjrcihztrqrkjyd.onion";
+    let harness = Harness::new().await;
+    let manifest = harness.publish(crate::util::now() - 60, &[("/index.html", "<!doctype html><title>hi</title>"), ("/app.js", "1")]);
+    let env = super::env::ClientEnv::default().with_onion(Some(onion.into()));
+    let web = harness.start_with(vec![manifest], true, WebConfig::default().keep_versions, env).await;
+    eventually("the site going live", async || web.get("/", &[]).await.0 == StatusCode::OK).await;
+
+    let (_, headers, _) = web.get("/invite/x?y=1", &[("host", "armada.example.com")]).await;
+    assert_eq!(headers["onion-location"], format!("http://{onion}/invite/x?y=1"));
+    // Not over plain HTTP, not on the onion itself, and not for anything but a page.
+    for (path, host) in [("/", "box.lan"), ("/", onion), ("/app.js", "armada.example.com"), ("/_armada/env.js", "armada.example.com")] {
+        let (_, headers, _) = web.get(path, &[("host", host)]).await;
+        assert!(!headers.contains_key("onion-location"), "{path} at {host}");
+    }
+
+    // The onion's own pages point the app at the onion.
+    let (_, _, body) = web.get("/_armada/env.js", &[("host", onion)]).await;
+    let body = String::from_utf8(body).unwrap();
+    assert!(body.contains(&format!(r#""APP_RELAYS":"ws://{onion},"#)), "{body}");
+    assert!(body.contains(&format!(r#""PREFERRED_BLOSSOM_SERVER":"http://{onion}/""#)), "{body}");
     web.stop().await;
 }
 

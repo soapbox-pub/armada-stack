@@ -70,7 +70,26 @@ impl SiteServer {
         // same-origin policy protects nothing here.
         headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
         headers.insert(header::ACCESS_CONTROL_EXPOSE_HEADERS, HeaderValue::from_static("*"));
+        if let Some(location) = self.onion_location(&parts, &response) {
+            response.headers_mut().insert("onion-location", location);
+        }
         response
+    }
+
+    /// Where Tor Browser should offer to take a visitor instead: the same
+    /// page on the onion, for a page reached over HTTPS. As Tor Browser
+    /// itself takes it, only from pages, and only from HTTPS ones, which
+    /// can't have had it added on the way.
+    fn onion_location(&self, request: &http::request::Parts, response: &Reply) -> Option<HeaderValue> {
+        let names = self.env.names();
+        let onion = names.onion.as_ref()?;
+        let html = header_str(response.headers(), header::CONTENT_TYPE).is_some_and(|value| value.starts_with("text/html"));
+        let origin = crate::origin::request_origin(names, &request.headers);
+        if response.status() != StatusCode::OK || !html || !origin.base.starts_with("https://") || names.is_onion(&origin) {
+            return None;
+        }
+        let path = request.uri.path_and_query().map_or("/", |path| path.as_str());
+        HeaderValue::from_str(&format!("http://{onion}{path}")).ok()
     }
 
     async fn respond(&self, site: Option<&Site>, method: &Method, path: &str, request: &HeaderMap) -> Reply {

@@ -99,6 +99,16 @@ enabled = true
 # public_url, or else https://armada.buzz.
 # subject = "mailto:ops@example.com"
 
+# Tor, built in: no tor daemon to install. With it, relays at .onion
+# addresses can be reached, such as the ones an nsite's author publishes to.
+[tor]
+enabled = true
+# Serve armada as an onion service too: the web app, relay and Blossom
+# server, over Tor. The address is made on first start and printed by
+# `armada onion`; its key is tor/hs_ed25519_secret_key in storage_dir, in
+# C Tor's format, so back it up to keep the address.
+onion_service = true
+
 # A blind Concord AV broker (CORD-07 §2) for LiveKit servers you run. Off
 # until a node is listed; needs public_url. See deploy/livekit.yaml.
 [av]

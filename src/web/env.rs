@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 use http::HeaderMap;
 
 use crate::config::Config;
-use crate::origin::{Origin, public_origin};
+use crate::origin::{Names, Origin, public_origin};
 
 /// Where the script is served. Out of the way of any path a site would use.
 pub const ENV_PATH: &str = "/_armada/env.js";
@@ -44,7 +44,7 @@ const ARMADA_AV_SERVERS: &[&str] = &["https://armada.buzz"];
 
 #[derive(Default)]
 pub struct ClientEnv {
-    public_url: Option<url::Url>,
+    names: Names,
     /// Whether this armada brokers AV.
     av: bool,
     /// The [push service](crate::push)'s pubkey, if it runs.
@@ -55,7 +55,7 @@ pub struct ClientEnv {
 
 impl ClientEnv {
     pub fn new(config: &Config) -> anyhow::Result<ClientEnv> {
-        Ok(ClientEnv { public_url: config.public_url()?, av: !config.av.nodes.is_empty(), push: None, overrides: config.web.env.clone() })
+        Ok(ClientEnv { names: config.public_url()?.into(), av: !config.av.nodes.is_empty(), push: None, overrides: config.web.env.clone() })
     }
 
     /// Point the web app at the push service with this pubkey, on this
@@ -64,10 +64,20 @@ impl ClientEnv {
         ClientEnv { push: Some(pubkey.to_string()), ..self }
     }
 
+    /// Name armada's own services on its onion to clients that came over it.
+    pub fn with_onion(self, onion: Option<String>) -> ClientEnv {
+        ClientEnv { names: Names::new(self.names.url.clone(), onion), ..self }
+    }
+
+    /// The names armada is reached by.
+    pub fn names(&self) -> &Names {
+        &self.names
+    }
+
     /// The settings for a request: armada's own services, where it knows
     /// the origin they're reached at, under `[web.env]`.
     pub fn values(&self, headers: &HeaderMap) -> BTreeMap<String, String> {
-        let mut values = public_origin(self.public_url.as_ref(), headers).map(|origin| self.own(&origin)).unwrap_or_default();
+        let mut values = public_origin(&self.names, headers).map(|origin| self.own(&origin)).unwrap_or_default();
         values.extend(self.overrides.iter().map(|(name, value)| (name.clone(), value.clone())));
         values
     }
@@ -83,7 +93,9 @@ impl ClientEnv {
             // This armada, not armada.buzz, on purpose: see the module docs.
             ("PUBLIC_WEB_ORIGIN".to_string(), origin.base.clone()),
         ]);
-        if self.av {
+        // Not on the onion: calls go peer to peer over WebRTC, which Tor
+        // can't carry, so offering them there would only leak the client.
+        if self.av && !self.names.is_onion(origin) {
             values.insert("CONCORD_AV_SERVERS".to_string(), join(origin.base.clone(), ARMADA_AV_SERVERS));
         }
         if let Some(pubkey) = &self.push {
@@ -179,6 +191,30 @@ mod tests {
         let values = ClientEnv::new(&config).unwrap().values(&host("other.example.org"));
         assert_eq!(values["APP_RELAYS"].split(',').next(), Some("wss://armada.example.com"));
         assert_eq!(values["CONCORD_AV_SERVERS"], "https://armada.example.com,https://armada.buzz");
+    }
+
+    #[test]
+    fn the_onion_is_named_to_those_on_it_without_av() {
+        let onion = "dl6nglbofs66w2ctcqp3hdgw7lgql7b5xc3dqtj3oqjrcihztrqrkjyd.onion";
+        let config = Config {
+            public_url: Some("https://armada.example.com".into()),
+            av: crate::config::AvConfig {
+                nodes: vec![AvNode { url: "wss://armada.example.com".into(), api_url: None, api_key: "k".into(), api_secret: "s".into() }],
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let env = ClientEnv::new(&config).unwrap().with_push("ab").with_onion(Some(onion.into()));
+        let values = env.values(&host(onion));
+        assert_eq!(values["APP_RELAYS"].split(',').next(), Some(format!("ws://{onion}").as_str()));
+        assert_eq!(values["APP_BLOSSOM_SERVERS"].split(',').next(), Some(format!("http://{onion}/").as_str()));
+        assert_eq!(values["PUBLIC_WEB_ORIGIN"], format!("http://{onion}"));
+        assert_eq!(values["NOSTR_PUSH2_RELAYS"], format!("ws://{onion}"));
+        assert!(!values.contains_key("CONCORD_AV_SERVERS"));
+        // Everyone else still gets public_url.
+        let values = env.values(&host("armada.example.com"));
+        assert_eq!(values["APP_RELAYS"].split(',').next(), Some("wss://armada.example.com"));
+        assert!(values.contains_key("CONCORD_AV_SERVERS"));
     }
 
     #[test]

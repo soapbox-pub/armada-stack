@@ -28,6 +28,7 @@ mod lmdb;
 mod monitors;
 pub mod nip44;
 mod policy;
+pub use policy::authority;
 mod query;
 mod record;
 mod store;
@@ -48,7 +49,7 @@ use tokio::sync::{Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::RelayConfig;
-use crate::origin::request_origin;
+use crate::origin::{Names, request_origin};
 use crate::ratelimit;
 use crate::storage::Storage;
 use crate::nostr::Event;
@@ -69,12 +70,13 @@ pub struct Relay {
 /// What every connection shares.
 struct Shared {
     config: RelayConfig,
-    /// The [`policy::authority`] of `public_url`, if it's set. Without it
-    /// the relay doesn't know its own name, so takes only requests to
+    /// What this relay is called, as [`policy::authority`] puts it: by
+    /// `public_url` and by its onion, either when there is one. With
+    /// neither, it doesn't know its own name, so takes only requests to
     /// vanish from `ALL_RELAYS`.
-    authority: Option<Arc<str>>,
+    authorities: Arc<[String]>,
     /// Where NIP-11's icon and banner are, when it's set.
-    public_url: Option<url::Url>,
+    names: Names,
     /// Whether to believe `X-Forwarded-For`; see [`crate::config::Config::trust_proxy`].
     trust_proxy: bool,
     clients: Arc<Clients>,
@@ -92,8 +94,8 @@ struct Shared {
 
 impl Relay {
     /// Open the relay's store. Every connection closes once `cancel` fires.
-    /// `public_url` is where clients reach it, as requests to vanish name it.
-    pub fn open(config: &RelayConfig, public_url: Option<url::Url>, trust_proxy: bool, storage: &Storage, cancel: &CancellationToken) -> Result<Relay> {
+    /// `names` are where clients reach it, as requests to vanish name it.
+    pub fn open(config: &RelayConfig, names: Names, trust_proxy: bool, storage: &Storage, cancel: &CancellationToken) -> Result<Relay> {
         let store = Arc::new(Store::open(&storage.service_dir("relay")?, config.map_size as usize)?);
         let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
         let hub = Hub::spawn((cores / 2).clamp(1, 8));
@@ -101,8 +103,8 @@ impl Relay {
         Ok(Relay {
             shared: Arc::new(Shared {
                 config: config.clone(),
-                authority: public_url.as_ref().and_then(|url| policy::authority(url.as_str())).map(Arc::from),
-                public_url,
+                authorities: names.authorities().into(),
+                names,
                 trust_proxy,
                 clients: Clients::new(config),
                 store,
@@ -137,15 +139,12 @@ impl Relay {
                     return (StatusCode::TOO_MANY_REQUESTS, "too many connections from this address").into_response();
                 };
                 let max = shared.config.max_message_length;
-                // Never the request's `Host`: anyone can send any, and with
-                // it replay a request to vanish meant for another relay.
-                let authority = shared.authority.clone().unwrap_or_else(|| Arc::from(""));
-                upgrade.max_message_size(max).max_frame_size(max).on_upgrade(move |socket| conn::serve(shared, socket, authority, slot)).into_response()
+                upgrade.max_message_size(max).max_frame_size(max).on_upgrade(move |socket| conn::serve(shared, socket, slot)).into_response()
             }
             Err(_) if wants_nip11(&parts.headers) => {
                 // Its image URLs are the request's origin's unless
                 // `public_url` is set, so it varies with `Host`.
-                let origin = request_origin(shared.public_url.as_ref(), &parts.headers);
+                let origin = request_origin(&shared.names, &parts.headers);
                 let headers = [(header::CONTENT_TYPE, "application/nostr+json"), (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"), (header::VARY, "Host")];
                 (headers, info(&shared.config, &origin.base).to_string()).into_response()
             }
@@ -220,7 +219,7 @@ impl Internal {
         let now = crate::util::now();
         let valid = conn::well_formed(event)
             && (0..=i64::from(u32::MAX)).contains(&event.created_at)
-            && policy::validate(event, now, "").is_ok()
+            && policy::validate(event, now, &[] as &[&str]).is_ok()
             && event.verify();
         if !valid {
             tracing::error!(id = %event.id, kind = event.kind, "an event of armada's own isn't valid; not publishing it");

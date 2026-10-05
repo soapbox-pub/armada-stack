@@ -36,7 +36,7 @@ impl Harness {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::allowing_private(dir.path());
         let public_url = url::Url::parse("https://blossom.example.com").ok();
-        let blossom = Blossom::open(&config, public_url, false, &storage, &CancellationToken::new()).unwrap();
+        let blossom = Blossom::open(&config, public_url.into(), false, &storage, &CancellationToken::new()).unwrap();
         Harness { _dir: dir, storage, blossom }
     }
 
@@ -472,7 +472,7 @@ async fn blob_urls_name_a_public_host_over_https() {
     let dir = tempfile::tempdir().unwrap();
     let storage = Storage::allowing_private(dir.path());
     let config = BlossomConfig { max_blob_size: MAX, ..BlossomConfig::default() };
-    let blossom = Blossom::open(&config, None, false, &storage, &CancellationToken::new()).unwrap();
+    let blossom = Blossom::open(&config, Default::default(), false, &storage, &CancellationToken::new()).unwrap();
     let blob = ciphertext(9, 5000);
     let sha = sha_of(&blob);
     for (host, base) in [("armada.example.org", "https://armada.example.org"), ("localhost:8080", "http://localhost:8080")] {

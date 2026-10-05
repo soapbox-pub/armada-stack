@@ -168,11 +168,11 @@ pub fn scope(filter: &mut Filter) -> Result<(), String> {
     }
 }
 
-/// Check an event against its kind's rules. `relay` is this relay's
-/// [`authority`], which requests to vanish have to name, or empty if it
-/// isn't known: then only those for `ALL_RELAYS` are taken. Errors are the
-/// `OK` message to refuse with.
-pub fn validate(event: &Event, now: i64, relay: &str) -> Result<(), String> {
+/// Check an event against its kind's rules. `relay` is each [`authority`]
+/// this relay goes by, one of which requests to vanish have to name, or none
+/// if it isn't known: then only those for `ALL_RELAYS` are taken. Errors are
+/// the `OK` message to refuse with.
+pub fn validate(event: &Event, now: i64, relay: &[impl AsRef<str>]) -> Result<(), String> {
     let kind = u16::try_from(event.kind).map_err(|_| "invalid: kind must be between 0 and 65535".to_string())?;
     if !is_accepted(kind) {
         return Err(format!("blocked: kind {kind} is not accepted by this relay"));
@@ -239,7 +239,7 @@ pub fn validate(event: &Event, now: i64, relay: &str) -> Result<(), String> {
             }
         }
         VANISH => {
-            if tag_values(event, "relay").any(|url| url == "ALL_RELAYS" || (!relay.is_empty() && authority(url).as_deref() == Some(relay))) {
+            if tag_values(event, "relay").any(|url| url == "ALL_RELAYS" || authority(url).is_some_and(|named| relay.iter().any(|own| own.as_ref() == named))) {
                 Ok(())
             } else {
                 Err("invalid: the request to vanish doesn't name this relay".into())
@@ -431,7 +431,7 @@ mod tests {
     const RELAY: &str = "armada.example.com";
 
     fn check(kind: u16, event_tags: &[&[&str]], content: &str) -> Result<(), String> {
-        validate(&Event::sign(ALICE, NOW, kind.into(), tags(event_tags), content), NOW, RELAY)
+        validate(&Event::sign(ALICE, NOW, kind.into(), tags(event_tags), content), NOW, &[RELAY])
     }
 
     fn ok(kind: u16, event_tags: &[&[&str]], content: &str) {
@@ -486,7 +486,7 @@ mod tests {
     #[test]
     fn checks_timestamps() {
         let p = public_key(BOB);
-        let wrap = |kind: u16, at| validate(&Event::sign(ALICE, at, kind.into(), tags(&[&["p", &p]]), &payload(10)), NOW, RELAY);
+        let wrap = |kind: u16, at| validate(&Event::sign(ALICE, at, kind.into(), tags(&[&["p", &p]]), &payload(10)), NOW, &[RELAY]);
         // Gift wraps are backdated on purpose.
         assert!(wrap(GIFT_WRAP, NOW - 2 * 86400).is_ok());
         assert!(wrap(EPHEMERAL_GIFT_WRAP, NOW - 30).is_ok());
@@ -631,10 +631,17 @@ mod tests {
         refused(VANISH, &[], "");
 
         // A relay that doesn't know its name takes only ALL_RELAYS.
-        let unnamed = |relay: &str| validate(&Event::sign(ALICE, NOW, VANISH.into(), tags(&[&["relay", relay]]), ""), NOW, "");
+        let unnamed = |relay: &str| validate(&Event::sign(ALICE, NOW, VANISH.into(), tags(&[&["relay", relay]]), ""), NOW, &[] as &[&str]);
         assert!(unnamed("ALL_RELAYS").is_ok());
         assert!(unnamed("wss://armada.example.com").is_err());
         assert!(unnamed("wss://").is_err());
+
+        // One reached by its onion too answers to either name.
+        let onion = "dl6nglbofs66w2ctcqp3hdgw7lgql7b5xc3dqtj3oqjrcihztrqrkjyd.onion";
+        let both = |relay: &str| validate(&Event::sign(ALICE, NOW, VANISH.into(), tags(&[&["relay", relay]]), ""), NOW, &[RELAY, onion]);
+        assert!(both("wss://armada.example.com").is_ok());
+        assert!(both(&format!("ws://{onion}")).is_ok());
+        assert!(both("ws://other.onion").is_err());
     }
 
     #[test]

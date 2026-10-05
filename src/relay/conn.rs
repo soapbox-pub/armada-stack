@@ -112,15 +112,13 @@ struct Session {
     /// This connection, counted against its client's address, whose event
     /// budget it shares.
     slot: Slot,
-    /// What this relay is called, as [`policy::authority`] puts it.
-    authority: Arc<str>,
     /// Stops every query of this connection's, once it goes.
     cancel: CancellationToken,
 }
 
 type QueryDone = (Arc<str>, anyhow::Result<Results>);
 
-pub async fn serve(shared: Arc<Shared>, socket: WebSocket, authority: Arc<str>, slot: Slot) {
+pub async fn serve(shared: Arc<Shared>, socket: WebSocket, slot: Slot) {
     let id = shared.next_conn.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (link, mut rx, overflow) = Link::new(OUTBOUND);
     let (sink, mut stream) = socket.split();
@@ -128,7 +126,7 @@ pub async fn serve(shared: Arc<Shared>, socket: WebSocket, authority: Arc<str>, 
     let tokens = TokenBucket::new(shared.config.events_per_minute, Instant::now());
     let messages = TokenBucket::new(MESSAGES_PER_MINUTE, Instant::now());
     let cancel = shared.cancel.clone();
-    let mut session = Session { shared, id, link, sink, subs: HashMap::new(), tokens, messages, slot, authority, cancel: CancellationToken::new() };
+    let mut session = Session { shared, id, link, sink, subs: HashMap::new(), tokens, messages, slot, cancel: CancellationToken::new() };
     let mut queries: JoinSet<QueryDone> = JoinSet::new();
     let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + PING_INTERVAL, PING_INTERVAL);
     let mut heard = Instant::now();
@@ -283,7 +281,9 @@ impl Session {
         if event.content.len() > config.max_content_length {
             return Err("invalid: content is too long".into());
         }
-        policy::validate(event, now, &self.authority)?;
+        // Never the request's `Host`: anyone can send any, and with it
+        // replay a request to vanish meant for another relay.
+        policy::validate(event, now, &self.shared.authorities)?;
         if record::expiration(event).is_some_and(|expiration| i64::from(expiration) <= now) {
             return Err("invalid: event has expired".into());
         }

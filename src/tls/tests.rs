@@ -122,8 +122,8 @@ fn stack(dir: &std::path::Path, cancel: &CancellationToken) -> Router {
         naddr: http::HeaderValue::from_static("naddr"),
         env: Default::default(),
     });
-    let relay = crate::relay::Relay::open(&config.relay, None, false, &storage, cancel).unwrap();
-    let blossom = crate::blossom::Blossom::open(&config.blossom, None, false, &storage, cancel).unwrap();
+    let relay = crate::relay::Relay::open(&config.relay, Default::default(), false, &storage, cancel).unwrap();
+    let blossom = crate::blossom::Blossom::open(&config.blossom, Default::default(), false, &storage, cancel).unwrap();
     crate::routes::router(crate::routes::Services { web, relay, blossom, av: None })
 }
 
