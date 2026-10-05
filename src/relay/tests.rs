@@ -377,6 +377,50 @@ async fn shares_a_req_budget_across_an_addresss_connections() {
     b.quiet().await;
 }
 
+/// Filters' values are held in memory while their subscription is open, so
+/// there's a ceiling on them, in one REQ and across an address's.
+#[tokio::test]
+async fn limits_filter_values() {
+    let config = RelayConfig { max_filter_values: 4, max_filter_values_per_ip: 6, ..RelayConfig::default() };
+    let harness = Harness::new(config).await;
+    let mut a = harness.client().await;
+    let mut b = harness.client().await;
+    // A kind and so many topics.
+    let topics = |n: usize| json!({"kinds": [STATUS], "#t": (0..n).map(|i| i.to_string()).collect::<Vec<_>>()});
+
+    a.send(json!(["REQ", "big", topics(4)])).await;
+    assert_eq!(a.recv().await, json!(["CLOSED", "big", "invalid: filters list more than 4 values"]));
+    a.send(json!(["REQ", "big", topics(2), topics(2)])).await;
+    assert_eq!(a.recv().await, json!(["CLOSED", "big", "invalid: filters list more than 4 values"]));
+
+    a.query("four", &[topics(3)]).await;
+    // Replacing it counts only the new one.
+    a.query("four", &[topics(3)]).await;
+    let full = "rate-limited: too many filter values in open subscriptions; close some";
+    b.send(json!(["REQ", "three", topics(2)])).await;
+    assert_eq!(b.recv().await, json!(["CLOSED", "three", full]));
+    b.query("two", &[topics(1)]).await;
+
+    // Closing one gives its back, and so does going away.
+    a.send(json!(["CLOSE", "four"])).await;
+    // An answer means the CLOSE before it was read.
+    a.send(json!(["REQ", "big", topics(4)])).await;
+    assert_eq!(a.recv().await[0], "CLOSED");
+    b.query("three", &[topics(2)]).await;
+    b.send(json!(["REQ", "more", topics(2)])).await;
+    assert_eq!(b.recv().await, json!(["CLOSED", "more", full]));
+    drop(b);
+    let mut c = harness.client().await;
+    for _ in 0..50 {
+        c.send(json!(["REQ", "after", topics(3)])).await;
+        if c.recv().await == json!(["EOSE", "after"]) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the closed connection's values were never given back");
+}
+
 /// Queries replaced, closed, or left behind by a closed connection give
 /// back their client's place, so the next one runs.
 #[tokio::test]

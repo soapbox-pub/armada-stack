@@ -72,6 +72,8 @@ struct Sub {
     floor: u64,
     /// Stops its query.
     cancel: CancellationToken,
+    /// Filter values it holds of its client's ([`Slot::hold_values`]).
+    values: usize,
 }
 
 struct Session {
@@ -170,10 +172,17 @@ impl Session {
 
     /// Close a subscription, and stop its query.
     async fn end(&mut self, sub: &str) {
+        self.forget(sub);
+        self.shared.hub.unsubscribe(self.id, sub).await;
+    }
+
+    /// Stop a subscription's query and give back its values, leaving the
+    /// shard to whoever replaces or unsubscribes it.
+    fn forget(&mut self, sub: &str) {
         if let Some(sub) = self.subs.remove(sub) {
             sub.cancel.cancel();
+            self.slot.release_values(sub.values);
         }
-        self.shared.hub.unsubscribe(self.id, sub).await;
     }
 
     async fn on_event(&mut self, event: Option<&Value>) -> Result<(), Gone> {
@@ -261,17 +270,26 @@ impl Session {
                 return self.closed(&sub, &error).await;
             }
         };
+        let values = filters.iter().map(Filter::values).sum();
+        if values > config.max_filter_values {
+            let message = format!("invalid: filters list more than {} values", config.max_filter_values);
+            self.end(&sub).await;
+            return self.closed(&sub, &message).await;
+        }
         if !self.subs.contains_key(&sub) && self.subs.len() >= config.max_subscriptions {
             return self.closed(&sub, "rate-limited: too many open subscriptions").await;
+        }
+        // What it replaces gives its values back first.
+        self.forget(&sub);
+        if !self.slot.hold_values(values) {
+            self.end(&sub).await;
+            return self.closed(&sub, "rate-limited: too many filter values in open subscriptions; close some").await;
         }
 
         let name: Arc<str> = sub.as_str().into();
         let json = serde_json::to_string(&sub).expect("strings serialize");
         let cancel = self.cancel.child_token();
-        let replaced = self.subs.insert(sub, Sub { name: name.clone(), json, pending: Some(Vec::new()), floor: 0, cancel: cancel.clone() });
-        if let Some(replaced) = replaced {
-            replaced.cancel.cancel();
-        }
+        self.subs.insert(sub, Sub { name: name.clone(), json, pending: Some(Vec::new()), floor: 0, cancel: cancel.clone(), values });
         // Live first, then the query: see the module docs. Queued from here
         // rather than the query's task, so a later CLOSE or REQ of the same id
         // reaches the shard after it.

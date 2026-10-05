@@ -90,6 +90,12 @@ impl Filter {
         Ok(filter)
     }
 
+    /// How many values it lists: ids, authors, kinds and tag values.
+    pub fn values(&self) -> usize {
+        let tags: usize = self.tags.iter().map(|(_, values)| values.len()).sum();
+        self.ids.as_ref().map_or(0, Vec::len) + self.authors.as_ref().map_or(0, Vec::len) + self.kinds.as_ref().map_or(0, Vec::len) + tags
+    }
+
     pub fn matches(&self, event: &EventView) -> bool {
         if self.never || !self.matches_time(event.created_at()) {
             return false;
@@ -188,6 +194,15 @@ mod tests {
         assert!(!matches(json!({"until": 99}), &event));
         // Only single-letter tags are matched.
         assert!(Filter::parse(&json!({"#title": ["x"]})).is_err());
+    }
+
+    #[test]
+    fn counts_values() {
+        let hex = "ab".repeat(32);
+        let filter = Filter::parse(&json!({"ids": [hex], "authors": [hex, hex], "kinds": [1, 2], "#t": ["a", "b", "c"], "#p": [hex], "limit": 5})).unwrap();
+        // Duplicates are counted once.
+        assert_eq!(filter.values(), 1 + 1 + 2 + 3 + 1);
+        assert_eq!(Filter::parse(&json!({})).unwrap().values(), 0);
     }
 
     #[test]

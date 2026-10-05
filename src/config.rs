@@ -137,6 +137,13 @@ pub struct RelayConfig {
     pub max_subscriptions: usize,
     /// Filters one REQ may have.
     pub max_filters: usize,
+    /// Values one REQ's filters may list between them: ids, authors, kinds
+    /// and tag values.
+    pub max_filter_values: usize,
+    /// Values one client's open subscriptions may list between them, across
+    /// all its connections, by IPv4 address or IPv6 /64: each is held in
+    /// memory while the subscription is open. 0 for no limit.
+    pub max_filter_values_per_ip: usize,
     /// The most events one filter returns, and how many it returns without
     /// a limit of its own.
     pub max_limit: u64,
@@ -273,6 +280,8 @@ impl Default for RelayConfig {
             max_message_length: 2 << 20,
             max_subscriptions: 32,
             max_filters: 32,
+            max_filter_values: 10_000,
+            max_filter_values_per_ip: 200_000,
             max_limit: 500,
             max_event_tags: 2000,
             max_content_length: 1 << 20,
@@ -450,8 +459,11 @@ impl Config {
         if relay.max_message_length < 1024 {
             bail!("relay.max_message_length has to be at least 1024 bytes.");
         }
-        if relay.max_subscriptions == 0 || relay.max_filters == 0 || relay.max_limit == 0 {
-            bail!("relay.max_subscriptions, relay.max_filters, and relay.max_limit have to be at least 1.");
+        if relay.max_subscriptions == 0 || relay.max_filters == 0 || relay.max_filter_values == 0 || relay.max_limit == 0 {
+            bail!("relay.max_subscriptions, relay.max_filters, relay.max_filter_values, and relay.max_limit have to be at least 1.");
+        }
+        if relay.max_filter_values_per_ip != 0 && relay.max_filter_values_per_ip < relay.max_filter_values {
+            bail!("relay.max_filter_values_per_ip has to be at least relay.max_filter_values, or 0 for no limit.");
         }
         if relay.map_size < 1 << 24 || usize::try_from(relay.map_size).is_err() {
             bail!("relay.map_size has to be at least 16 MiB, and fit in this machine's address space.");
@@ -669,6 +681,9 @@ mod tests {
         assert!(Config::parse("public_url = \"ftp://example.com\"").is_err());
         assert!(Config::parse("public_url = \"https://example.com/armada\"").is_err());
         assert!(Config::parse("[blossom]\nmax_blob_size = 0").is_err());
+        assert!(Config::parse("[relay]\nmax_filter_values = 0").is_err());
+        assert!(Config::parse("[relay]\nmax_filter_values_per_ip = 9999").is_err());
+        assert!(Config::parse("[relay]\nmax_filter_values_per_ip = 0").is_ok());
         assert!(Config::parse("[blossom]\nupload_bytes_per_hour = 1048576").is_err());
         assert!(Config::parse("[blossom]\nupload_bytes_per_hour = 0").is_ok());
         assert!(Config::parse("[relay]\nmax_limit = 0").is_err());

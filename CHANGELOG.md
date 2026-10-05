@@ -28,6 +28,11 @@ A release's notes are its section here, so tag `vX.Y.Z` only once
 - Each client address may send `relay.reqs_per_minute_per_ip` (1,200) REQs
   a minute across its connections. `relay.max_filters` is now 32 by
   default, down from 100: Armada sends at most 32 in one REQ.
+- A REQ's filters may list at most `relay.max_filter_values` (10,000) ids,
+  authors, kinds and tag values between them, and each client address's
+  open subscriptions at most `relay.max_filter_values_per_ip` (200,000),
+  since they're held in memory while open. Armada's largest REQ lists about
+  5,500.
 
 ## 0.2.0
 

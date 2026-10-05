@@ -22,6 +22,7 @@ const SWEEP_FLOOR: usize = 1024;
 pub struct Clients {
     max_connections: usize,
     max_queries: usize,
+    max_values: usize,
     events_per_minute: u32,
     reqs_per_minute: u32,
     table: Mutex<Table>,
@@ -36,6 +37,8 @@ struct Table {
 
 struct Client {
     connections: usize,
+    /// Filter values its open subscriptions list.
+    values: usize,
     events: TokenBucket,
     reqs: TokenBucket,
     /// Its queries' places, if they're limited.
@@ -57,6 +60,8 @@ pub struct Slot {
     /// they're limited: a query takes one before it waits for a core, so one
     /// client can't fill the queue for them.
     pub queries: Option<Arc<Semaphore>>,
+    /// Filter values this connection holds of the client's.
+    values: usize,
 }
 
 impl Clients {
@@ -64,6 +69,7 @@ impl Clients {
         Arc::new(Clients {
             max_connections: config.max_connections_per_ip,
             max_queries: config.max_queries_per_ip,
+            max_values: config.max_filter_values_per_ip,
             events_per_minute: config.events_per_minute_per_ip,
             reqs_per_minute: config.reqs_per_minute_per_ip,
             table: Mutex::new(Table { clients: HashMap::new(), sweep_at: SWEEP_FLOOR }),
@@ -80,6 +86,7 @@ impl Clients {
         }
         let client = table.clients.entry(key.clone()).or_insert_with(|| Client {
             connections: 0,
+            values: 0,
             events: TokenBucket::new(self.events_per_minute, now),
             reqs: TokenBucket::new(self.reqs_per_minute, now),
             queries: (self.max_queries != 0).then(|| Arc::new(Semaphore::new(self.max_queries))),
@@ -89,7 +96,7 @@ impl Clients {
         }
         client.connections += 1;
         let queries = client.queries.clone();
-        Some(Slot { clients: self.clone(), key, queries })
+        Some(Slot { clients: self.clone(), key, queries, values: 0 })
     }
 
     #[cfg(test)]
@@ -105,6 +112,28 @@ impl Slot {
         table.clients.get_mut(&self.key).is_none_or(|client| client.events.take(now))
     }
 
+    /// Hold `count` more filter values for a subscription, unless the
+    /// client already holds as many as it may.
+    pub fn hold_values(&mut self, count: usize) -> bool {
+        let mut table = self.clients.table.lock();
+        let Some(client) = table.clients.get_mut(&self.key) else { return true };
+        if self.clients.max_values != 0 && client.values.saturating_add(count) > self.clients.max_values {
+            return false;
+        }
+        client.values += count;
+        self.values += count;
+        true
+    }
+
+    /// Give back values a closed subscription held.
+    pub fn release_values(&mut self, count: usize) {
+        let count = count.min(self.values);
+        self.values -= count;
+        if let Some(client) = self.clients.table.lock().clients.get_mut(&self.key) {
+            client.values -= count;
+        }
+    }
+
     /// Spend one of the client's REQs, shared by all its connections.
     pub fn take_req(&self, now: Instant) -> bool {
         let mut table = self.clients.table.lock();
@@ -118,6 +147,7 @@ impl Drop for Slot {
         let mut table = self.clients.table.lock();
         if let Some(client) = table.clients.get_mut(&self.key) {
             client.connections -= 1;
+            client.values -= self.values;
             if client.is_idle(now) {
                 table.clients.remove(&self.key);
             }
@@ -174,6 +204,26 @@ mod tests {
         // Remembered after disconnecting, until it refills.
         drop((a, b));
         assert_eq!(clients.len(), 1);
+    }
+
+    #[test]
+    fn shares_one_budget_of_filter_values() {
+        let clients = Clients::new(&RelayConfig { max_filter_values_per_ip: 10, ..RelayConfig::default() });
+        let now = Instant::now();
+        let mut a = clients.connect("a".into(), now).unwrap();
+        let mut b = clients.connect("a".into(), now).unwrap();
+        assert!(a.hold_values(6));
+        assert!(!b.hold_values(5));
+        assert!(b.hold_values(4));
+        assert!(!a.hold_values(1));
+        a.release_values(2);
+        assert!(b.hold_values(2));
+        // Others aren't charged for it.
+        assert!(clients.connect("b".into(), now).unwrap().hold_values(10));
+        // A connection's are given back when it goes.
+        drop(b);
+        assert!(a.hold_values(6));
+        assert!(Clients::new(&RelayConfig { max_filter_values_per_ip: 0, ..RelayConfig::default() }).connect("a".into(), now).unwrap().hold_values(usize::MAX));
     }
 
     #[test]
