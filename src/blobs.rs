@@ -228,7 +228,9 @@ impl BlobStore {
             .user_agent(concat!("armada/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(10));
         if public_only {
-            http = http.dns_resolver(Arc::new(PublicResolver));
+            // Through a proxy, the proxy would resolve the name, not
+            // PublicResolver, and connect wherever it pointed.
+            http = http.dns_resolver(Arc::new(PublicResolver)).no_proxy();
         }
 
         BlobStore {

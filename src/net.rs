@@ -69,6 +69,11 @@ fn is_private_ipv6(address: Ipv6Addr) -> bool {
             return true;
         }
     }
+    // ::ffff:0:0:0/96, IPv4-translated (RFC 2765), which an SIIT translator
+    // forwards to the IPv4 address in its last 32 bits.
+    if groups[..4].iter().all(|&group| group == 0) && groups[4] == 0xffff && groups[5] == 0 {
+        return embedded(groups[6], groups[7]);
+    }
     // 64:ff9b::/96, NAT64's well-known prefix: a NAT64 gateway on the network
     // forwards it to the IPv4 address in its last 32 bits.
     if first == 0x64 && second == 0xff9b && groups[2..6].iter().all(|&group| group == 0) {
@@ -157,6 +162,8 @@ mod tests {
             "::1",
             "::ffff:127.0.0.1",
             "::ffff:7f00:1",
+            "::ffff:0:7f00:1",
+            "::ffff:0:a00:1",
             "64:ff9b::a00:1",
             "64:ff9b:1::1",
             "2002:a00:1::",
@@ -171,7 +178,7 @@ mod tests {
         ] {
             assert!(!is_public_address_str(private), "{private} should be private");
         }
-        for public in ["1.1.1.1", "8.8.8.8", "192.0.78.9", "2606:4700::1111", "::ffff:8.8.8.8", "64:ff9b::808:808", "2002:808:808::"] {
+        for public in ["::ffff:0:808:808", "1.1.1.1", "8.8.8.8", "192.0.78.9", "2606:4700::1111", "::ffff:8.8.8.8", "64:ff9b::808:808", "2002:808:808::"] {
             assert!(is_public_address_str(public), "{public} should be public");
         }
     }
