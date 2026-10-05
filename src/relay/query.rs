@@ -42,6 +42,12 @@ const CANCEL_CHECK: usize = 256;
 /// The most extra events read past the limit to order a tie at the boundary.
 const MAX_TIES: usize = 1000;
 
+/// The most bytes of events one REQ returns, all its filters together.
+/// Results are held in memory until they're sent, and events can be big:
+/// without this, 32 filters of 500 one-megabyte gift wraps each would be
+/// gigabytes. Past it the REQ ends early, as if at its limits.
+pub const MAX_RESULT_BYTES: usize = 16 << 20;
+
 pub struct Results {
     /// The sequence number the next event stored after this snapshot gets.
     /// Anything below it was visible to the query.
@@ -85,7 +91,8 @@ fn run_within(store: &Store, filters: &[Filter], max_limit: u64, now: i64, mut b
     let next_seq = store.next_seq(&txn)?;
     let mut seen = HashSet::new();
     let mut events = Vec::new();
-    for filter in filters {
+    let mut bytes = 0;
+    'filters: for filter in filters {
         let limit = filter.limit.unwrap_or(max_limit).min(max_limit) as usize;
         if filter.never || limit == 0 {
             continue;
@@ -95,7 +102,12 @@ fn run_within(store: &Store, filters: &[Filter], max_limit: u64, now: i64, mut b
         }
         for (seq, view) in run_filter(store, &txn, filter, limit, now, &mut budget)? {
             if seen.insert(seq) {
-                events.push(view.to_json());
+                let json = view.to_json();
+                bytes += json.len();
+                events.push(json);
+                if bytes >= MAX_RESULT_BYTES {
+                    break 'filters;
+                }
             }
         }
     }
@@ -420,6 +432,20 @@ mod tests {
         assert!(!budget.spend());
         // Before it starts, at once.
         assert!(run(&store, &filters, 1000, 1_000_000, &cancel).unwrap().events.is_empty());
+    }
+
+    #[test]
+    fn stops_at_its_byte_budget() {
+        let (_dir, store) = open();
+        let big = "x".repeat(1 << 20);
+        for i in 0..20 {
+            put(&store, &Event::sign(ALICE, 100 + i, 1, vec![], &big));
+        }
+        let filters: Vec<Filter> = (0..4).map(|i| Filter::parse(&json!({"kinds": [1], "until": 119 - i * 5, "limit": 5})).unwrap()).collect();
+        let results = run(&store, &filters, 500, 1_000_000, &CancellationToken::new()).unwrap();
+        // Each is a little over a megabyte: the sixteenth crosses it, and is the last.
+        assert_eq!(MAX_RESULT_BYTES, 16 << 20);
+        assert_eq!(results.events.len(), 16);
     }
 
     #[test]

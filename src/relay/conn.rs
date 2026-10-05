@@ -24,10 +24,15 @@
 //! A query stops as soon as nobody wants its results: when its subscription
 //! is closed or replaced, or the connection goes. Until it does it holds one
 //! of its client's few query places ([`Slot::queries`]) and a core.
+//!
+//! A client that stops reading is dropped, rather than left holding what's
+//! waiting for it: every write has [`WRITE_TIMEOUT`] to go out. One that
+//! goes silent altogether, without closing, is pinged every
+//! [`PING_INTERVAL`] and dropped if it doesn't answer.
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::stream::{SplitSink, StreamExt};
@@ -54,6 +59,19 @@ const OUTBOUND: usize = 4096;
 
 /// The longest subscription id NIP-01 allows.
 const MAX_SUB_ID: usize = 64;
+
+/// How long one write to the socket may take — one message, or a query's
+/// results all together — before the client is taken to have stopped
+/// reading.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How often a client is pinged. One not heard from in two of these, pong
+/// or otherwise, is gone.
+const PING_INTERVAL: Duration = Duration::from_secs(60);
+
+/// The most live events held for one subscription while its query runs.
+/// Past this the subscription is closed: its client can ask again.
+const MAX_PENDING: usize = OUTBOUND;
 
 /// A connection's side of the socket has gone; stop.
 struct Gone;
@@ -103,6 +121,8 @@ pub async fn serve(shared: Arc<Shared>, socket: WebSocket, authority: Arc<str>, 
     let cancel = shared.cancel.clone();
     let mut session = Session { shared, id, link, sink, subs: HashMap::new(), tokens, slot, authority, cancel: CancellationToken::new() };
     let mut queries: JoinSet<QueryDone> = JoinSet::new();
+    let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + PING_INTERVAL, PING_INTERVAL);
+    let mut heard = Instant::now();
 
     loop {
         let result = tokio::select! {
@@ -111,12 +131,22 @@ pub async fn serve(shared: Arc<Shared>, socket: WebSocket, authority: Arc<str>, 
                 tracing::debug!(conn = id, "dropping a client that fell too far behind");
                 break;
             }
-            message = stream.next() => match message {
-                Some(Ok(Message::Text(text))) => session.on_text(&text, &mut queries).await,
-                Some(Ok(Message::Binary(_))) => session.notice("invalid: messages must be text").await,
-                Some(Ok(Message::Ping(_) | Message::Pong(_))) => Ok(()),
-                Some(Ok(Message::Close(_)) | Err(_)) | None => break,
-            },
+            _ = ping.tick() => {
+                if heard.elapsed() > 2 * PING_INTERVAL {
+                    tracing::debug!(conn = id, "dropping a client that went silent");
+                    break;
+                }
+                write_within(session.sink.send(Message::Ping(Default::default()))).await
+            }
+            message = stream.next() => {
+                heard = Instant::now();
+                match message {
+                    Some(Ok(Message::Text(text))) => session.on_text(&text, &mut queries).await,
+                    Some(Ok(Message::Binary(_))) => session.notice("invalid: messages must be text").await,
+                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => Ok(()),
+                    Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                }
+            }
             Some(outbound) = rx.recv() => session.on_outbound(outbound).await,
             Some(done) = queries.join_next(), if !queries.is_empty() => match done {
                 Ok((name, results)) => session.on_results(name, results).await,
@@ -132,12 +162,20 @@ pub async fn serve(shared: Arc<Shared>, socket: WebSocket, authority: Arc<str>, 
     // on the blocking pool.
     session.cancel.cancel();
     session.shared.hub.disconnect(id).await;
-    let _ = session.sink.close().await;
+    let _ = tokio::time::timeout(WRITE_TIMEOUT, session.sink.close()).await;
+}
+
+/// A write to the socket, within [`WRITE_TIMEOUT`].
+async fn write_within<T, E>(write: impl Future<Output = Result<T, E>>) -> Result<T, Gone> {
+    match tokio::time::timeout(WRITE_TIMEOUT, write).await {
+        Ok(Ok(written)) => Ok(written),
+        _ => Err(Gone),
+    }
 }
 
 impl Session {
     async fn send(&mut self, text: String) -> Result<(), Gone> {
-        self.sink.send(Message::Text(text.into())).await.map_err(|_| Gone)
+        write_within(self.sink.send(Message::Text(text.into()))).await
     }
 
     async fn notice(&mut self, message: &str) -> Result<(), Gone> {
@@ -336,17 +374,23 @@ impl Session {
         sub.floor = results.next_seq;
         let sub_json = sub.json.clone();
 
-        for json in &results.events {
-            self.sink.feed(Message::Text(event_message(&sub_json, json).into())).await.map_err(|_| Gone)?;
-        }
-        self.sink.feed(Message::Text(format!("[\"EOSE\",{sub_json}]").into())).await.map_err(|_| Gone)?;
-        for (seq, json) in pending {
-            // Stored events the query could see were sent with it.
-            if seq >= results.next_seq {
-                self.sink.feed(Message::Text(event_message(&sub_json, &json).into())).await.map_err(|_| Gone)?;
+        let sink = &mut self.sink;
+        // All of it within one timeout, so a client reading just fast enough
+        // to keep each message from timing out can't hold its results for long.
+        write_within(async move {
+            for json in &results.events {
+                sink.feed(Message::Text(event_message(&sub_json, json).into())).await?;
             }
-        }
-        self.sink.flush().await.map_err(|_| Gone)
+            sink.feed(Message::Text(format!("[\"EOSE\",{sub_json}]").into())).await?;
+            for (seq, json) in pending {
+                // Stored events the query could see were sent with it.
+                if seq >= results.next_seq {
+                    sink.feed(Message::Text(event_message(&sub_json, &json).into())).await?;
+                }
+            }
+            sink.flush().await
+        })
+        .await
     }
 
     async fn on_outbound(&mut self, outbound: Outbound) -> Result<(), Gone> {
@@ -355,6 +399,10 @@ impl Session {
             Outbound::Event { sub, seq, json } => {
                 let Some(state) = self.subs.get_mut(&*sub).filter(|state| Arc::ptr_eq(&state.name, &sub)) else { return Ok(()) };
                 match &mut state.pending {
+                    Some(pending) if pending.len() >= MAX_PENDING => {
+                        self.end(&sub).await;
+                        self.closed(&sub, "error: too many new events arrived while the query ran; ask again").await
+                    }
                     Some(pending) => {
                         pending.push((seq, json));
                         Ok(())
