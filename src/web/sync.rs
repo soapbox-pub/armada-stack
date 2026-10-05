@@ -158,6 +158,11 @@ impl SyncWorker {
             Ok(false) => {}
             Err(error) => tracing::error!(%error, event_id = id, "could not store a version of the site"),
         }
+        // A version this one replaces before it was ready never will be,
+        // and whatever it downloaded can go with the next prune.
+        if let Err(error) = self.db(|db| db.forget_superseded()).await {
+            tracing::warn!(%error, "could not forget superseded versions of the site");
+        }
     }
 
     /// Bring the newest known version live, if it isn't already.
@@ -174,6 +179,12 @@ impl SyncWorker {
             Err(error) => {
                 let message = error.to_string();
                 self.db(move |db| db.set_status(&id, Status::Failed, Some(&message))).await?;
+                // What versions forgotten since left behind goes, so deploys
+                // that keep failing can't fill the disk. This one keeps what
+                // it got, for its next attempt.
+                if let Some(live) = self.live.load_full() {
+                    self.prune(live).await;
+                }
                 Err(error)
             }
         }
@@ -255,6 +266,10 @@ impl SyncWorker {
     /// once the downloads pass `budget` bytes — a manifest doesn't say how big
     /// its blobs are, so the limit is found by crossing it — nor once
     /// [`MAX_FAILURES_IN_A_ROW`] blobs have failed with none succeeding.
+    ///
+    /// Each download running holds `max_file_size` of the budget, which is
+    /// as much as it may turn out to be, so they can't together cross it by
+    /// more than one file.
     async fn download_all(
         &self,
         missing: Vec<BlobHash>,
@@ -269,7 +284,9 @@ impl SyncWorker {
         let (mut failed, mut bytes, mut done, mut in_a_row) = (Vec::new(), 0u64, 0usize, 0usize);
 
         loop {
-            while downloading.len() < BLOB_CONCURRENCY && !cancel.is_cancelled() && bytes <= budget && in_a_row < MAX_FAILURES_IN_A_ROW {
+            let max_file_size = self.settings.max_file_size;
+            let room = |running: usize| downloading_fits(bytes, running as u64, max_file_size, budget);
+            while downloading.len() < BLOB_CONCURRENCY && !cancel.is_cancelled() && room(downloading.len()) && in_a_row < MAX_FAILURES_IN_A_ROW {
                 let Some(sha256) = queue.next() else { break };
                 let compress = compressible.contains(&sha256);
                 downloading.push(async move { (sha256, self.download_blob(sha256, servers, compress, cancel).await) });
@@ -343,6 +360,13 @@ impl SyncWorker {
     }
 }
 
+/// Whether another download may start, with `running` already holding
+/// `max_file_size` of `budget` each and `bytes` downloaded. One may always
+/// run alone, until the budget is crossed.
+fn downloading_fits(bytes: u64, running: u64, max_file_size: u64, budget: u64) -> bool {
+    bytes <= budget && (running == 0 || bytes.saturating_add((running + 1).saturating_mul(max_file_size)) <= budget)
+}
+
 fn oversized(limit: u64) -> String {
     format!("This version is larger than web.max_site_size ({} MiB).", limit >> 20)
 }
@@ -358,5 +382,23 @@ async fn sleep_until(at: Option<Instant>) {
     match at {
         Some(at) => tokio::time::sleep_until(at).await,
         None => std::future::pending().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn downloads_hold_their_largest_against_the_budget() {
+        // 1,000 bytes of room, files of up to 300: three at once fit, not four.
+        assert!(downloading_fits(0, 2, 300, 1000));
+        assert!(!downloading_fits(0, 3, 300, 1000));
+        assert!(downloading_fits(400, 1, 300, 1000));
+        assert!(!downloading_fits(400, 2, 300, 1000));
+        // Alone, one may start until the budget is crossed, which a crossing
+        // one shows.
+        assert!(downloading_fits(900, 0, 300, 1000));
+        assert!(!downloading_fits(1001, 0, 300, 1000));
     }
 }

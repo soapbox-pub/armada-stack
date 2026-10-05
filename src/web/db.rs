@@ -97,6 +97,28 @@ impl WebDb {
         Ok(true)
     }
 
+    /// Forget every version that isn't ready, the newest, or served: only
+    /// the newest is ever deployed, so the rest never will be, and what
+    /// they downloaded can go. Returns how many were forgotten.
+    pub fn forget_superseded(&self) -> Result<usize> {
+        let newest = self.newest()?.map(|version| version.event.id);
+        let current = self.current()?.map(|version| version.event.id);
+        let mut txn = self.env.write_txn()?;
+        let superseded: Vec<String> = self
+            .versions
+            .iter(&txn)?
+            .filter_map(|entry| entry.ok())
+            .map(|(_, version)| version)
+            .filter(|version| version.status != Status::Ready && Some(&version.event.id) != newest.as_ref() && Some(&version.event.id) != current.as_ref())
+            .map(|version| version.event.id)
+            .collect();
+        for id in &superseded {
+            self.versions.delete(&mut txn, id)?;
+        }
+        txn.commit()?;
+        Ok(superseded.len())
+    }
+
     pub fn set_status(&self, event_id: &str, status: Status, error: Option<&str>) -> Result<()> {
         let mut txn = self.env.write_txn()?;
         if let Some(mut version) = self.versions.get(&txn, event_id)? {
@@ -206,6 +228,29 @@ mod tests {
         let current = db.current().unwrap().unwrap();
         assert_eq!((current.event.id.as_str(), current.status, current.error), (new.id.as_str(), Status::Ready, None));
         assert!(db.get(&old.id).unwrap().is_none());
+    }
+
+    /// A version that never got ready, with a newer one known, never will
+    /// be: only the newest is deployed.
+    #[test]
+    fn forgets_versions_superseded_before_they_were_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = WebDb::open(&Storage::allowing_private(dir.path())).unwrap();
+        let at = |created_at| Event::sign(SECRET, created_at, 15128, vec![], "");
+        let (live, failed, pending, newest) = (at(100), at(200), at(300), at(400));
+        db.insert(&live).unwrap();
+        db.promote(&live.id, 3).unwrap();
+        for version in [&failed, &pending, &newest] {
+            db.insert(version).unwrap();
+        }
+        db.set_status(&failed.id, Status::Failed, Some("nope")).unwrap();
+        db.set_status(&newest.id, Status::Failed, Some("nope")).unwrap();
+
+        assert_eq!(db.forget_superseded().unwrap(), 2);
+        assert!(db.get(&failed.id).unwrap().is_none() && db.get(&pending.id).unwrap().is_none());
+        // The newest, to try again, and what's served, stay.
+        assert!(db.get(&newest.id).unwrap().is_some() && db.get(&live.id).unwrap().is_some());
+        assert_eq!(db.forget_superseded().unwrap(), 0);
     }
 
     #[test]
