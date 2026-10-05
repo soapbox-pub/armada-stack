@@ -71,6 +71,9 @@ max_queries_per_ip = 4
 max_filter_values_per_ip = 200000
 events_per_minute_per_ip = 1200
 reqs_per_minute_per_ip = 1200
+# Bytes of events an hour, which is what bounds how fast one client can
+# fill the disk: at least max_content_length.
+event_bytes_per_hour_per_ip = 268435456
 # Reserved address space, not disk.
 map_size = 274877906944
 

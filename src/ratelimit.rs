@@ -133,23 +133,36 @@ impl RateLimiter {
 /// Allows `per_minute` a minute, in bursts of up to as many. 0 is no limit.
 #[derive(Debug, Clone)]
 pub struct TokenBucket {
-    per_minute: u32,
+    /// Tokens it holds when full, and refills over each `period`.
+    capacity: f64,
+    period: Duration,
     tokens: f64,
     last: Instant,
 }
 
 impl TokenBucket {
     pub fn new(per_minute: u32, now: Instant) -> TokenBucket {
-        TokenBucket { per_minute, tokens: f64::from(per_minute), last: now }
+        Self::per(per_minute.into(), Duration::from_secs(60), now)
+    }
+
+    /// Allows `capacity` a `period`, in bursts of up to as many. 0 is no
+    /// limit.
+    pub fn per(capacity: u64, period: Duration, now: Instant) -> TokenBucket {
+        TokenBucket { capacity: capacity as f64, period, tokens: capacity as f64, last: now }
     }
 
     pub fn take(&mut self, now: Instant) -> bool {
-        if self.per_minute == 0 {
+        self.take_n(1, now)
+    }
+
+    /// Take `cost` tokens at once, or none.
+    pub fn take_n(&mut self, cost: u64, now: Instant) -> bool {
+        if self.capacity == 0.0 {
             return true;
         }
         self.refill(now);
-        if self.tokens >= 1.0 {
-            self.tokens -= 1.0;
+        if self.tokens >= cost as f64 {
+            self.tokens -= cost as f64;
             true
         } else {
             false
@@ -159,12 +172,12 @@ impl TokenBucket {
     /// Whether it has refilled, so forgetting it would give nothing away.
     pub fn is_full(&mut self, now: Instant) -> bool {
         self.refill(now);
-        self.tokens >= f64::from(self.per_minute)
+        self.tokens >= self.capacity
     }
 
     fn refill(&mut self, now: Instant) {
-        let refill = now.saturating_duration_since(self.last).as_secs_f64() * f64::from(self.per_minute) / 60.0;
-        self.tokens = (self.tokens + refill).min(f64::from(self.per_minute));
+        let refill = now.saturating_duration_since(self.last).as_secs_f64() * self.capacity / self.period.as_secs_f64();
+        self.tokens = (self.tokens + refill).min(self.capacity);
         self.last = self.last.max(now);
     }
 }
@@ -239,6 +252,19 @@ mod tests {
         assert!(bucket.take(start + Duration::from_secs(1)));
         assert!(bucket.is_full(start + Duration::from_secs(61)));
         assert!(TokenBucket::new(0, start).take(start));
+    }
+
+    #[test]
+    fn buckets_take_costs_whole() {
+        let start = Instant::now();
+        let mut bucket = TokenBucket::per(1000, Duration::from_secs(3600), start);
+        assert!(bucket.take_n(600, start));
+        assert!(!bucket.take_n(401, start), "all or nothing");
+        assert!(bucket.take_n(400, start));
+        // A tenth of the hour refills a tenth of it.
+        assert!(!bucket.take_n(101, start + Duration::from_secs(360)));
+        assert!(bucket.take_n(100, start + Duration::from_secs(360)));
+        assert!(TokenBucket::per(0, Duration::from_secs(1), start).take_n(u64::MAX, start));
     }
 
     #[test]

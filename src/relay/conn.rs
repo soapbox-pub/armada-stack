@@ -273,7 +273,7 @@ impl Session {
             return Err("invalid: event has expired".into());
         }
         let instant = Instant::now();
-        if !self.tokens.take(instant) || !self.slot.take_event(instant) {
+        if !self.tokens.take(instant) || !self.slot.take_event(event_bytes(event), instant) {
             return Err("rate-limited: slow down".into());
         }
         Ok(())
@@ -440,6 +440,13 @@ fn admit(shared: &Shared, event: Event, link: Link) {
     if shared.writer.submit(submission).is_err() {
         refuse(false, "rate-limited: the relay is busy, try again shortly");
     }
+}
+
+/// About how many bytes an event takes to keep: its strings, and what its
+/// fixed fields and JSON cost besides, without serializing it again.
+fn event_bytes(event: &Event) -> u64 {
+    let tags: usize = event.tags.iter().map(|tag| tag.iter().map(|value| value.len() + 3).sum::<usize>() + 2).sum();
+    (event.content.len() + tags + 400) as u64
 }
 
 fn event_message(sub_json: &str, event_json: &str) -> String {

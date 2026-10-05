@@ -169,6 +169,11 @@ pub struct RelayConfig {
     /// REQs one client may send a minute across all its connections, in
     /// bursts of as many, by IPv4 address or IPv6 /64. 0 for no limit.
     pub reqs_per_minute_per_ip: u32,
+    /// Bytes of events one client may publish an hour across all its
+    /// connections, in bursts of as many, by IPv4 address or IPv6 /64:
+    /// what bounds how fast it can fill the disk. At least
+    /// `max_content_length`, or 0 for no limit.
+    pub event_bytes_per_hour_per_ip: u64,
     /// Ignored: the relay once did NIP-42 AUTH, and configs from then may
     /// still set this.
     pub max_authed_keys: Option<serde::de::IgnoredAny>,
@@ -291,6 +296,7 @@ impl Default for RelayConfig {
             max_queries_per_ip: 4,
             events_per_minute_per_ip: 1200,
             reqs_per_minute_per_ip: 1200,
+            event_bytes_per_hour_per_ip: 256 << 20,
             max_authed_keys: None,
             map_size: 256 << 30,
         }
@@ -464,6 +470,9 @@ impl Config {
         }
         if relay.max_filter_values_per_ip != 0 && relay.max_filter_values_per_ip < relay.max_filter_values {
             bail!("relay.max_filter_values_per_ip has to be at least relay.max_filter_values, or 0 for no limit.");
+        }
+        if relay.event_bytes_per_hour_per_ip != 0 && relay.event_bytes_per_hour_per_ip < relay.max_content_length as u64 {
+            bail!("relay.event_bytes_per_hour_per_ip has to be at least relay.max_content_length, or 0 for no limit.");
         }
         if relay.map_size < 1 << 24 || usize::try_from(relay.map_size).is_err() {
             bail!("relay.map_size has to be at least 16 MiB, and fit in this machine's address space.");
@@ -687,6 +696,8 @@ mod tests {
         assert!(Config::parse("[blossom]\nupload_bytes_per_hour = 1048576").is_err());
         assert!(Config::parse("[blossom]\nupload_bytes_per_hour = 0").is_ok());
         assert!(Config::parse("[relay]\nmax_limit = 0").is_err());
+        assert!(Config::parse("[relay]\nevent_bytes_per_hour_per_ip = 1000").is_err());
+        assert!(Config::parse("[relay]\nevent_bytes_per_hour_per_ip = 0").is_ok());
         assert!(Config::parse("[relay]\nmap_size = 1024").is_err());
         // From when the relay did AUTH.
         assert!(Config::parse("[relay]\nmax_authed_keys = 2000").is_ok());

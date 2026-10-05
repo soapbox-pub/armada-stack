@@ -370,6 +370,22 @@ async fn shares_an_event_budget_across_an_addresss_connections() {
 }
 
 #[tokio::test]
+async fn limits_the_bytes_an_address_publishes() {
+    let config = RelayConfig { max_content_length: 4000, event_bytes_per_hour_per_ip: 10_000, ..RelayConfig::default() };
+    let harness = Harness::new(config).await;
+    let mut a = harness.client().await;
+    let mut b = harness.client().await;
+    // About 3,100 bytes each, as counted: three fit in the hour's 10,000.
+    let big = |n: &str| Event::sign(ALICE, now(), STATUS.into(), tags(&[&["d", n]]), &"x".repeat(2700));
+    assert_eq!(a.publish(&big("1")).await[2], true);
+    assert_eq!(b.publish(&big("2")).await[2], true);
+    assert_eq!(a.publish(&big("3")).await[2], true);
+    assert_eq!(b.publish(&big("4")).await[3], "rate-limited: slow down");
+    // Small ones still fit in what's left.
+    assert_eq!(a.publish(&note(ALICE, "small")).await[2], true);
+}
+
+#[tokio::test]
 async fn shares_a_req_budget_across_an_addresss_connections() {
     let harness = Harness::new(RelayConfig { reqs_per_minute_per_ip: 3, ..RelayConfig::default() }).await;
     let mut a = harness.client().await;

@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use tokio::sync::Semaphore;
@@ -25,6 +25,7 @@ pub struct Clients {
     max_values: usize,
     events_per_minute: u32,
     reqs_per_minute: u32,
+    event_bytes_per_hour: u64,
     table: Mutex<Table>,
 }
 
@@ -40,6 +41,8 @@ struct Client {
     /// Filter values its open subscriptions list.
     values: usize,
     events: TokenBucket,
+    /// Bytes of events, which bound how fast it can fill the disk.
+    event_bytes: TokenBucket,
     reqs: TokenBucket,
     /// Its queries' places, if they're limited.
     queries: Option<Arc<Semaphore>>,
@@ -48,7 +51,7 @@ struct Client {
 impl Client {
     /// Holds nothing that forgetting it would give away.
     fn is_idle(&mut self, now: Instant) -> bool {
-        self.connections == 0 && self.events.is_full(now) && self.reqs.is_full(now)
+        self.connections == 0 && self.events.is_full(now) && self.event_bytes.is_full(now) && self.reqs.is_full(now)
     }
 }
 
@@ -72,6 +75,7 @@ impl Clients {
             max_values: config.max_filter_values_per_ip,
             events_per_minute: config.events_per_minute_per_ip,
             reqs_per_minute: config.reqs_per_minute_per_ip,
+            event_bytes_per_hour: config.event_bytes_per_hour_per_ip,
             table: Mutex::new(Table { clients: HashMap::new(), sweep_at: SWEEP_FLOOR }),
         })
     }
@@ -88,6 +92,7 @@ impl Clients {
             connections: 0,
             values: 0,
             events: TokenBucket::new(self.events_per_minute, now),
+            event_bytes: TokenBucket::per(self.event_bytes_per_hour, Duration::from_secs(3600), now),
             reqs: TokenBucket::new(self.reqs_per_minute, now),
             queries: (self.max_queries != 0).then(|| Arc::new(Semaphore::new(self.max_queries))),
         });
@@ -106,10 +111,11 @@ impl Clients {
 }
 
 impl Slot {
-    /// Spend one of the client's events, shared by all its connections.
-    pub fn take_event(&self, now: Instant) -> bool {
+    /// Spend one of the client's events, and `bytes` of its bytes of
+    /// events, both shared by all its connections.
+    pub fn take_event(&self, bytes: u64, now: Instant) -> bool {
         let mut table = self.clients.table.lock();
-        table.clients.get_mut(&self.key).is_none_or(|client| client.events.take(now))
+        table.clients.get_mut(&self.key).is_none_or(|client| client.events.take(now) && client.event_bytes.take_n(bytes, now))
     }
 
     /// Hold `count` more filter values for a subscription, unless the
@@ -185,9 +191,26 @@ mod tests {
         let now = Instant::now();
         let a = clients.connect("a".into(), now).unwrap();
         let b = clients.connect("a".into(), now).unwrap();
-        assert!(a.take_event(now) && a.take_event(now) && b.take_event(now));
-        assert!(!b.take_event(now));
-        assert!(!a.take_event(now));
+        assert!(a.take_event(1, now) && a.take_event(1, now) && b.take_event(1, now));
+        assert!(!b.take_event(1, now));
+        assert!(!a.take_event(1, now));
+    }
+
+    #[test]
+    fn shares_one_budget_of_event_bytes() {
+        let clients = Clients::new(&RelayConfig { event_bytes_per_hour_per_ip: 1000, ..RelayConfig::default() });
+        let now = Instant::now();
+        let a = clients.connect("a".into(), now).unwrap();
+        let b = clients.connect("a".into(), now).unwrap();
+        assert!(a.take_event(700, now));
+        assert!(!b.take_event(301, now));
+        assert!(b.take_event(300, now));
+        // Others aren't charged for it.
+        assert!(clients.connect("b".into(), now).unwrap().take_event(1000, now));
+        // It refills over the hour, and is remembered until it has.
+        assert!(a.take_event(100, now + Duration::from_secs(360)));
+        drop((a, b));
+        assert_eq!(clients.len(), 2);
     }
 
     #[test]
@@ -199,7 +222,7 @@ mod tests {
         assert!(a.take_req(now) && b.take_req(now));
         assert!(!a.take_req(now));
         // Apart from its events.
-        assert!(a.take_event(now));
+        assert!(a.take_event(1, now));
         assert!(b.take_req(now + std::time::Duration::from_secs(30)));
         // Remembered after disconnecting, until it refills.
         drop((a, b));
@@ -245,11 +268,11 @@ mod tests {
         let clients = table(0, 1);
         let now = Instant::now();
         let slot = clients.connect("a".into(), now).unwrap();
-        assert!(slot.take_event(now));
+        assert!(slot.take_event(1, now));
         drop(slot);
         // Reconnecting doesn't refill it.
         let slot = clients.connect("a".into(), now).unwrap();
-        assert!(!slot.take_event(now));
+        assert!(!slot.take_event(1, now));
         drop(slot);
         assert_eq!(clients.len(), 1);
 
@@ -264,7 +287,7 @@ mod tests {
         let start = Instant::now();
         for n in 0..SWEEP_FLOOR {
             let slot = clients.connect(n.to_string(), start).unwrap();
-            assert!(slot.take_event(start));
+            assert!(slot.take_event(1, start));
         }
         assert_eq!(clients.len(), SWEEP_FLOOR);
         // Once their budgets refill, the next arrival sweeps them away.
