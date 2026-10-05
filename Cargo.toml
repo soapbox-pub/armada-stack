@@ -1,6 +1,6 @@
 [package]
 name = "armada-stack"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.92"
 description = "Self-host Armada: its web app, a relay, a Blossom server, and a Concord AV broker in one binary"

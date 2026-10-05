@@ -3,7 +3,7 @@
 A release's notes are its section here, so tag `vX.Y.Z` only once
 `## X.Y.Z` exists: publishing fails without it.
 
-## Unreleased
+## 0.4.0
 
 - Calls, built in. armada carries LiveKit 1.13.7 and runs it itself, as the
   node its AV broker places calls on, so a new server has voice and video
