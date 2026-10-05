@@ -11,7 +11,9 @@ A release's notes are its section here, so tag `vX.Y.Z` only once
   Its key is made on first start, at `push/key` in the storage directory.
   It pushes events stored on this relay only: NIP-17 DMs to users whose DM
   relay this is, and Concord channels hosted here. Group chats and DMs on
-  other relays don't notify. Set `NOSTR_PUSH2_PUBKEY` and
+  other relays don't notify. Unlike nostr-push2, it takes only the filter
+  shapes Armada sends: gift wraps to one `#p` or by `authors`, NIP-04 DMs,
+  and NIP-29 group kinds by `#h`. Set `NOSTR_PUSH2_PUBKEY` and
   `NOSTR_PUSH2_RELAYS` in `[web.env]` to keep using another push service.
 - The relay takes kind 25742, which only filters that name its author or
   `#p` recipient can read.

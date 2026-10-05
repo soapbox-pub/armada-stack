@@ -203,6 +203,11 @@ fn scoped(value: &Value) -> Result<Filter, String> {
     Ok(filter)
 }
 
+/// Whether the relay takes events of a kind at all.
+pub fn accepts_kind(kind: u16) -> bool {
+    policy::is_accepted(kind)
+}
+
 /// Whether [`Internal::subscribe`] would take a filter, and if not, why.
 pub fn check_filter(value: &Value) -> Result<(), String> {
     scoped(value).map(drop)

@@ -163,11 +163,18 @@ async fn registers_and_pushes() {
     assert_eq!(client.call("frob", json!(null)).await.unwrap_err(), "unknown method frob");
     assert_eq!(client.call("set", json!(null)).await.unwrap_err(), "params.subscriptions is required");
     assert_eq!(client.call("set", json!({"subscriptions": [{"filters": [{}], "relays": ["wss://a.example"]}]})).await.unwrap_err(), "A filter in subscription 0 matches everything; name ids, authors, kinds or a tag");
-    // Gift wraps go to whoever names them, and no one else.
+    // Only the filters Armada makes.
     let everyone = json!({"subscriptions": [{"filters": [{"kinds": [1059]}], "relays": ["wss://a.example"]}]});
-    assert!(client.call("set", everyone).await.unwrap_err().starts_with("restricted:"));
+    assert_eq!(client.call("set", everyone).await.unwrap_err(), "A filter in subscription 0 for gift wraps has to name either authors or #p");
+    let notes = json!({"subscriptions": [{"filters": [{"kinds": [1], "authors": [bob]}], "relays": ["wss://a.example"]}]});
+    assert!(client.call("set", notes).await.unwrap_err().contains("kinds this service doesn't push"));
 
-    let subscriptions = json!([{"filters": [{"kinds": [1059], "#p": [bob]}], "relays": ["wss://a.example"]}]);
+    // Armada's group filters are taken alongside, though nothing here can
+    // match them.
+    let subscriptions = json!([
+        {"filters": [{"kinds": [1059], "#p": [bob]}], "relays": ["wss://a.example"]},
+        {"filters": [{"kinds": [9], "#h": ["g"]}], "relays": ["wss://groups.example"]},
+    ]);
     assert_eq!(client.call("set", json!({"subscriptions": subscriptions})).await, Ok(json!({})));
     let got = client.call("get", json!(null)).await.unwrap();
     assert_eq!(got["subscriptions"][0]["filters"][0]["#p"], json!([bob]));

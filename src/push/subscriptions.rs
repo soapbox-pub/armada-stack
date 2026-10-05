@@ -3,6 +3,21 @@
 //!
 //! The relays are kept and handed back by `get`, and otherwise ignored:
 //! every filter is matched against this relay's own new events.
+//!
+//! nostr-push2 takes any filter that names something. This takes only the
+//! shapes Armada sends (`buildPushSubscriptions` in its
+//! `src/lib/pushSubscriptions.ts`), so the service can't be turned into a
+//! general watcher of the relay:
+//!
+//! - gift wraps (1059) to one `#p`, for NIP-17 DMs, or by `authors`, for
+//!   Concord streams;
+//! - NIP-04 DMs (4) to one `#p` from some `authors`;
+//! - NIP-29 group messages, replies and reactions (9, 1111, 7) in some `#h`
+//!   groups, optionally to one `#p`.
+//!
+//! Armada asks for all of them in one `set`, wherever their relays are, so
+//! they're all taken; the ones for kinds this relay doesn't store are kept,
+//! but never [watched](Subscription::live_filters).
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -18,6 +33,11 @@ pub const MAX_LIST: usize = 500;
 /// them has its `since` widened by when it's matched.
 const GIFT_WRAP_BACKDATE: i64 = 2 * 24 * 60 * 60;
 
+const GIFT_WRAP: i64 = 1059;
+const NIP04: i64 = 4;
+/// NIP-29 group messages, comments, and reactions.
+const GROUP_KINDS: &[i64] = &[9, 1111, 7];
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Subscription {
     pub filters: Vec<Map<String, Value>>,
@@ -25,12 +45,13 @@ pub struct Subscription {
 }
 
 impl Subscription {
-    /// The filters to match new events with: `since` widened for gift
-    /// wraps, which are backdated.
+    /// The filters to match new events with: those for kinds this relay
+    /// stores, with `since` widened for gift wraps, which are backdated.
     pub fn live_filters(&self) -> impl Iterator<Item = Value> + '_ {
-        self.filters.iter().map(|filter| {
+        let stored = |kind: &Value| kind.as_u64().and_then(|kind| u16::try_from(kind).ok()).is_some_and(crate::relay::accepts_kind);
+        self.filters.iter().filter(move |filter| filter.get("kinds").and_then(Value::as_array).is_some_and(|kinds| kinds.iter().any(stored))).map(|filter| {
             let mut filter = filter.clone();
-            let wraps = filter.get("kinds").and_then(Value::as_array).is_none_or(|kinds| kinds.iter().any(|kind| kind.as_i64() == Some(1059)));
+            let wraps = filter.get("kinds").and_then(Value::as_array).is_some_and(|kinds| kinds.iter().any(|kind| kind.as_i64() == Some(GIFT_WRAP)));
             if let (true, Some(since)) = (wraps, filter.get("since").and_then(Value::as_i64)) {
                 filter.insert("since".into(), (since - GIFT_WRAP_BACKDATE).max(0).into());
             }
@@ -137,9 +158,44 @@ fn normalize_filter(filter: &Map<String, Value>, index: usize, now: i64) -> Resu
     if !named {
         return Err(format!("A filter in subscription {index} matches everything; name ids, authors, kinds or a tag"));
     }
+    check_shape(&clean).map_err(|why| format!("A filter in subscription {index} {why}"))?;
     let since = clean.get("since").and_then(Value::as_i64).filter(|&since| since > now).unwrap_or(now);
     clean.insert("since".into(), since.into());
     Ok(clean)
+}
+
+/// Whether a filter is one Armada would send; see the module docs. Errors
+/// finish the sentence "A filter in subscription N …".
+fn check_shape(filter: &Map<String, Value>) -> Result<(), String> {
+    for key in filter.keys() {
+        if !matches!(key.as_str(), "kinds" | "authors" | "#p" | "#h" | "since" | "until") {
+            return Err(format!("may not have {key}"));
+        }
+    }
+    if filter.get("#p").and_then(Value::as_array).is_some_and(|p| p.len() != 1) {
+        return Err("may name only one #p".into());
+    }
+    let kinds: Vec<i64> = filter.get("kinds").and_then(Value::as_array).map(|kinds| kinds.iter().filter_map(Value::as_i64).collect()).unwrap_or_default();
+    let has = |key: &str| filter.contains_key(key);
+    if kinds.is_empty() {
+        return Err("needs kinds".into());
+    }
+    if kinds.iter().all(|&kind| kind == GIFT_WRAP) {
+        if has("#h") || has("authors") == has("#p") {
+            return Err("for gift wraps has to name either authors or #p".into());
+        }
+    } else if kinds.iter().all(|&kind| kind == NIP04) {
+        if has("#h") || !has("authors") || !has("#p") {
+            return Err("for NIP-04 DMs has to name authors and #p".into());
+        }
+    } else if kinds.iter().all(|kind| GROUP_KINDS.contains(kind)) {
+        if has("authors") || !has("#h") {
+            return Err("for groups has to name #h groups, and no authors".into());
+        }
+    } else {
+        return Err("asks for kinds this service doesn't push, or for several at once".into());
+    }
+    Ok(())
 }
 
 fn string_list<'a>(value: &'a Value, key: &str) -> Result<Vec<&'a str>, String> {
@@ -173,10 +229,10 @@ mod tests {
 
     #[test]
     fn tidies_filters() {
-        let filter = one(json!({"kinds": [1059, 4.0], "#p": [HEX], "limit": 5, "since": 12.7})).unwrap();
-        assert_eq!(Value::Object(filter), json!({"kinds": [1059, 4], "#p": [HEX], "since": NOW}));
-        let filter = one(json!({"authors": [HEX], "since": NOW + 100, "until": NOW as f64 + 200.5})).unwrap();
-        assert_eq!(Value::Object(filter), json!({"authors": [HEX], "since": NOW + 100, "until": NOW + 200}));
+        let filter = one(json!({"kinds": [1059.0], "#p": [HEX], "limit": 5, "since": 12.7})).unwrap();
+        assert_eq!(Value::Object(filter), json!({"kinds": [1059], "#p": [HEX], "since": NOW}));
+        let filter = one(json!({"kinds": [1059], "authors": [HEX], "since": NOW + 100, "until": NOW as f64 + 200.5})).unwrap();
+        assert_eq!(Value::Object(filter), json!({"kinds": [1059], "authors": [HEX], "since": NOW + 100, "until": NOW + 200}));
     }
 
     #[test]
@@ -199,9 +255,47 @@ mod tests {
         }
     }
 
+    /// Every filter `buildPushSubscriptions` makes.
+    #[test]
+    fn takes_armadas_filters() {
+        for filter in [
+            json!({"kinds": [9], "#h": ["g1", "g2"]}),
+            json!({"kinds": [9], "#h": ["g1"], "#p": [HEX]}),
+            json!({"kinds": [1111, 7], "#h": ["g1"], "#p": [HEX]}),
+            json!({"kinds": [1059], "#p": [HEX]}),
+            json!({"kinds": [4], "#p": [HEX], "authors": [HEX]}),
+            json!({"kinds": [1059], "authors": [HEX, HEX]}),
+        ] {
+            assert!(one(filter.clone()).is_ok(), "{filter}");
+        }
+    }
+
+    #[test]
+    fn refuses_what_armada_wouldnt_send() {
+        for (filter, why) in [
+            (json!({"#p": [HEX]}), "needs kinds"),
+            (json!({"authors": [HEX]}), "needs kinds"),
+            (json!({"kinds": [1], "#p": [HEX]}), "asks for kinds this service doesn't push, or for several at once"),
+            (json!({"kinds": [1059, 4], "#p": [HEX], "authors": [HEX]}), "asks for kinds this service doesn't push, or for several at once"),
+            (json!({"kinds": [1059, 9], "#h": ["g"]}), "asks for kinds this service doesn't push, or for several at once"),
+            (json!({"kinds": [1059]}), "for gift wraps has to name either authors or #p"),
+            (json!({"kinds": [1059], "#p": [HEX], "authors": [HEX]}), "for gift wraps has to name either authors or #p"),
+            (json!({"kinds": [1059], "#p": [HEX], "#h": ["g"]}), "for gift wraps has to name either authors or #p"),
+            (json!({"kinds": [1059], "#p": [HEX, HEX]}), "may name only one #p"),
+            (json!({"kinds": [1059], "#p": []}), "may name only one #p"),
+            (json!({"kinds": [4], "#p": [HEX]}), "for NIP-04 DMs has to name authors and #p"),
+            (json!({"kinds": [9]}), "for groups has to name #h groups, and no authors"),
+            (json!({"kinds": [9], "#h": ["g"], "authors": [HEX]}), "for groups has to name #h groups, and no authors"),
+            (json!({"kinds": [1059], "#p": [HEX], "#e": [HEX]}), "may not have #e"),
+            (json!({"kinds": [1059], "ids": [HEX], "#p": [HEX]}), "may not have ids"),
+        ] {
+            assert_eq!(one(filter.clone()).unwrap_err(), format!("A filter in subscription 0 {why}"), "{filter}");
+        }
+    }
+
     #[test]
     fn checks_the_shape() {
-        let filter = json!({"kinds": [1]});
+        let filter = json!({"kinds": [1059], "#p": [HEX]});
         let relay = "wss://relay.example.com";
         for (input, error) in [
             (json!({}), "Subscriptions must be an array"),
@@ -224,9 +318,12 @@ mod tests {
     }
 
     #[test]
-    fn widens_since_for_gift_wraps() {
-        let subs = normalize(&json!([{"filters": [{"kinds": [1059], "#p": [HEX]}, {"kinds": [7], "#p": [HEX]}, {"#p": [HEX]}], "relays": ["wss://a.example"]}]), NOW).unwrap();
-        let since: Vec<_> = subs[0].live_filters().map(|f| f["since"].as_i64().unwrap()).collect();
-        assert_eq!(since, [NOW - GIFT_WRAP_BACKDATE, NOW, NOW - GIFT_WRAP_BACKDATE]);
+    fn watches_only_what_the_relay_stores() {
+        let filters = json!([{"kinds": [1059], "#p": [HEX]}, {"kinds": [9], "#h": ["g"]}, {"kinds": [4], "#p": [HEX], "authors": [HEX]}, {"kinds": [1059], "authors": [HEX]}]);
+        let subs = normalize(&json!([{"filters": filters, "relays": ["wss://a.example"]}]), NOW).unwrap();
+        assert_eq!(subs[0].filters.len(), 4);
+        // Gift wraps alone, with since widened as they're backdated.
+        let live: Vec<_> = subs[0].live_filters().collect();
+        assert_eq!(live, [json!({"kinds": [1059], "#p": [HEX], "since": NOW - GIFT_WRAP_BACKDATE}), json!({"kinds": [1059], "authors": [HEX], "since": NOW - GIFT_WRAP_BACKDATE})]);
     }
 }
