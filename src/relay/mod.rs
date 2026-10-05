@@ -51,6 +51,8 @@ use monitors::Hub;
 use store::Store;
 use writer::Writer;
 
+pub use nip44::{is_v2_payload, padded_len};
+
 #[derive(Clone)]
 pub struct Relay {
     shared: Arc<Shared>,

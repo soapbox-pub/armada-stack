@@ -1,9 +1,6 @@
-//! Nostr events (NIP-01): parsing, verification, and — for tests and tools —
-//! signing.
+//! Nostr events (NIP-01): parsing, verification, and signing.
 
-#[cfg(test)]
-use secp256k1::Keypair;
-use secp256k1::{schnorr, XOnlyPublicKey, SECP256K1};
+use secp256k1::{schnorr, Keypair, XOnlyPublicKey, SECP256K1};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -52,8 +49,7 @@ impl Event {
         self.tags.iter().find(|tag| tag.first().map(String::as_str) == Some(name)).and_then(|tag| tag.get(1)).map(String::as_str)
     }
 
-    /// Sign a new event with `secret` (hex). For tests.
-    #[cfg(test)]
+    /// Sign a new event with `secret` (hex).
     pub fn sign(secret: &str, created_at: i64, kind: i64, tags: Vec<Vec<String>>, content: &str) -> Event {
         let keypair = Keypair::from_seckey_str_global(secret).expect("a valid secret key");
         let pubkey = hex::encode(keypair.x_only_public_key().0.serialize());
@@ -66,7 +62,6 @@ impl Event {
 }
 
 /// The public key of a hex secret key.
-#[cfg(test)]
 pub fn public_key(secret: &str) -> String {
     let keypair = Keypair::from_seckey_str_global(secret).expect("a valid secret key");
     hex::encode(keypair.x_only_public_key().0.serialize())
