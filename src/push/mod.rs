@@ -220,7 +220,13 @@ impl Service {
             Ok(result) => json!({"id": request.id, "result": result}),
             Err(error) => json!({"id": request.id, "error": error}),
         };
-        let content = nip44::encrypt(&key, &response.to_string()).expect("a response fits");
+        // `set` keeps what `get` hands back small enough to encrypt, but
+        // clients saved before it did may not be.
+        let too_large = || json!({"id": request.id, "error": "the response is too large; set fewer subscriptions"});
+        let Some(content) = nip44::encrypt(&key, &response.to_string()).or_else(|| nip44::encrypt(&key, &too_large().to_string())) else {
+            tracing::warn!(client = %event.pubkey, "a push response too large to send");
+            return;
+        };
         let answer = Event::sign(&self.keys.secret_hex, now(), KIND, vec![vec!["p".into(), event.pubkey]], &content);
         if !self.relay.publish(&answer) {
             tracing::warn!("the relay had no room for a push response");

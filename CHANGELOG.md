@@ -13,7 +13,9 @@ A release's notes are its section here, so tag `vX.Y.Z` only once
   relay this is, and Concord channels hosted here. Group chats and DMs on
   other relays don't notify. Unlike nostr-push2, it takes only filters for
   gift wraps, to one `#p` or by `authors`, as Armada sends them; filters
-  only for kinds the relay doesn't store are dropped. Set
+  only for kinds the relay doesn't store are dropped. `#p` has to be a hex
+  pubkey, and a client's subscriptions may come to at most 60,000 bytes of
+  JSON, so `get` can always answer. Set
   `NOSTR_PUSH2_PUBKEY` and
   `NOSTR_PUSH2_RELAYS` in `[web.env]` to keep using another push service.
 - The relay takes kind 25742, which only filters that name its author or

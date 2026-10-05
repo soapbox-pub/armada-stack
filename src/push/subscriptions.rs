@@ -24,6 +24,10 @@ pub const MAX_FILTERS: usize = 10;
 pub const MAX_RELAYS: usize = 10;
 /// The longest list a filter may carry: ids, authors, kinds, tag values.
 pub const MAX_LIST: usize = 500;
+/// The most a client's subscriptions may come to as JSON, once tidied, so
+/// `get`'s answer always fits in one NIP-44 message (65,535 bytes) beside
+/// its id. Tidying can make them longer than the request that set them.
+pub const MAX_SIZE: usize = 60_000;
 
 /// How far back NIP-59 may date a gift wrap, so how much a filter watching
 /// them has its `since` widened by when it's matched.
@@ -103,6 +107,9 @@ pub fn normalize(input: &Value, now: i64) -> Result<Vec<Subscription>, String> {
         }
         subscriptions.push(Subscription { filters, relays: unique });
     }
+    if serde_json::to_string(&subscriptions).expect("JSON serializes").len() > MAX_SIZE {
+        return Err(format!("Subscriptions come to more than {MAX_SIZE} bytes"));
+    }
     Ok(subscriptions)
 }
 
@@ -137,7 +144,8 @@ fn normalize_filter(filter: &Map<String, Value>, index: usize, now: i64) -> Resu
             }
             "since" | "until" => {
                 let number = value.as_f64().filter(|n| n.is_finite()).ok_or_else(|| format!("Filter {key} must be a number"))?;
-                clean.insert(key.clone(), (number.floor() as i64).into());
+                // Within an event's `created_at`, which also keeps it short.
+                clean.insert(key.clone(), (number.floor().clamp(0.0, f64::from(u32::MAX)) as i64).into());
             }
             "limit" => {}
             "search" => return Err("Filter search is not supported".into()),
@@ -177,8 +185,13 @@ fn check_shape(filter: &Map<String, Value>, kinds: &[i64]) -> Result<(), String>
     if filter.contains_key("authors") == filter.contains_key("#p") {
         return Err("has to name either authors or #p".into());
     }
-    if filter.get("#p").and_then(Value::as_array).is_some_and(|p| p.len() != 1) {
-        return Err("may name only one #p".into());
+    if let Some(p) = filter.get("#p").and_then(Value::as_array) {
+        if p.len() != 1 {
+            return Err("may name only one #p".into());
+        }
+        if !p[0].as_str().is_some_and(crate::nostr::event::is_hex64) {
+            return Err("has to name #p as 64-character lowercase hex".into());
+        }
     }
     Ok(())
 }
@@ -218,6 +231,18 @@ mod tests {
         assert_eq!(Value::Object(filter), json!({"kinds": [1059], "#p": [HEX], "since": NOW}));
         let filter = one(json!({"kinds": [1059], "authors": [HEX], "since": NOW + 100, "until": NOW as f64 + 200.5})).unwrap();
         assert_eq!(Value::Object(filter), json!({"kinds": [1059], "authors": [HEX], "since": NOW + 100, "until": NOW + 200}));
+        let filter = one(json!({"kinds": [1059], "#p": [HEX], "since": 1e99, "until": -1e99})).unwrap();
+        assert_eq!(Value::Object(filter), json!({"kinds": [1059], "#p": [HEX], "since": u32::MAX, "until": 0}));
+    }
+
+    #[test]
+    fn refuses_subscriptions_that_grow_too_large() {
+        let subscription = json!({"filters": vec![json!({"kinds": [1059], "#p": [HEX]}); MAX_FILTERS], "relays": ["wss://a.example"]});
+        // Each filter gains a `since` when tidied.
+        let tidied = serde_json::to_string(&normalize(&json!([&subscription]), NOW).unwrap()[0]).unwrap();
+        let fits = MAX_SIZE / (tidied.len() + 1);
+        assert!(normalize(&json!(vec![&subscription; fits - 1]), NOW).is_ok());
+        assert_eq!(normalize(&json!(vec![&subscription; fits + 1]), NOW).unwrap_err(), format!("Subscriptions come to more than {MAX_SIZE} bytes"));
     }
 
     #[test]
@@ -269,6 +294,8 @@ mod tests {
             (json!({"kinds": [1059], "#p": [HEX], "authors": [HEX]}), "has to name either authors or #p"),
             (json!({"kinds": [1059], "#p": [HEX, HEX]}), "may name only one #p"),
             (json!({"kinds": [1059], "#p": []}), "may name only one #p"),
+            (json!({"kinds": [1059], "#p": ["x"]}), "has to name #p as 64-character lowercase hex"),
+            (json!({"kinds": [1059], "#p": [HEX.to_uppercase()]}), "has to name #p as 64-character lowercase hex"),
             (json!({"kinds": [1059], "#p": [HEX], "#h": ["g"]}), "may not have #h"),
             (json!({"kinds": [1059], "#p": [HEX], "#e": [HEX]}), "may not have #e"),
             (json!({"kinds": [1059], "ids": [HEX], "#p": [HEX]}), "may not have ids"),

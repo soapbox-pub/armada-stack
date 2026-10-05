@@ -215,6 +215,20 @@ async fn registers_and_pushes() {
     harness.no_push().await;
 }
 
+/// Subscriptions grow when tidied. Ones that would grow past what `get` can
+/// send back are refused, rather than taking the service down when it tries.
+#[tokio::test]
+async fn refuses_subscriptions_too_large_to_hand_back() {
+    let harness = Harness::new().await;
+    let mut client = harness.client().await;
+    client.call("create", connection::tests::web(&harness.endpoint)).await.unwrap();
+    let subscription = json!({"filters": vec![json!({"kinds": [1059], "#p": [public_key(BOB)]}); subscriptions::MAX_FILTERS], "relays": ["ws://a"]});
+    // The request fits in one message; its answer to `get` wouldn't have.
+    let subscriptions = json!(vec![subscription; 60]);
+    assert_eq!(client.call("set", json!({"subscriptions": subscriptions})).await.unwrap_err(), format!("Subscriptions come to more than {} bytes", subscriptions::MAX_SIZE));
+    assert_eq!(client.call("get", json!(null)).await.unwrap(), json!({"subscriptions": []}));
+}
+
 #[tokio::test]
 async fn forgets_subscriptions_that_are_gone() {
     let mut harness = Harness::new().await;
