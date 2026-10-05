@@ -10,6 +10,12 @@
 //! The forwarding is byte for byte: once the node agrees to the upgrade,
 //! the two connections are joined, so the WebSocket's subprotocols and
 //! extensions are the client's and the node's business alone.
+//!
+//! Only plain paths beneath `/rtc` go: none with `.` or `..` segments, or
+//! an encoded `.` or `/`, which the node might resolve to somewhere else.
+//! And the node hears who the client is from armada alone: headers that
+//! would say otherwise are dropped unless armada trusts the proxy that set
+//! them.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -49,6 +55,9 @@ impl Signaling {
     }
 
     pub async fn handle(&self, request: Request) -> Response<Body> {
+        if !plain(request.uri().path()) {
+            return Response::builder().status(StatusCode::NOT_FOUND).body(Body::empty()).expect("response");
+        }
         match self.forward(request).await {
             Ok(response) => response,
             Err(error) => {
@@ -77,6 +86,14 @@ impl Signaling {
         if !parts.headers.contains_key(header::HOST) {
             let host = authority.as_ref().map_or(self.authority.as_str(), |authority| authority.as_str());
             parts.headers.insert(header::HOST, HeaderValue::from_str(host)?);
+        }
+        for name in ["x-real-ip", "forwarded"] {
+            parts.headers.remove(name);
+        }
+        if !self.trust_proxy {
+            for name in ["x-forwarded-host", "x-forwarded-proto"] {
+                parts.headers.remove(name);
+            }
         }
         if let Some(peer) = peer {
             self.forwarded_for(&mut parts.headers, peer);
@@ -125,6 +142,41 @@ impl Signaling {
         if let Ok(value) = HeaderValue::from_str(&value) {
             headers.insert(HeaderName::from_static("x-forwarded-for"), value);
         }
+    }
+}
+
+/// Whether a path names itself plainly: no `.` or `..` segments, no `//`,
+/// and nothing encoded that could become either, or a `/`.
+fn plain(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let encoded = ["%2e", "%2f", "%5c"].iter().any(|encoded| lower.contains(encoded));
+    !encoded && !path.contains('\\') && !path.contains("//") && path.split('/').all(|segment| segment != "." && segment != "..")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forwards_only_plain_paths() {
+        for path in ["/rtc", "/rtc/", "/rtc/validate", "/rtc/v1"] {
+            assert!(plain(path), "{path}");
+        }
+        for path in ["/rtc/../twirp/livekit.RoomService/ListRooms", "/rtc/./x", "/rtc/%2e%2e/debug", "/rtc/%2E%2E/debug", "/rtc%2f..%2fdebug", "/rtc//x", "/rtc/..", "/rtc/\\..\\debug"] {
+            assert!(!plain(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn drops_what_says_who_the_client_is() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("6.6.6.6"));
+        let signaling = Signaling::new("http://127.0.0.1:7880", false).unwrap();
+        signaling.forwarded_for(&mut headers, "203.0.113.9".parse().unwrap());
+        assert_eq!(headers["x-forwarded-for"], "203.0.113.9");
+        let trusting = Signaling::new("http://127.0.0.1:7880", true).unwrap();
+        trusting.forwarded_for(&mut headers, "127.0.0.1".parse().unwrap());
+        assert_eq!(headers["x-forwarded-for"], "203.0.113.9, 127.0.0.1");
     }
 }
 
