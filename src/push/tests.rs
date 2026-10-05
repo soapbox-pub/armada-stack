@@ -165,18 +165,19 @@ async fn registers_and_pushes() {
     assert_eq!(client.call("set", json!({"subscriptions": [{"filters": [{}], "relays": ["wss://a.example"]}]})).await.unwrap_err(), "A filter in subscription 0 matches everything; name ids, authors, kinds or a tag");
     // Only the filters Armada makes.
     let everyone = json!({"subscriptions": [{"filters": [{"kinds": [1059]}], "relays": ["wss://a.example"]}]});
-    assert_eq!(client.call("set", everyone).await.unwrap_err(), "A filter in subscription 0 for gift wraps has to name either authors or #p");
-    let notes = json!({"subscriptions": [{"filters": [{"kinds": [1], "authors": [bob]}], "relays": ["wss://a.example"]}]});
-    assert!(client.call("set", notes).await.unwrap_err().contains("kinds this service doesn't push"));
+    assert_eq!(client.call("set", everyone).await.unwrap_err(), "A filter in subscription 0 has to name either authors or #p");
+    let profiles = json!({"subscriptions": [{"filters": [{"kinds": [0], "authors": [bob]}], "relays": ["wss://a.example"]}]});
+    assert_eq!(client.call("set", profiles).await.unwrap_err(), "A filter in subscription 0 may only ask for gift wraps (kind 1059)");
 
-    // Armada's group filters are taken alongside, though nothing here can
-    // match them.
+    // Armada's group filters come along, and are dropped: this relay has
+    // no group messages.
     let subscriptions = json!([
         {"filters": [{"kinds": [1059], "#p": [bob]}], "relays": ["wss://a.example"]},
         {"filters": [{"kinds": [9], "#h": ["g"]}], "relays": ["wss://groups.example"]},
     ]);
     assert_eq!(client.call("set", json!({"subscriptions": subscriptions})).await, Ok(json!({})));
     let got = client.call("get", json!(null)).await.unwrap();
+    assert_eq!(got["subscriptions"].as_array().unwrap().len(), 1);
     assert_eq!(got["subscriptions"][0]["filters"][0]["#p"], json!([bob]));
     assert!(got["subscriptions"][0]["filters"][0]["since"].as_i64().unwrap() >= now() - 5);
     assert_eq!(client.call("ping", json!(null)).await, Ok(json!({})));
