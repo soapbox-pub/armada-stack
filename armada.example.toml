@@ -77,6 +77,17 @@ uploads_per_minute = 60
 # At least max_blob_size.
 upload_bytes_per_hour = 1073741824
 
+# A Web Push service for the web app, speaking nostr-push2's protocol. It
+# pushes events stored on this relay: NIP-17 DMs to users whose DM relay this
+# is, and Concord channels here. Its key is made on first start, and the web
+# app is pointed at it through NOSTR_PUSH2_PUBKEY and NOSTR_PUSH2_RELAYS
+# unless [web.env] sets them.
+[push]
+enabled = true
+# Who push services may contact: mailto: or https://. Defaults to
+# public_url, or else https://armada.buzz.
+# subject = "mailto:ops@example.com"
+
 # A blind Concord AV broker (CORD-07 §2) for LiveKit servers you run. Off
 # until a node is listed; needs public_url. See deploy/livekit.yaml.
 [av]

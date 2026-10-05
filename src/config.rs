@@ -56,7 +56,27 @@ pub struct Config {
     pub relay: RelayConfig,
     pub blossom: BlossomConfig,
     pub av: AvConfig,
+    pub push: PushConfig,
     pub tls: TlsConfig,
+}
+
+/// A Web Push service for the web app, speaking nostr-push2's protocol,
+/// that pushes this relay's new events; see [`crate::push`]. Its key is
+/// made on first start, and the web app is pointed at it unless
+/// `[web.env]` says otherwise.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PushConfig {
+    pub enabled: bool,
+    /// Who push services may contact about armada's pushes: a `mailto:` or
+    /// `https:` URL. Unset, `public_url`, or else <https://armada.buzz>.
+    pub subject: Option<String>,
+}
+
+impl Default for PushConfig {
+    fn default() -> Self {
+        PushConfig { enabled: true, subject: None }
+    }
 }
 
 /// HTTPS served by armada itself, with a certificate it gets and renews
@@ -363,6 +383,14 @@ impl Config {
         Ok(Some(url))
     }
 
+    /// The VAPID subject pushes are sent with; see [`PushConfig::subject`].
+    pub fn push_subject(&self) -> Result<String> {
+        if let Some(subject) = &self.push.subject {
+            return Ok(subject.clone());
+        }
+        Ok(self.public_url()?.map_or_else(|| "https://armada.buzz".to_string(), |url| url.origin().ascii_serialization()))
+    }
+
     /// Where everything is served from; see [`Config::listen`].
     pub fn listen(&self) -> SocketAddr {
         match self.listen {
@@ -427,6 +455,9 @@ impl Config {
             bail!("blossom.upload_bytes_per_hour has to be at least blossom.max_blob_size, or 0 for no limit.");
         }
         self.validate_av()?;
+        if self.push.subject.as_deref().is_some_and(|subject| !subject.starts_with("mailto:") && !subject.starts_with("https://")) {
+            bail!("push.subject has to start with mailto: or https://.");
+        }
         self.validate_tls()?;
         Ok(())
     }

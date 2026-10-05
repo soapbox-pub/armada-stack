@@ -100,9 +100,19 @@ async fn main() -> Result<()> {
 
     let cancel = CancellationToken::new();
     let nostr = Arc::new(NostrService::new(config.web.relay_urls()));
-    let web = web::Web::open(&config.web, web::env::ClientEnv::new(&config)?, &storage, nostr).await?;
+    let push = if config.push.enabled { Some(push::Push::open(&storage)?) } else { None };
+    let mut client_env = web::env::ClientEnv::new(&config)?;
+    if let Some(push) = &push {
+        client_env = client_env.with_push(push.pubkey());
+    }
+    let web = web::Web::open(&config.web, client_env, &storage, nostr).await?;
     let blossom = blossom::Blossom::open(&config.blossom, config.public_url()?, config.trusts_proxy(), &storage, &cancel)?;
     let relay = relay::Relay::open(&config.relay, config.public_url()?, config.trusts_proxy(), &storage, &cancel)?;
+    if let Some(push) = push {
+        let relay_url = config.public_url()?.and_then(|url| origin::public_origin(Some(&url), &http::HeaderMap::new())).map(|origin| origin.websocket());
+        let options = push::Options { relay_url, subject: config.push_subject()?, public_only: true };
+        push.start(relay.internal(), options, cancel.clone())?;
+    }
     let av = av::Av::open(&config, &cancel)?;
     if av.is_some() {
         tracing::info!(nodes = config.av.nodes.len(), "offering AV");

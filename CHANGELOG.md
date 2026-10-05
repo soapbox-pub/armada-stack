@@ -3,6 +3,19 @@
 A release's notes are its section here, so tag `vX.Y.Z` only once
 `## X.Y.Z` exists: publishing fails without it.
 
+## Unreleased
+
+- A built-in Web Push service, `[push]`, on by default. It speaks
+  nostr-push2's protocol (kind 25742), so the web app needs no changes:
+  `window.ENV` points `NOSTR_PUSH2_PUBKEY` and `NOSTR_PUSH2_RELAYS` at it.
+  Its key is made on first start, at `push/key` in the storage directory.
+  It pushes events stored on this relay only: NIP-17 DMs to users whose DM
+  relay this is, and Concord channels hosted here. Group chats and DMs on
+  other relays don't notify. Set `NOSTR_PUSH2_PUBKEY` and
+  `NOSTR_PUSH2_RELAYS` in `[web.env]` to keep using another push service.
+- The relay takes kind 25742, which only filters that name its author or
+  `#p` recipient can read.
+
 ## 0.2.0
 
 - `armada upgrade` installs the latest signed release over the running

@@ -1,6 +1,6 @@
 //! `window.ENV` for the web app: the script that points Armada at this
-//! armada's own relay, Blossom server and AV broker, and makes its relay a
-//! home for new Concord communities.
+//! armada's own relay, Blossom server, AV broker and push service, and makes
+//! its relay a home for new Concord communities.
 //!
 //! Armada reads its deployment settings through `config(name)`, which takes a
 //! string on `window.ENV` over the value its build baked in. A tag loading
@@ -47,13 +47,21 @@ pub struct ClientEnv {
     public_url: Option<url::Url>,
     /// Whether this armada brokers AV.
     av: bool,
+    /// The [push service](crate::push)'s pubkey, if it runs.
+    push: Option<String>,
     /// `[web.env]`.
     overrides: BTreeMap<String, String>,
 }
 
 impl ClientEnv {
     pub fn new(config: &Config) -> anyhow::Result<ClientEnv> {
-        Ok(ClientEnv { public_url: config.public_url()?, av: !config.av.nodes.is_empty(), overrides: config.web.env.clone() })
+        Ok(ClientEnv { public_url: config.public_url()?, av: !config.av.nodes.is_empty(), push: None, overrides: config.web.env.clone() })
+    }
+
+    /// Point the web app at the push service with this pubkey, on this
+    /// relay, in place of Armada's default one.
+    pub fn with_push(self, pubkey: &str) -> ClientEnv {
+        ClientEnv { push: Some(pubkey.to_string()), ..self }
     }
 
     /// The settings for a request: armada's own services, where it knows
@@ -77,6 +85,10 @@ impl ClientEnv {
         ]);
         if self.av {
             values.insert("CONCORD_AV_SERVERS".to_string(), join(origin.base.clone(), ARMADA_AV_SERVERS));
+        }
+        if let Some(pubkey) = &self.push {
+            values.insert("NOSTR_PUSH2_PUBKEY".to_string(), pubkey.clone());
+            values.insert("NOSTR_PUSH2_RELAYS".to_string(), origin.websocket());
         }
         values
     }
@@ -126,8 +138,23 @@ mod tests {
         assert_eq!(values["APP_BLOSSOM_SERVERS"], "https://armada.example.com/,https://blossom.ditto.pub/,https://blossom.dreamith.to/,https://blossom.primal.net/");
         assert_eq!(values["PREFERRED_BLOSSOM_SERVER"], "https://armada.example.com/");
         assert_eq!(values["PUBLIC_WEB_ORIGIN"], "https://armada.example.com");
-        // No AV here, so Armada keeps its own broker.
+        // No AV or push here, so Armada keeps its own.
         assert!(!values.contains_key("CONCORD_AV_SERVERS"));
+        assert!(!values.contains_key("NOSTR_PUSH2_PUBKEY"));
+    }
+
+    #[test]
+    fn points_push_at_its_own_service() {
+        let mut config = Config::default();
+        let env = ClientEnv::new(&config).unwrap().with_push("ab");
+        let values = env.values(&host("armada.example.com"));
+        assert_eq!(values["NOSTR_PUSH2_PUBKEY"], "ab");
+        assert_eq!(values["NOSTR_PUSH2_RELAYS"], "wss://armada.example.com");
+        assert!(env.values(&host("box.lan")).is_empty());
+
+        config.web.env = BTreeMap::from([("NOSTR_PUSH2_PUBKEY".into(), "".into())]);
+        let values = ClientEnv::new(&config).unwrap().with_push("ab").values(&host("armada.example.com"));
+        assert_eq!(values["NOSTR_PUSH2_PUBKEY"], "");
     }
 
     #[test]
