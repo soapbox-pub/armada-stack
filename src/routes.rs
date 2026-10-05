@@ -191,7 +191,8 @@ mod tests {
         let (status, headers, body) = harness.send(Method::GET, "/_armada/env.js", &[("host", "armada.example.com")]).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(headers["content-type"], "text/javascript; charset=utf-8");
-        assert_eq!(headers["cache-control"], "no-cache");
+        assert_eq!(headers["cache-control"], "private, no-cache");
+        assert_eq!(headers["vary"], "Host");
         assert!(body.starts_with("self.ENV = {"), "{body}");
         assert!(body.contains(r#""APP_RELAYS":"wss://armada.example.com,"#), "{body}");
 

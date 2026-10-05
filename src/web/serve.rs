@@ -181,13 +181,16 @@ impl SiteServer {
     }
 
     /// [`ENV_PATH`]: written per request, so it's revalidated every time,
-    /// which its `ETag` makes cheap.
+    /// which its `ETag` makes cheap. It's written from the request's `Host`
+    /// unless `public_url` is set, so no shared cache may keep it: one that
+    /// ignored `Host` would hand every user what one request asked for.
     fn env_script(&self, method: &Method, request: &HeaderMap) -> Reply {
         let script = self.env.script(request);
         let etag = format!("\"{}\"", BlobHash::of(script.as_bytes()));
         let builder = Response::builder()
             .header(header::CONTENT_TYPE, "text/javascript; charset=utf-8")
-            .header(header::CACHE_CONTROL, "no-cache")
+            .header(header::CACHE_CONTROL, "private, no-cache")
+            .header(header::VARY, "Host")
             .header(header::ETAG, &etag);
         if matches_etag(header_str(request, header::IF_NONE_MATCH), &etag) {
             return builder.status(StatusCode::NOT_MODIFIED).body(Body::empty()).expect("response");

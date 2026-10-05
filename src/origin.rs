@@ -62,13 +62,29 @@ pub fn request_origin(public_url: Option<&url::Url>, headers: &HeaderMap) -> Ori
     Origin { base: format!("{scheme}://{host}"), host: Some(domain(host).to_ascii_lowercase()) }
 }
 
-/// The `Host` header, if it's made only of what a host and port can be.
+/// The `Host` header, if it's made only of what a host and port can be,
+/// in the shape they take: a name or `[address]`, and any port in digits.
 fn request_host(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|host| !host.is_empty() && host.bytes().all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b)))
+        .filter(|host| well_formed(host))
+}
+
+fn well_formed(host: &str) -> bool {
+    // The name, and what follows it: nothing, or `:` and a port.
+    let (name, rest) = match host.strip_prefix('[') {
+        // Only an IPv6 address goes in brackets.
+        Some(rest) => match rest.split_once(']') {
+            Some(split) if split.0.parse::<std::net::Ipv6Addr>().is_ok() => split,
+            _ => return false,
+        },
+        None => host.find(':').map_or((host, ""), |at| host.split_at(at)),
+    };
+    let port_ok = rest.is_empty() || rest.strip_prefix(':').is_some_and(|port| port.bytes().all(|b| b.is_ascii_digit()) && port.parse::<u16>().is_ok());
+    !name.is_empty() && !name.contains(['[', ']']) && port_ok
 }
 
 /// A `Host` without its port.
@@ -127,7 +143,7 @@ mod tests {
 
     #[test]
     fn private_hosts_are_not_public() {
-        for value in ["localhost:8080", "127.0.0.1", "[::1]:8080", "203.0.113.5", "armada", "box.lan", "nas.local", "x.home.arpa", "a.localhost", "1.2.3", "bad..name", "evil.com/x"] {
+        for value in ["localhost:8080", "127.0.0.1", "[::1]:8080", "203.0.113.5", "armada", "box.lan", "nas.local", "x.home.arpa", "a.localhost", "1.2.3", "bad..name", "evil.com/x", "a.com:x.y", "a.com:443:1", "a.com:", "[a.com]", "[::1", "a]b.com"] {
             assert_eq!(public_origin(None, &host(value)), None, "{value}");
         }
         assert_eq!(public_origin(None, &HeaderMap::new()), None);
@@ -149,6 +165,16 @@ mod tests {
         headers.insert("x-forwarded-proto", "https".parse().unwrap());
         assert_eq!(request_origin(None, &headers), Origin { base: "https://box.lan".into(), host: Some("box.lan".into()) });
         assert_eq!(request_origin(None, &HeaderMap::new()), Origin { base: "http://localhost".into(), host: None });
+    }
+
+    #[test]
+    fn takes_hosts_in_their_shapes() {
+        for host in ["a.com", "a.com:8443", "[2001:db8::1]", "[2001:db8::1]:443", "localhost"] {
+            assert!(well_formed(host), "{host}");
+        }
+        for host in ["a.com:x.y", "a.com:99999", "2001:db8::1", "[2001:db8::1]x", ":80", "[]:80"] {
+            assert!(!well_formed(host), "{host}");
+        }
     }
 
     #[test]
