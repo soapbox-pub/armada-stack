@@ -649,6 +649,9 @@ set_up_server() {
 		write_config
 	fi
 
+	# On a new server there's no unit to enable until it's copied in.
+	cp "$TMP/unit" "$UNIT"
+	systemctl daemon-reload </dev/null
 	systemctl enable armada </dev/null >/dev/null 2>&1
 	start_service
 }
