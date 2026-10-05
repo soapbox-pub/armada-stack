@@ -169,7 +169,8 @@ pub fn scope(filter: &mut Filter) -> Result<(), String> {
 }
 
 /// Check an event against its kind's rules. `relay` is this relay's
-/// [`authority`], which requests to vanish have to name. Errors are the
+/// [`authority`], which requests to vanish have to name, or empty if it
+/// isn't known: then only those for `ALL_RELAYS` are taken. Errors are the
 /// `OK` message to refuse with.
 pub fn validate(event: &Event, now: i64, relay: &str) -> Result<(), String> {
     let kind = u16::try_from(event.kind).map_err(|_| "invalid: kind must be between 0 and 65535".to_string())?;
@@ -238,7 +239,7 @@ pub fn validate(event: &Event, now: i64, relay: &str) -> Result<(), String> {
             }
         }
         VANISH => {
-            if tag_values(event, "relay").any(|url| url == "ALL_RELAYS" || authority(url).as_deref() == Some(relay)) {
+            if tag_values(event, "relay").any(|url| url == "ALL_RELAYS" || (!relay.is_empty() && authority(url).as_deref() == Some(relay))) {
                 Ok(())
             } else {
                 Err("invalid: the request to vanish doesn't name this relay".into())
@@ -628,6 +629,12 @@ mod tests {
         ok(VANISH, &[&["relay", "wss://Armada.Example.com/"]], "bye");
         refused(VANISH, &[&["relay", "wss://other.example.com"]], "");
         refused(VANISH, &[], "");
+
+        // A relay that doesn't know its name takes only ALL_RELAYS.
+        let unnamed = |relay: &str| validate(&Event::sign(ALICE, NOW, VANISH.into(), tags(&[&["relay", relay]]), ""), NOW, "");
+        assert!(unnamed("ALL_RELAYS").is_ok());
+        assert!(unnamed("wss://armada.example.com").is_err());
+        assert!(unnamed("wss://").is_err());
     }
 
     #[test]

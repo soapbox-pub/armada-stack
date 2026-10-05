@@ -123,21 +123,23 @@ fn store_batch(store: &Store, batch: &[Submission]) -> super::lmdb::Result<Vec<O
     Ok(outcomes)
 }
 
-/// Remove a batch of expired events. Returns whether there may be more.
+/// Remove a batch of expired events, and carry requests to vanish on by
+/// another step. Returns whether there may be more of either.
 fn sweep(store: &Store) -> bool {
     let result = (|| {
         let mut txn = store.write()?;
         let removed = store.sweep_expired(&mut txn, now())?;
-        if removed > 0 {
+        let vanishing = store.sweep_vanishing(&mut txn, SWEEP_BATCH)?;
+        if removed > 0 || vanishing > 0 {
             txn.commit()?;
         }
-        Ok::<_, super::lmdb::Error>(removed)
+        Ok::<_, super::lmdb::Error>((removed, vanishing))
     })();
     match result {
-        Ok(0) => false,
-        Ok(removed) => {
-            tracing::debug!(removed, "swept expired events");
-            removed == SWEEP_BATCH
+        Ok((0, 0)) => false,
+        Ok((removed, vanishing)) => {
+            tracing::debug!(removed, vanishing, "swept expired events and requests to vanish");
+            removed == SWEEP_BATCH || vanishing == SWEEP_BATCH
         }
         Err(error) => {
             tracing::error!(%error, "could not sweep expired events");

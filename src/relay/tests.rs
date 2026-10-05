@@ -34,9 +34,18 @@ impl Harness {
 
     /// One whose relay believes `X-Forwarded-For` if `trust_proxy`.
     async fn trusting(config: RelayConfig, trust_proxy: bool) -> Harness {
+        Self::open(config, trust_proxy, None).await
+    }
+
+    /// One that knows it's reached at `public_url`.
+    async fn at(config: RelayConfig, public_url: &str) -> Harness {
+        Self::open(config, false, Some(url::Url::parse(public_url).unwrap())).await
+    }
+
+    async fn open(config: RelayConfig, trust_proxy: bool, public_url: Option<url::Url>) -> Harness {
         let dir = tempfile::tempdir().unwrap();
         let cancel = CancellationToken::new();
-        let relay = Relay::open(&config, None, trust_proxy, &Storage::allowing_private(dir.path()), &cancel).unwrap();
+        let relay = Relay::open(&config, public_url, trust_proxy, &Storage::allowing_private(dir.path()), &cancel).unwrap();
         let router = relay.router();
         let handle = relay.clone();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -582,17 +591,41 @@ async fn refuses_protected_events() {
 
 #[tokio::test]
 async fn vanishes_on_request() {
-    let harness = Harness::new(RelayConfig::default()).await;
+    let harness = Harness::at(RelayConfig::default(), "https://armada.example.com").await;
     let mut client = harness.client().await;
     let status = note(ALICE, "here");
     client.publish(&status).await;
     let elsewhere = Event::sign(ALICE, now(), 62, tags(&[&["relay", "wss://elsewhere.example.com"]]), "");
     assert_eq!(client.publish(&elsewhere).await[2], false);
-    let url = client.url.clone();
-    let request = Event::sign(ALICE, now(), 62, tags(&[&["relay", &url]]), "");
+    let request = Event::sign(ALICE, now(), 62, tags(&[&["relay", "wss://armada.example.com"]]), "");
     assert_eq!(client.publish(&request).await, json!(["OK", request.id, true, ""]));
     assert!(client.query("s", &[json!({})]).await.is_empty());
     assert_eq!(client.publish(&status).await[3], "blocked: this event has been deleted");
+}
+
+/// Without `public_url` the relay doesn't know its name, and won't take
+/// one from `Host`: a request meant for another relay could be replayed
+/// here under that relay's name.
+#[tokio::test]
+async fn takes_no_name_from_the_host_header() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let harness = Harness::new(RelayConfig::default()).await;
+    let mut request = harness.url.as_str().into_client_request().unwrap();
+    request.headers_mut().insert("host", "elsewhere.example.com".parse().unwrap());
+    let (socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let mut client = Client { socket, url: harness.url.clone() };
+    let status = note(ALICE, "here");
+    client.publish(&status).await;
+
+    let meant_for_elsewhere = Event::sign(ALICE, now(), 62, tags(&[&["relay", "wss://elsewhere.example.com"]]), "");
+    assert_eq!(client.publish(&meant_for_elsewhere).await[2], false);
+    let own_url = client.url.clone();
+    assert_eq!(client.publish(&Event::sign(ALICE, now(), 62, tags(&[&["relay", &own_url]]), "")).await[2], false);
+    assert_eq!(client.query("s", &[json!({})]).await.len(), 1);
+
+    let everywhere = Event::sign(ALICE, now(), 62, tags(&[&["relay", "ALL_RELAYS"]]), "");
+    assert_eq!(client.publish(&everywhere).await[2], true);
+    assert!(client.query("s", &[json!({})]).await.is_empty());
 }
 
 #[tokio::test]

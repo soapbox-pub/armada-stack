@@ -67,8 +67,9 @@ pub struct Relay {
 /// What every connection shares.
 struct Shared {
     config: RelayConfig,
-    /// The [`policy::authority`] of `public_url`, if it's set. Otherwise
-    /// each connection's comes from its request.
+    /// The [`policy::authority`] of `public_url`, if it's set. Without it
+    /// the relay doesn't know its own name, so takes only requests to
+    /// vanish from `ALL_RELAYS`.
     authority: Option<Arc<str>>,
     /// Whether to believe `X-Forwarded-For`; see [`crate::config::Config::trust_proxy`].
     trust_proxy: bool,
@@ -131,7 +132,9 @@ impl Relay {
                     return (StatusCode::TOO_MANY_REQUESTS, "too many connections from this address").into_response();
                 };
                 let max = shared.config.max_message_length;
-                let authority = shared.authority.clone().unwrap_or_else(|| request_authority(&parts).into());
+                // Never the request's `Host`: anyone can send any, and with
+                // it replay a request to vanish meant for another relay.
+                let authority = shared.authority.clone().unwrap_or_else(|| Arc::from(""));
                 upgrade.max_message_size(max).max_frame_size(max).on_upgrade(move |socket| conn::serve(shared, socket, authority, slot)).into_response()
             }
             Err(_) if wants_nip11(&parts.headers) => {
@@ -222,13 +225,6 @@ pub fn wants(method: &Method, path: &str, headers: &HeaderMap) -> bool {
     // HTTP/1.1's `Upgrade: websocket`, or HTTP/2's extended CONNECT.
     let upgrade = headers.get(header::UPGRADE).and_then(|v| v.to_str().ok()).is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
     upgrade || *method == Method::CONNECT || wants_nip11(headers)
-}
-
-/// The authority a request was made to: HTTP/1.1's `Host`, or HTTP/2's
-/// `:authority`.
-fn request_authority(parts: &http::request::Parts) -> String {
-    let host = parts.headers.get(header::HOST).and_then(|v| v.to_str().ok()).or_else(|| parts.uri.authority().map(|a| a.as_str()));
-    host.and_then(|host| policy::authority(&format!("wss://{}", host.trim()))).unwrap_or_default()
 }
 
 fn wants_nip11(headers: &HeaderMap) -> bool {

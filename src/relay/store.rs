@@ -22,6 +22,7 @@
 //! | `deleted`       | id ‖ pubkey                  | —                      |
 //! | `deleted_addrs` | address                      | created_at (u32 BE)    |
 //! | `vanished`      | pubkey                       | created_at (u32 BE)    |
+//! | `vanishing`     | pubkey                       | [`Vanishing`]          |
 //! | `expirations`   | expiration (u32 BE) ‖ seq    | —                      |
 //! | `meta`          | name                         | value                  |
 //!
@@ -37,6 +38,12 @@
 //! Gift wraps belong to their `p` recipient, not their author (see
 //! [`policy::is_gift_wrap`]): only the recipient may delete one, by NIP-09
 //! or by vanishing.
+//!
+//! A request to vanish is recorded in `vanished` at once, which keeps
+//! anything older out from then on, but what it removes may be far more
+//! than one transaction should do. So it's queued in `vanishing`, and
+//! carried out [`SWEEP_BATCH`] index entries at a time, resuming where the
+//! last step left off, by [`Store::sweep`] alongside expired events.
 
 use std::path::Path;
 
@@ -118,6 +125,7 @@ pub struct Tables {
     pub deleted: Db,
     pub deleted_addrs: Db,
     pub vanished: Db,
+    pub vanishing: Db,
     pub expirations: Db,
     pub meta: Db,
 }
@@ -142,6 +150,7 @@ impl Store {
             deleted: env.create_db("deleted", DbFlags::PLAIN)?,
             deleted_addrs: env.create_db("deleted_addrs", DbFlags::PLAIN)?,
             vanished: env.create_db("vanished", DbFlags::PLAIN)?,
+            vanishing: env.create_db("vanishing", DbFlags::PLAIN)?,
             expirations: env.create_db("expirations", DbFlags::PLAIN)?,
             meta: env.create_db("meta", DbFlags::PLAIN)?,
         };
@@ -296,25 +305,70 @@ impl Store {
         Ok(false)
     }
 
-    /// Carry out a request to vanish (NIP-62): delete everything its author
-    /// made up to its time, other than gift wraps they sent, along with the
-    /// gift wraps and NIP-46 messages addressed to them, and keep any of
-    /// those from coming back.
+    /// Take a request to vanish (NIP-62): delete everything its author made
+    /// up to its time, other than gift wraps they sent, along with the gift
+    /// wraps and NIP-46 messages addressed to them, and keep any of those
+    /// from coming back. Only the first [`SWEEP_BATCH`] index entries are
+    /// gone through now; [`Store::sweep_vanishing`] does the rest.
+    ///
+    /// One no newer than a request already taken asks for nothing more, so
+    /// costs nothing: it can be sent again by anyone, as often as they like.
     fn vanish(&self, txn: &mut RwTxn, request: &EventView) -> Result<()> {
         let t = self.tables;
         let (author, until) = (request.pubkey(), request.created_at());
-        let mut doomed = Vec::new();
+        let previous = txn.get(t.vanished, author)?.map_or(0, |v| u32::from_be_bytes(v.try_into().unwrap_or_default()));
+        if until <= previous {
+            return Ok(());
+        }
+        txn.put(t.vanished, author, &until.to_be_bytes())?;
+        txn.put(t.vanishing, author, &Vanishing { until, phase: 0, after: None }.encode())?;
+        self.vanish_step(txn, author, SWEEP_BATCH)?;
+        Ok(())
+    }
+
+    /// Go through up to `budget` index entries of one author's pending
+    /// request to vanish, removing what's theirs. Returns how many it went
+    /// through.
+    fn vanish_step(&self, txn: &mut RwTxn, author: &[u8; 32], budget: usize) -> Result<usize> {
+        let t = self.tables;
+        let Some(mut job) = txn.get(t.vanishing, author)?.and_then(Vanishing::decode) else {
+            txn.del(t.vanishing, author, None)?;
+            return Ok(0);
+        };
         let mut p = vec![b'p'];
         Element::Hex(author).encode(&mut p);
-        for (db, key) in [(t.authors, &author[..]), (t.tags, &p[..])] {
+        let mut doomed = Vec::new();
+        let mut examined = 0;
+        while job.phase < 2 && examined < budget {
+            let (db, key) = if job.phase == 0 { (t.authors, &author[..]) } else { (t.tags, &p[..]) };
             let mut cursor = txn.cursor(db)?;
-            let mut entry = cursor.set(key)?;
+            let mut entry = match &job.after {
+                Some(after) => cursor.get_both_range(key, after)?,
+                None => cursor.set(key)?,
+            };
+            // Where the last step stopped, unless that entry has gone since.
+            if let (Some(after), Some((_, stamp))) = (&job.after, entry)
+                && stamp == &after[..]
+            {
+                entry = cursor.next_dup()?;
+            }
+            let mut finished = true;
             while let Some((_, stamp)) = entry {
-                if stamp_created_at(stamp) > until {
+                if stamp_created_at(stamp) > job.until {
                     break;
                 }
+                if examined == budget {
+                    finished = false;
+                    break;
+                }
+                examined += 1;
                 doomed.push(stamp_seq(stamp));
+                job.after = stamp.try_into().ok();
                 entry = cursor.next_dup()?;
+            }
+            if finished {
+                job.phase += 1;
+                job.after = None;
             }
         }
         doomed.sort_unstable();
@@ -326,11 +380,23 @@ impl Store {
                 self.remove(txn, seq)?;
             }
         }
-        let previous = txn.get(t.vanished, author)?.map_or(0, |v| u32::from_be_bytes(v.try_into().unwrap_or_default()));
-        if until > previous {
-            txn.put(t.vanished, author, &until.to_be_bytes())?;
+        if job.phase >= 2 {
+            txn.del(t.vanishing, author, None)?;
+        } else {
+            txn.put(t.vanishing, author, &job.encode())?;
         }
-        Ok(())
+        Ok(examined)
+    }
+
+    /// Carry pending requests to vanish on, through at most `budget` index
+    /// entries between them. Returns how many it went through.
+    pub fn sweep_vanishing(&self, txn: &mut RwTxn, budget: usize) -> Result<usize> {
+        let mut examined = 0;
+        while examined < budget {
+            let Some(author) = txn.cursor(self.tables.vanishing)?.first()?.and_then(|(key, _)| <[u8; 32]>::try_from(key).ok()) else { break };
+            examined += self.vanish_step(txn, &author, budget - examined)?;
+        }
+        Ok(examined)
     }
 
     /// The stored events a deletion request may delete (NIP-09): those it
@@ -455,6 +521,31 @@ impl Store {
             self.remove(txn, seq)?;
         }
         Ok(expired.len())
+    }
+}
+
+/// A request to vanish not yet carried out: its time, which index it's
+/// going through (0 for the author's own events, 1 for those `p`-tagging
+/// them), and the last entry gone through there.
+struct Vanishing {
+    until: u32,
+    phase: u8,
+    after: Option<Stamp>,
+}
+
+impl Vanishing {
+    fn encode(&self) -> Vec<u8> {
+        let mut out = self.until.to_be_bytes().to_vec();
+        out.push(self.phase);
+        out.extend_from_slice(self.after.as_ref().map_or(&[][..], |after| &after[..]));
+        out
+    }
+
+    fn decode(bytes: &[u8]) -> Option<Vanishing> {
+        let (until, rest) = bytes.split_first_chunk::<4>()?;
+        let (&phase, after) = rest.split_first()?;
+        let after = if after.is_empty() { None } else { Some(after.try_into().ok()?) };
+        Some(Vanishing { until: u32::from_be_bytes(*until), phase, after })
     }
 }
 
@@ -717,6 +808,72 @@ pub mod tests {
         assert_eq!(put(&store, &wrap(BOB, &alice, 150)), Outcome::Deleted);
         assert!(matches!(put(&store, &wrap(BOB, &alice, 250)), Outcome::Stored(_)));
         assert!(matches!(put(&store, &Event::sign(ALICE, 250, 0, vec![], "{}")), Outcome::Stored(_)));
+    }
+
+    /// A request to vanish no newer than one already taken does nothing at
+    /// all, so resending it costs nothing.
+    #[test]
+    fn takes_each_request_to_vanish_once() {
+        let (_dir, store) = open();
+        let request = Event::sign(ALICE, 200, VANISH.into(), tags(&[&["relay", "ALL_RELAYS"]]), "");
+        assert_eq!(put(&store, &request), Outcome::Vanished);
+        let note = Event::sign(ALICE, 100, 1, vec![], "");
+        assert_eq!(put(&store, &note), Outcome::Deleted);
+
+        // Something of hers from before slips in another way: the replay
+        // doesn't look for it, since it can't have been let in by `insert`.
+        let mut txn = store.write().unwrap();
+        let seq = store.next_seq(&txn).unwrap();
+        txn.put(store.tables.events, &seq.to_ne_bytes(), &record::encode(&note)).unwrap();
+        txn.put(store.tables.meta, b"next_seq", &(seq + 1).to_be_bytes()).unwrap();
+        txn.put_dup(store.tables.ids, &hex::decode(&note.id).unwrap()[..ID_PREFIX], &seq.to_be_bytes()).unwrap();
+        for (db, key) in store.index_keys(&EventView::new(&record::encode(&note)).unwrap()) {
+            txn.put_dup(db, &key, &stamp(100, seq)).unwrap();
+        }
+        txn.commit().unwrap();
+        assert_eq!(put(&store, &request), Outcome::Vanished);
+        assert_eq!(put(&store, &Event::sign(ALICE, 150, VANISH.into(), tags(&[&["relay", "ALL_RELAYS"]]), "")), Outcome::Vanished);
+        assert!(has(&store, &note));
+        assert_eq!(store.read().unwrap().len(store.tables.vanishing).unwrap(), 0);
+    }
+
+    /// However much there is to remove, each step goes through a bounded
+    /// number of entries, and the steps together get everything.
+    #[test]
+    fn vanishes_in_steps() {
+        let (_dir, store) = open();
+        let alice = public_key(ALICE);
+        let mut txn = store.write().unwrap();
+        // Hers, and Bob's mentioning her, which stay but are gone through.
+        for i in 0..SWEEP_BATCH * 2 + 5 {
+            store.insert(&mut txn, &record::encode(&Event::sign(ALICE, 100, 1, vec![], &i.to_string()))).unwrap();
+            store.insert(&mut txn, &record::encode(&Event::sign(BOB, 100, 1, tags(&[&["p", &alice]]), &i.to_string()))).unwrap();
+        }
+        txn.commit().unwrap();
+        let theirs = |store: &Store| {
+            let txn = store.read().unwrap();
+            let mut cursor = txn.cursor(store.tables.authors).unwrap();
+            if cursor.set(&hex::decode(&alice).unwrap()).unwrap().is_some() { cursor.count().unwrap() } else { 0 }
+        };
+
+        put(&store, &Event::sign(ALICE, 200, VANISH.into(), tags(&[&["relay", "ALL_RELAYS"]]), ""));
+        assert_eq!(theirs(&store), SWEEP_BATCH + 5);
+        let mut steps = 0;
+        loop {
+            let mut txn = store.write().unwrap();
+            let examined = store.sweep_vanishing(&mut txn, SWEEP_BATCH).unwrap();
+            txn.commit().unwrap();
+            assert!(examined <= SWEEP_BATCH);
+            if examined == 0 {
+                break;
+            }
+            steps += 1;
+        }
+        // 1,005 more of hers, then 2,005 of Bob's.
+        assert_eq!(steps, 4);
+        assert_eq!(theirs(&store), 0);
+        assert_eq!(store.len(&store.read().unwrap()).unwrap(), SWEEP_BATCH * 2 + 5);
+        assert_eq!(store.read().unwrap().len(store.tables.vanishing).unwrap(), 0);
     }
 
     #[test]
