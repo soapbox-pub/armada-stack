@@ -189,10 +189,20 @@ impl Internal {
     }
 
     /// Queue an event for the writer, as a client's would be once checked.
-    /// It's trusted: neither validated nor verified. Returns whether the
-    /// writer had room.
+    /// It's checked as a client's is, short of the rate limits, so that
+    /// nothing the store can't hold gets in. Returns whether it passed and
+    /// the writer had room.
     pub fn publish(&self, event: &Event) -> bool {
-        let record = record::encode_expiring(event, policy::expiration(event, crate::util::now()));
+        let now = crate::util::now();
+        let valid = conn::well_formed(event)
+            && (0..=i64::from(u32::MAX)).contains(&event.created_at)
+            && policy::validate(event, now, "").is_ok()
+            && event.verify();
+        if !valid {
+            tracing::error!(id = %event.id, kind = event.kind, "an event of armada's own isn't valid; not publishing it");
+            return false;
+        }
+        let record = record::encode_expiring(event, policy::expiration(event, now));
         // Nothing reads the `OK`.
         let (reply, _, _) = Link::new(1);
         self.shared.writer.submit(writer::Submission { record, reply }).is_ok()

@@ -725,5 +725,41 @@ async fn serves_internal_connections() {
     let reply = Event::sign(CAROL, now(), 1059, tags(&[&["p", &bob]]), &nip44::payload(100));
     assert!(internal.publish(&reply));
     assert_eq!(carol.recv().await, json!(["EVENT", "mine", reply]));
+
+    // Nothing is trusted to be valid because it's armada's own.
+    let mut forged = Event::sign(CAROL, now() + 1, 1059, tags(&[&["p", &bob]]), &nip44::payload(100));
+    forged.sig = "ab".repeat(64);
+    assert!(!internal.publish(&forged));
+    assert!(!internal.publish(&Event::sign(CAROL, now(), 1, vec![], "not a kind this relay takes")));
+    carol.quiet().await;
     internal.disconnect(conn).await;
+}
+
+/// A forgery of a stored event's id is refused as a forgery, not as a
+/// duplicate, which would say the event is stored to someone who couldn't
+/// otherwise know.
+#[tokio::test]
+async fn says_duplicate_only_of_the_real_event() {
+    let harness = Harness::new(RelayConfig::default()).await;
+    let mut alice = harness.client().await;
+    let bob = crate::nostr::event::public_key(BOB);
+    let wrap = Event::sign(ALICE, now(), 1059, tags(&[&["p", &bob]]), &nip44::payload(100));
+    alice.publish(&wrap).await;
+    assert_eq!(alice.publish(&wrap).await[3], "duplicate: already have this event");
+
+    let mut forged = wrap.clone();
+    forged.sig = "ab".repeat(64);
+    assert_eq!(alice.publish(&forged).await, json!(["OK", wrap.id, false, "invalid: bad id or signature"]));
+}
+
+/// A CLOSE for a subscription the connection doesn't have is ignored.
+#[tokio::test]
+async fn ignores_closes_of_nothing() {
+    let harness = Harness::new(RelayConfig::default()).await;
+    let mut client = harness.client().await;
+    for i in 0..100 {
+        client.send(json!(["CLOSE", i.to_string()])).await;
+    }
+    client.quiet().await;
+    assert!(client.query("s", &[json!({"kinds": [STATUS]})]).await.is_empty());
 }

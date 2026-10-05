@@ -69,6 +69,11 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 /// or otherwise, is gone.
 const PING_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Messages of any sort one connection may send a minute, in bursts of as
+/// many: each costs a parse, whatever it turns out to be, and not every
+/// sort has a budget of its own.
+const MESSAGES_PER_MINUTE: u32 = 3000;
+
 /// The most live events held for one subscription while its query runs.
 /// Past this the subscription is closed: its client can ask again.
 const MAX_PENDING: usize = OUTBOUND;
@@ -100,7 +105,10 @@ struct Session {
     link: Link,
     sink: Sink,
     subs: HashMap<String, Sub>,
+    /// Its events.
     tokens: TokenBucket,
+    /// Its messages of every sort.
+    messages: TokenBucket,
     /// This connection, counted against its client's address, whose event
     /// budget it shares.
     slot: Slot,
@@ -118,8 +126,9 @@ pub async fn serve(shared: Arc<Shared>, socket: WebSocket, authority: Arc<str>, 
     let (sink, mut stream) = socket.split();
     shared.hub.connect(id, link.clone()).await;
     let tokens = TokenBucket::new(shared.config.events_per_minute, Instant::now());
+    let messages = TokenBucket::new(MESSAGES_PER_MINUTE, Instant::now());
     let cancel = shared.cancel.clone();
-    let mut session = Session { shared, id, link, sink, subs: HashMap::new(), tokens, slot, authority, cancel: CancellationToken::new() };
+    let mut session = Session { shared, id, link, sink, subs: HashMap::new(), tokens, messages, slot, authority, cancel: CancellationToken::new() };
     let mut queries: JoinSet<QueryDone> = JoinSet::new();
     let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + PING_INTERVAL, PING_INTERVAL);
     let mut heard = Instant::now();
@@ -187,6 +196,9 @@ impl Session {
     }
 
     async fn on_text(&mut self, text: &str, queries: &mut JoinSet<QueryDone>) -> Result<(), Gone> {
+        if !self.messages.take(Instant::now()) {
+            return self.notice("rate-limited: too many messages; slow down").await;
+        }
         let Ok(Value::Array(message)) = serde_json::from_str::<Value>(text) else {
             return self.notice("invalid: a message must be a JSON array").await;
         };
@@ -208,19 +220,22 @@ impl Session {
         }
     }
 
-    /// Close a subscription, and stop its query.
+    /// Close a subscription, and stop its query. One the connection doesn't
+    /// have costs nothing, so a flood of them can't crowd the shards' queues.
     async fn end(&mut self, sub: &str) {
-        self.forget(sub);
-        self.shared.hub.unsubscribe(self.id, sub).await;
+        if self.forget(sub) {
+            self.shared.hub.unsubscribe(self.id, sub).await;
+        }
     }
 
     /// Stop a subscription's query and give back its values, leaving the
-    /// shard to whoever replaces or unsubscribes it.
-    fn forget(&mut self, sub: &str) {
-        if let Some(sub) = self.subs.remove(sub) {
-            sub.cancel.cancel();
-            self.slot.release_values(sub.values);
-        }
+    /// shard to whoever replaces or unsubscribes it. Returns whether there
+    /// was one.
+    fn forget(&mut self, sub: &str) -> bool {
+        let Some(sub) = self.subs.remove(sub) else { return false };
+        sub.cancel.cancel();
+        self.slot.release_values(sub.values);
+        true
     }
 
     async fn on_event(&mut self, event: Option<&Value>) -> Result<(), Gone> {
@@ -253,7 +268,7 @@ impl Session {
     fn screen(&mut self, event: &Event) -> Result<(), String> {
         let config = &self.shared.config;
         let now = now();
-        if !is_hex64(&event.id) || !is_hex64(&event.pubkey) || event.sig.len() != 128 || hex::decode(&event.sig).is_err() {
+        if !well_formed(event) {
             return Err("invalid: id, pubkey, and sig must be lowercase hex".into());
         }
         if !(0..=i64::from(u32::MAX)).contains(&event.created_at) {
@@ -426,10 +441,15 @@ fn admit(shared: &Shared, event: Event, link: Link) {
     let mut id = [0; 32];
     hex::decode_to_slice(&event.id, &mut id).expect("screened hex");
     // Resent events are common and cost a signature check each, so look
-    // first. A forgery of a stored id is answered the same way, and stores
-    // nothing.
+    // first: one with the stored copy's signature is that event, already
+    // verified. A forgery of a stored id is checked like any other event,
+    // so the answer doesn't say what's stored, which for gift wraps and
+    // the like a filter alone may not.
     let store = &shared.store;
-    if store.read().and_then(|txn| store.contains(&txn, &id)).unwrap_or(false) {
+    let stored_sig = store.read().and_then(|txn| Ok(store.seq_of(&txn, &id)?.and_then(|seq| store.load(&txn, seq).ok().flatten()).map(|view| *view.sig())));
+    let mut sig = [0; 64];
+    hex::decode_to_slice(&event.sig, &mut sig).expect("screened hex");
+    if stored_sig.ok().flatten() == Some(sig) {
         return refuse(true, "duplicate: already have this event");
     }
     if !event.verify() {
@@ -440,6 +460,12 @@ fn admit(shared: &Shared, event: Event, link: Link) {
     if shared.writer.submit(submission).is_err() {
         refuse(false, "rate-limited: the relay is busy, try again shortly");
     }
+}
+
+/// Whether an event's id, pubkey, and signature are lowercase hex of the
+/// right lengths, as a record holds them.
+pub fn well_formed(event: &Event) -> bool {
+    is_hex64(&event.id) && is_hex64(&event.pubkey) && event.sig.len() == 128 && event.sig.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// About how many bytes an event takes to keep: its strings, and what its
