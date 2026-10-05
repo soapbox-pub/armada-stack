@@ -118,8 +118,10 @@ Blossom server rather than the domain's, so nothing it does leaves Tor.
 Tor Browser visiting the domain is offered the onion (the `Onion-Location`
 header). AV calls aren't offered over the onion: WebRTC can't go through Tor.
 
-Check it from any machine with Tor running, once Tor has had a minute to
-publish the address:
+After armada starts, Tor takes anywhere from seconds to several minutes to
+publish the onion, and it can't be reached until then; armada logs "Tor has
+published the onion service" once it's up. Check it from any machine with Tor
+running:
 
 ```sh
 curl --socks5-hostname 127.0.0.1:9050 -H 'Accept: application/nostr+json' http://$(armada onion)/

@@ -3,6 +3,16 @@
 A release's notes are its section here, so tag `vX.Y.Z` only once
 `## X.Y.Z` exists: publishing fails without it.
 
+## Unreleased
+
+- install.sh sets up a new server again. It enabled the systemd unit before
+  copying it in, so on a server without one it stopped, silently, after
+  writing the config.
+- armada says when Tor has published the onion, and warns when Tor reports
+  a problem with it. Publishing can take several minutes after a start, and
+  until then the onion can't be reached; it used to say it was serving the
+  onion as soon as it launched it.
+
 ## 0.3.0
 
 - Tor, built in, with no tor daemon to install. armada is served as an

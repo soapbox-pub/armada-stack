@@ -49,6 +49,7 @@ use tokio_util::sync::CancellationToken;
 use tor_cell::relaycell::msg::{Connected, End, EndReason};
 use tor_config::ExplicitOrAuto;
 use tor_hscrypto::pk::{HsIdKey, HsIdKeypair};
+use tor_hsservice::status::{OnionServiceStatus, State as ServiceState};
 use tor_hsservice::{HsIdKeypairSpecifier, HsNickname, StreamRequest};
 use tor_keymgr::KeystoreSelector;
 use tor_keymgr::config::ArtiKeystoreKind;
@@ -174,11 +175,12 @@ async fn publish(client: &Client, key: &OnionKey, streams: &mpsc::Sender<(DataSt
         }
         anyhow::Ok((service, requests))
     })();
-    let (_service, requests) = match launched {
+    let (service, requests) = match launched {
         Ok(launched) => launched,
         Err(error) => return error,
     };
-    tracing::info!(onion = key.address, "serving the onion service");
+    tracing::info!(onion = key.address, "launched the onion service; clients can reach it once it's published");
+    tokio::spawn(report(service.status_events(), key.address.clone()));
 
     let mut requests = std::pin::pin!(requests);
     while let Some(rendezvous) = requests.next().await {
@@ -196,7 +198,29 @@ async fn publish(client: &Client, key: &OnionKey, streams: &mpsc::Sender<(DataSt
             }
         });
     }
+    drop(service);
     anyhow!("Tor stopped handing over requests")
+}
+
+/// Say what Tor makes of the service as that changes. Arti launches a
+/// service at once, but publishing it, with introduction points that work,
+/// takes anywhere from seconds to several minutes, and until then clients
+/// can't connect. Arti's state can lag the descriptor going up, so this is
+/// what Tor says rather than proof either way.
+async fn report(mut events: impl futures_util::Stream<Item = OnionServiceStatus> + Unpin, onion: String) {
+    let mut last = None;
+    while let Some(status) = events.next().await {
+        let state = status.state();
+        if last == Some(state) {
+            continue;
+        }
+        last = Some(state);
+        match state {
+            ServiceState::Running | ServiceState::DegradedReachable => tracing::info!(onion, ?state, "Tor has published the onion service"),
+            ServiceState::Bootstrapping | ServiceState::Shutdown => {}
+            _ => tracing::warn!(onion, ?state, problem = ?status.current_problem(), "Tor reports a problem publishing the onion service"),
+        }
+    }
 }
 
 /// Accept a stream if it's for the web port. Anything else is refused with
