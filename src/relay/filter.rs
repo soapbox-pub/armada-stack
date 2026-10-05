@@ -97,21 +97,45 @@ impl Filter {
     }
 
     pub fn matches(&self, event: &EventView) -> bool {
+        self.matches_walking(event).0
+    }
+
+    /// [`Filter::matches`], and how many of the event's tags it went
+    /// through to say: the part of matching whose cost the event sets.
+    ///
+    /// The tags are gone through once, whatever the filter's letters, each
+    /// tag looked up by its letter.
+    pub fn matches_walking(&self, event: &EventView) -> (bool, usize) {
         if self.never || !self.matches_time(event.created_at()) {
-            return false;
+            return (false, 0);
         }
         if self.ids.as_ref().is_some_and(|ids| ids.binary_search(event.id()).is_err()) {
-            return false;
+            return (false, 0);
         }
         if self.authors.as_ref().is_some_and(|authors| authors.binary_search(event.pubkey()).is_err()) {
-            return false;
+            return (false, 0);
         }
         if self.kinds.as_ref().is_some_and(|kinds| kinds.binary_search(&event.kind()).is_err()) {
-            return false;
+            return (false, 0);
         }
-        self.tags.iter().all(|(letter, values)| {
-            event.indexed_tags().any(|(name, value)| name == *letter && values.binary_search_by(|v| compare(v, &value)).is_ok())
-        })
+        if self.tags.is_empty() {
+            return (true, 0);
+        }
+        // One bit per letter, of which there are 52 at most.
+        let wanted: u64 = (1 << self.tags.len()) - 1;
+        let mut found = 0u64;
+        let mut walked = 0;
+        for (name, value) in event.indexed_tags() {
+            walked += 1;
+            let Ok(i) = self.tags.binary_search_by_key(&name, |(letter, _)| *letter) else { continue };
+            if found & (1 << i) == 0 && self.tags[i].1.binary_search_by(|v| compare(v, &value)).is_ok() {
+                found |= 1 << i;
+                if found == wanted {
+                    return (true, walked);
+                }
+            }
+        }
+        (false, walked)
     }
 
     pub fn matches_time(&self, created_at: u32) -> bool {
@@ -194,6 +218,25 @@ mod tests {
         assert!(!matches(json!({"until": 99}), &event));
         // Only single-letter tags are matched.
         assert!(Filter::parse(&json!({"#title": ["x"]})).is_err());
+    }
+
+    #[test]
+    fn walks_an_events_tags_once_whatever_the_letters() {
+        let mut event_tags: Vec<Vec<String>> = (0..100).map(|i| vec!["t".into(), i.to_string()]).collect();
+        event_tags.push(vec!["a".into(), "x".into()]);
+        let event = Event::sign(ALICE, 100, 1, event_tags, "");
+        let record = encode(&event);
+        let view = EventView::new(&record).unwrap();
+        let walking = |filter: Value| Filter::parse(&filter).unwrap().matches_walking(&view);
+        // Stops once every letter is found.
+        assert_eq!(walking(json!({"#t": ["3"]})), (true, 4));
+        assert_eq!(walking(json!({"#a": ["x"], "#t": ["0"]})), (true, 101));
+        // Otherwise goes through each tag once, not once per letter.
+        assert_eq!(walking(json!({"#a": ["y"], "#b": ["x"], "#t": ["0"]})), (false, 101));
+        assert_eq!(walking(json!({})), (true, 0));
+        // Every letter there is.
+        let all: serde_json::Map<String, Value> = (b'a'..=b'z').chain(b'A'..=b'Z').map(|l| (format!("#{}", l as char), json!(["x"]))).collect();
+        assert_eq!(walking(Value::Object(all)), (false, 101));
     }
 
     #[test]

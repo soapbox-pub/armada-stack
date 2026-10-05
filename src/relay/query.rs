@@ -77,7 +77,21 @@ impl Budget<'_> {
         self.left -= 1;
         true
     }
+
+    /// Spend `n` at once, or `false`, spending all that's left, if there
+    /// aren't that many.
+    fn spend_n(&mut self, n: usize) -> bool {
+        if n > self.left {
+            self.left = 0;
+            return false;
+        }
+        self.left -= n;
+        true
+    }
 }
+
+/// Tags gone through in matching that cost as much as examining a record.
+const TAGS_PER_RECORD: usize = 32;
 
 /// Run a REQ's filters. Each one's limit is capped at `max_limit`. Once
 /// `cancel` fires it stops soon, with whatever it found so far, which
@@ -265,7 +279,16 @@ fn scan<'t>(store: &Store, txn: &'t Txn, filter: &Filter, plan: &Plan, limit: us
 
         let seq = stamp_seq(&stamp);
         let Some(view) = store.load(txn, seq)? else { continue };
-        if (plan.exact || filter.matches(&view)) && !view.is_expired(now) && policy::visible(&view, filter) {
+        let matches = plan.exact || {
+            let (matches, walked) = filter.matches_walking(&view);
+            // An event can carry thousands of tags, each of which matching
+            // may have to look at: those cost as records do.
+            if !budget.spend_n(walked / TAGS_PER_RECORD) {
+                break;
+            }
+            matches
+        };
+        if matches && !view.is_expired(now) && policy::visible(&view, filter) {
             found.push((seq, view));
         }
     }
