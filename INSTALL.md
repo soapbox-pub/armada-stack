@@ -77,6 +77,7 @@ armada: created the armada user
 armada: wrote /etc/armada/armada.toml; every other setting has a default
 armada: started the armada service; waiting for https://armada.example.com/
 armada: armada is running at https://armada.example.com/
+armada: and over Tor at http://5h34fohc7jrfzdyzj2jadl3csmmqox5fsqknuzgi5bfbnlokgxakd6id.onion/
 ```
 
 The certificate renews in the background. armada also checks the relays for
@@ -100,6 +101,47 @@ curl -s https://armada.example.com/_armada/env.js
 
 Then open `https://armada.example.com` in a browser. The app uses this
 server's relay and Blossom server alongside Armada's public ones.
+
+## Tor
+
+armada runs Tor itself, with no tor daemon to install, and serves everything
+as an onion service too: the web app, relay and Blossom server, over plain
+HTTP on the onion's port 80, since Tor encrypts the connection itself. The
+address is made the first time armada starts. Print it with:
+
+```sh
+armada onion
+```
+
+A browser that comes over the onion is pointed at the onion's relay and
+Blossom server rather than the domain's, so nothing it does leaves Tor.
+Tor Browser visiting the domain is offered the onion (the `Onion-Location`
+header). AV calls aren't offered over the onion: WebRTC can't go through Tor.
+
+Check it from any machine with Tor running, once Tor has had a minute to
+publish the address:
+
+```sh
+curl --socks5-hostname 127.0.0.1:9050 -H 'Accept: application/nostr+json' http://$(armada onion)/
+```
+
+The address is its key, `tor/hs_ed25519_secret_key` in `storage_dir`. Back it
+up to keep the address; lose it and the next start makes a new one. It's in
+C Tor's format, beside the `hostname` and `hs_ed25519_public_key` C Tor keeps,
+so an address can move to or from a C Tor `HiddenServiceDir` by copying those
+three files.
+
+Tor also lets armada reach relays that are onions, such as one an nsite's
+author publishes to. To turn the onion service off but keep that, or turn
+Tor off altogether, set these in the config and restart:
+
+```toml
+[tor]
+onion_service = false  # no onion service
+enabled = false        # no Tor at all
+```
+
+Tor needs nothing from the firewall: it only makes outbound connections.
 
 ## Upgrading
 
@@ -129,8 +171,8 @@ the config's is refused: to move domains, edit `public_url` and restart.
 ## Backups
 
 Everything armada keeps is in `storage_dir` (`/var/lib/armada`): the relay's
-events, Blossom blobs, the downloaded web app, and the TLS certificate and
-ACME account. Stop the service before copying it, so the relay's database is
+events, Blossom blobs, the downloaded web app, the TLS certificate and ACME
+account, and the onion's key. Stop the service before copying it, so the relay's database is
 copied in a consistent state:
 
 ```sh
@@ -248,8 +290,8 @@ systemctl restart armada
 
 ## Building from source
 
-You need Rust 1.88 or newer and a C compiler, because the build compiles
-LMDB:
+You need Rust 1.92 or newer and a C compiler, because the build compiles
+LMDB and SQLite:
 
 ```sh
 git clone nostr://npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/git.shakespeare.diy/armada-stack

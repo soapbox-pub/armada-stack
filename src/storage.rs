@@ -9,6 +9,7 @@
 //!   push/           LMDB: the push service's clients
 //!   push/key        the push service's Nostr secret key, made on first start
 //!   blobs/          the content-addressed blob store the site is served from
+//!   tor/            Tor's state, and the onion's key; see crate::tor
 //! ```
 //!
 //! One LMDB environment per service rather than one for the stack: LMDB

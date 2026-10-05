@@ -667,6 +667,9 @@ start_service() {
 
 	if wait_for_https 120; then
 		say "armada is running at https://$DOMAIN/"
+		if onion=$("$BIN" --config "$CONFIG" onion 2>/dev/null); then
+			say "and over Tor at http://$onion/"
+		fi
 	else
 		say "https://$DOMAIN/ isn't answering yet. Ports 80 and 443 have to be open,"
 		say "and if the domain is on Cloudflare, its proxy has to be off (grey cloud)."
