@@ -76,6 +76,10 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -eu
+          # zig's linker holds every object file open at once, and there are
+          # over a thousand since Arti: more than the default soft limit.
+          ulimit -n "$(ulimit -Hn)"
+          echo "open files: $(ulimit -n)"
           zig version
           cargo-zigbuild --version
           mkdir -p dist
