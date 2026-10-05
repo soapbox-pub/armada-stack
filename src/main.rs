@@ -230,7 +230,10 @@ const TOR_CRATES: &[&str] = &["arti_client", "tor_chanmgr", "tor_circmgr", "tor_
 fn init_logging() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         let quiet: Vec<String> = TOR_CRATES.iter().map(|name| format!("{name}=warn")).collect();
-        EnvFilter::new(format!("info,{}", quiet.join(",")))
+        // Arti makes a default config before taking armada's, and warns
+        // that it can't read the machine's memory when systemd hides
+        // /proc/meminfo, though armada's config says how much to use.
+        EnvFilter::new(format!("info,{},tor_memquota::config=error", quiet.join(",")))
     });
     if std::env::var("LOG_FORMAT").as_deref() == Ok("json") {
         tracing_subscriber::fmt().json().flatten_event(true).with_env_filter(filter).init();

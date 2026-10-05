@@ -74,6 +74,9 @@ const PUBLIC_KEY_HEADER: &[u8; 32] = b"== ed25519v1-public: type0 ==\0\0\0";
 const RETRY_MIN: Duration = Duration::from_secs(5);
 const RETRY_MAX: Duration = Duration::from_secs(300);
 
+/// Bytes Tor may hold in its queues.
+const TOR_MEMORY: usize = 1 << 30;
+
 /// Onion streams waiting for the server to take them.
 const BACKLOG: usize = 64;
 
@@ -105,6 +108,12 @@ impl Tor {
         // The key file is the one copy of the onion's key; Arti's keystore
         // on disk would be a second, in a format of its own.
         config.storage().keystore().primary().kind(ExplicitOrAuto::Explicit(ArtiKeystoreKind::Ephemeral));
+        // The most Tor may queue before it starts closing the circuits that
+        // queue most. Left to itself it takes a share of the machine's
+        // memory, sized for a Tor relay rather than one service among
+        // several, or 8 GiB when it can't read how much there is, as under
+        // systemd's ProcSubset=pid.
+        config.system().memory().max(TOR_MEMORY);
         let config = config.build()?;
         let client = TorClient::builder().config(config).create_unbootstrapped_async().await.map_err(|error| {
             anyhow!("Could not start Tor: {error}. Tor refuses a state directory others can write to; check the permissions of {} and the directories above it.", dir.display())
