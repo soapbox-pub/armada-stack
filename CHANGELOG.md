@@ -3,7 +3,7 @@
 A release's notes are its section here, so tag `vX.Y.Z` only once
 `## X.Y.Z` exists: publishing fails without it.
 
-## Unreleased
+## 0.3.1
 
 - install.sh sets up a new server again. It enabled the systemd unit before
   copying it in, so on a server without one it stopped, silently, after
