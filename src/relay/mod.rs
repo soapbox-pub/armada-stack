@@ -171,6 +171,22 @@ impl Internal {
         (id, rx, overflow)
     }
 
+    /// [`Internal::connect`], as one connection per monitor shard sharing
+    /// one receiver, for a service with more subscriptions than one shard
+    /// should match alone. Each subscription goes on whichever it's given.
+    pub async fn connect_spread(&self, capacity: usize) -> (Vec<ConnId>, mpsc::Receiver<Outbound>, CancellationToken) {
+        let shards = self.shared.hub.shards() as u64;
+        let first = self.shared.next_conn.fetch_add(shards, Ordering::Relaxed);
+        let (link, rx, overflow) = Link::new(capacity);
+        let mut conns = Vec::new();
+        // Consecutive ids, so one on each shard.
+        for id in first..first + shards {
+            self.shared.hub.connect(id, link.clone()).await;
+            conns.push(id);
+        }
+        (conns, rx, overflow)
+    }
+
     pub async fn disconnect(&self, conn: ConnId) {
         self.shared.hub.disconnect(conn).await;
     }

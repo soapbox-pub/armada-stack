@@ -115,6 +115,11 @@ impl Hub {
         Hub { shards }
     }
 
+    /// How many shard threads there are.
+    pub fn shards(&self) -> usize {
+        self.shards.len()
+    }
+
     fn shard(&self, conn: ConnId) -> &mpsc::Sender<Command> {
         &self.shards[(conn % self.shards.len() as u64) as usize]
     }

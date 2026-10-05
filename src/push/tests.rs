@@ -270,3 +270,37 @@ fn parses_requests_as_nostr_push2_does() {
     assert!(parse_request(&json!({"id": "x".repeat(65), "method": "ping"}).to_string()).is_none());
     assert!(parse_request(&json!({"id": "1", "method": "x".repeat(33)}).to_string()).is_none());
 }
+
+/// One site's push endpoints can only be signed up so fast, however many
+/// keypairs ask: they're free to make.
+#[tokio::test]
+async fn limits_creates_by_site() {
+    let harness = Harness::new().await;
+    let mut client = harness.client().await;
+    for _ in 0..CREATES_PER_SITE_PER_HOUR {
+        client.call("create", connection::tests::web(&harness.endpoint)).await.unwrap();
+    }
+    let refused = client.call("create", connection::tests::web(&harness.endpoint)).await.unwrap_err();
+    assert_eq!(refused, "too many clients for this push service; try again later");
+    // Its existing registration is untouched.
+    assert_eq!(client.call("ping", json!(null)).await, Ok(json!({})));
+}
+
+#[test]
+fn tells_endpoints_sites() {
+    assert_eq!(site("https://fcm.googleapis.com/fcm/send/abc"), "googleapis.com");
+    assert_eq!(site("https://a.b.evil.example./x"), "evil.example");
+    assert_eq!(site("https://localhost:8443/x"), "localhost");
+    assert_eq!(site("https://203.0.113.9/x"), "203.0.113.9");
+    assert_eq!(site("https://[2001:db8::1]/x"), "[2001:db8::1]");
+    assert_eq!(host("https://Push.Example.com:8443/x"), "push.example.com");
+}
+
+#[test]
+fn counts_a_clients_filter_values() {
+    let hex = "ab".repeat(32);
+    let subscriptions = subscriptions::normalize(&json!([{"filters": [{"kinds": [1059], "#p": [hex]}, {"kinds": [1059], "authors": [hex, hex, hex]}], "relays": ["wss://a.example"]}]), now()).unwrap();
+    let client = db::Client { connection: Connection::parse(&connection::tests::web("https://push.example.com/x"), true).unwrap(), subscriptions, created_at: 0, last_seen: 0 };
+    // Kinds, #p; kinds, authors.
+    assert_eq!(client.filter_values(), 2 + 4);
+}

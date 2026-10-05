@@ -24,6 +24,15 @@ pub struct Client {
     pub last_seen: i64,
 }
 
+impl Client {
+    /// Values its subscriptions' filters list, each a place in the relay's
+    /// live index.
+    pub fn filter_values(&self) -> usize {
+        let list = |value: &serde_json::Value| value.as_array().map_or(0, Vec::len);
+        self.subscriptions.iter().flat_map(|subscription| &subscription.filters).map(|filter| filter.values().map(list).sum::<usize>()).sum()
+    }
+}
+
 #[derive(Clone)]
 pub struct PushDb {
     env: Env<WithoutTls>,

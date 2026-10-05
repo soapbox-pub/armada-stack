@@ -21,6 +21,14 @@
 //! Everything that changes a client happens on one task, in order: requests,
 //! deliveries that find a subscription gone, and the sweep of clients not
 //! seen in a month. Deliveries run beside it.
+//!
+//! A client is only a keypair, which costs nothing, so what clients may
+//! take is bounded in all: [`MAX_CLIENTS`], [`MAX_FILTER_VALUES`] between
+//! their subscriptions, and new clients a little at a time, by the site
+//! their push endpoint is on and overall. And since a client picks its own
+//! endpoint, pushes to any one host are capped too
+//! ([`PUSHES_PER_HOST_PER_MINUTE`]), so many clients pointed at someone
+//! else's server can't turn this one into a flood of requests at it.
 
 mod connection;
 mod db;
@@ -40,7 +48,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::nostr::{Event, nip44};
-use crate::ratelimit::TokenBucket;
+use crate::ratelimit::{RateLimiter, TokenBucket};
 use crate::relay::{ConnId, Internal, Outbound};
 use crate::storage::Storage;
 use crate::util::now;
@@ -63,6 +71,19 @@ const MAX_CLIENTS: usize = 100_000;
 /// Pushes one client may get a minute, in bursts of as many. More are
 /// dropped, not queued.
 const PUSHES_PER_MINUTE: u32 = 30;
+/// Pushes sent to one host a minute, all its clients together. Browsers'
+/// push services each have one host, so this is far above what a
+/// self-hosted armada's users would need of one.
+const PUSHES_PER_HOST_PER_MINUTE: u64 = 3000;
+/// Filter values all clients' subscriptions may list between them, each
+/// held in the relay's live index.
+const MAX_FILTER_VALUES: usize = 1_000_000;
+/// New clients an hour, in all and by the site of their endpoint (its
+/// host's last two labels), each in bursts of as many.
+const NEW_CLIENTS_PER_HOUR: u64 = 1200;
+const CREATES_PER_SITE_PER_HOUR: u64 = 120;
+/// Sites and hosts counted at once.
+const MAX_LIMITED: usize = 100_000;
 /// Pushes waiting to go out, and how many go at once. Past the queue, new
 /// ones are dropped.
 const DELIVERY_QUEUE: usize = 10_000;
@@ -111,7 +132,22 @@ impl Push {
         let (deliveries, queue) = mpsc::channel(DELIVERY_QUEUE);
         let (gone_tx, gone) = mpsc::channel(1024);
         tokio::spawn(deliver(Sender::new(&options.subject, options.public_only), queue, gone_tx));
-        let service = Service { keys: self.keys, db: self.db, relay, options, clients, buckets: HashMap::new(), matches: 0, deliveries };
+        let values = clients.values().map(Client::filter_values).sum();
+        let hour = Duration::from_secs(3600);
+        let service = Service {
+            keys: self.keys,
+            db: self.db,
+            relay,
+            options,
+            clients,
+            values,
+            buckets: HashMap::new(),
+            new_clients: TokenBucket::per(NEW_CLIENTS_PER_HOUR, hour, Instant::now()),
+            creates: RateLimiter::new(CREATES_PER_SITE_PER_HOUR, hour, MAX_LIMITED),
+            hosts: RateLimiter::new(PUSHES_PER_HOST_PER_MINUTE, Duration::from_secs(60), MAX_LIMITED),
+            matches: Vec::new(),
+            deliveries,
+        };
         Ok(tokio::spawn(service.run(gone, cancel)))
     }
 }
@@ -122,9 +158,17 @@ struct Service {
     relay: Internal,
     options: Options,
     clients: HashMap<String, Client>,
+    /// Filter values all of `clients`' subscriptions list.
+    values: usize,
     buckets: HashMap<String, TokenBucket>,
-    /// The relay connection clients' subscriptions are on.
-    matches: ConnId,
+    new_clients: TokenBucket,
+    /// `create`s by the site of their endpoint.
+    creates: RateLimiter,
+    /// Pushes by the host they go to.
+    hosts: RateLimiter,
+    /// The relay connections clients' subscriptions are on, one per
+    /// monitor shard: each client's is on one of them, by its pubkey.
+    matches: Vec<ConnId>,
     deliveries: mpsc::Sender<Delivery>,
 }
 
@@ -184,23 +228,29 @@ impl Service {
         (conn, rx, overflow)
     }
 
-    /// A relay connection with every client's subscription on it, replacing
-    /// any before it.
+    /// Relay connections with every client's subscription on them,
+    /// replacing any before.
     async fn watch(&mut self) -> (mpsc::Receiver<Outbound>, CancellationToken) {
-        if self.matches != 0 {
-            self.relay.disconnect(self.matches).await;
+        for conn in std::mem::take(&mut self.matches) {
+            self.relay.disconnect(conn).await;
         }
-        let (conn, rx, overflow) = self.relay.connect(MATCH_BACKLOG).await;
-        self.matches = conn;
+        let (conns, rx, overflow) = self.relay.connect_spread(MATCH_BACKLOG).await;
+        self.matches = conns;
         for (pubkey, client) in &self.clients {
             self.install(pubkey, client).await;
         }
         (rx, overflow)
     }
 
+    /// The relay connection a client's subscription is on.
+    fn conn_of(&self, pubkey: &str) -> ConnId {
+        let spread = pubkey.get(..8).and_then(|prefix| u32::from_str_radix(prefix, 16).ok()).unwrap_or(0);
+        self.matches[spread as usize % self.matches.len()]
+    }
+
     async fn install(&self, pubkey: &str, client: &Client) {
         let filters: Vec<Value> = client.subscriptions.iter().flat_map(|s| s.live_filters()).collect();
-        if let Err(error) = self.relay.subscribe(self.matches, pubkey, &filters).await {
+        if let Err(error) = self.relay.subscribe(self.conn_of(pubkey), pubkey, &filters).await {
             tracing::warn!(%pubkey, %error, "could not watch a client's subscriptions");
         }
     }
@@ -238,10 +288,15 @@ impl Service {
         match method {
             "create" => {
                 let connection = Connection::parse(params.as_ref().unwrap_or(&Value::Null), self.options.public_only)?;
+                let instant = Instant::now();
+                if self.creates.admit(&site(&connection.endpoint), instant).is_err() {
+                    return Err("too many clients for this push service; try again later".into());
+                }
                 let client = match self.clients.get(pubkey) {
                     // Its subscriptions are kept, and already installed.
                     Some(existing) => Client { connection, last_seen: now, ..existing.clone() },
                     None if self.clients.len() >= MAX_CLIENTS => return Err("this service has no room for more clients".into()),
+                    None if !self.new_clients.take(instant) => return Err("this service is taking no more new clients for now; try again later".into()),
                     None => Client { connection, subscriptions: Vec::new(), created_at: now, last_seen: now },
                 };
                 self.save(pubkey, client).await?;
@@ -255,6 +310,9 @@ impl Service {
                 }
                 let existing = self.clients.get(pubkey).ok_or(UNKNOWN)?;
                 let client = Client { subscriptions, last_seen: now, ..existing.clone() };
+                if self.values - existing.filter_values() + client.filter_values() > MAX_FILTER_VALUES {
+                    return Err("this service has no room for more subscriptions".into());
+                }
                 self.save(pubkey, client.clone()).await?;
                 self.install(pubkey, &client).await;
             }
@@ -277,7 +335,10 @@ impl Service {
         let (db, key, record) = (self.db.clone(), pubkey.to_string(), client.clone());
         match tokio::task::spawn_blocking(move || db.put(&key, &record)).await {
             Ok(Ok(())) => {
-                self.clients.insert(pubkey.to_string(), client);
+                self.values += client.filter_values();
+                if let Some(old) = self.clients.insert(pubkey.to_string(), client) {
+                    self.values -= old.filter_values();
+                }
                 Ok(())
             }
             Ok(Err(error)) => {
@@ -296,8 +357,9 @@ impl Service {
             return Err("could not delete; try again".into());
         }
         for pubkey in pubkeys {
-            if self.clients.remove(&pubkey).is_some() {
-                self.relay.unsubscribe(self.matches, &pubkey).await;
+            if let Some(client) = self.clients.remove(&pubkey) {
+                self.values -= client.filter_values();
+                self.relay.unsubscribe(self.conn_of(&pubkey), &pubkey).await;
             }
             self.buckets.remove(&pubkey);
         }
@@ -309,6 +371,10 @@ impl Service {
         let now = Instant::now();
         if !self.buckets.entry(pubkey.to_string()).or_insert_with(|| TokenBucket::new(PUSHES_PER_MINUTE, now)).take(now) {
             tracing::debug!(%pubkey, "a push client is over its rate");
+            return;
+        }
+        if self.hosts.admit(&host(&client.connection.endpoint), now).is_err() {
+            tracing::debug!("a push host is over its rate");
             return;
         }
         let Ok(Id { id }) = serde_json::from_str(json) else { return };
@@ -344,6 +410,22 @@ const UNKNOWN: &str = "unknown client; call create first";
 #[derive(Deserialize)]
 struct Id {
     id: String,
+}
+
+/// The host a push endpoint is on.
+fn host(endpoint: &str) -> String {
+    url::Url::parse(endpoint).ok().and_then(|url| url.host_str().map(str::to_ascii_lowercase)).unwrap_or_default()
+}
+
+/// The site a push endpoint is on: its host's last two labels, near enough
+/// to who runs it without a list of public suffixes. An address is itself.
+fn site(endpoint: &str) -> String {
+    let host = host(endpoint);
+    if host.parse::<std::net::IpAddr>().is_ok() || host.starts_with('[') {
+        return host;
+    }
+    let labels: Vec<&str> = host.trim_end_matches('.').rsplit('.').take(2).collect();
+    labels.into_iter().rev().collect::<Vec<_>>().join(".")
 }
 
 /// A decrypted request, or `None` for anything that isn't one: those go
