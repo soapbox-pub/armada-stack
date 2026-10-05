@@ -14,8 +14,12 @@
 //! - Nothing is logged per request. Each client's address is held in
 //!   memory while it's rate limited, and no longer.
 //!
-//! Uploads and mirrors are limited per client address, in number and in
-//! bytes: tokens are free to sign, so they bound nothing alone.
+//! Uploads and mirrors are limited per client address, in number, in bytes,
+//! and in how many may run at once: tokens are free to sign, so they bound
+//! nothing alone. Every byte received counts, whether or not the blob is
+//! kept. An upload has [`UPLOAD_TIMEOUT`] in all, and is dropped if its
+//! body stalls for [`UPLOAD_IDLE`]. None is taken that would leave the disk
+//! with less than `min_free_space`.
 //!
 //! Its blobs live in a store of their own, apart from the site's.
 
@@ -23,16 +27,21 @@ pub mod auth;
 mod db;
 pub mod sniff;
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use axum::body::Body;
+use bytes::Bytes;
+use futures_util::{Stream, StreamExt};
 use axum::extract::Request;
 use http::header::{self, HeaderMap, HeaderValue};
 use http::{Method, Response, StatusCode};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use tokio::sync::{Semaphore, SemaphorePermit};
 use tokio_util::sync::CancellationToken;
 
 use crate::blobs::{BlobStore, DownloadError, DownloadReason, Staged};
@@ -67,6 +76,21 @@ const MAX_MIRROR_REQUEST: usize = 16 * 1024;
 /// The most clients counted at once, by each limit.
 const MAX_RATE_LIMITED: usize = 100_000;
 
+/// How long an upload may take in all: a full-size blob at about a
+/// megabit a second.
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// How long an upload's body may go without sending anything.
+const UPLOAD_IDLE: Duration = Duration::from_secs(30);
+
+/// Uploads and mirrors running at once, in all and from one client. Each
+/// holds a temp file, a buffer, and a connection while it runs.
+const MAX_TRANSFERS: usize = 64;
+const MAX_TRANSFERS_PER_CLIENT: usize = 4;
+
+/// Deletes one client may make a minute. Each costs a signature check.
+const DELETES_PER_MINUTE: u64 = 120;
+
 type Reply = Response<Body>;
 
 #[derive(Clone)]
@@ -85,6 +109,11 @@ struct Server {
     /// send an hour. `None` for no limit.
     uploads: Option<Mutex<RateLimiter>>,
     bytes: Option<Mutex<RateLimiter>>,
+    deletes: Mutex<RateLimiter>,
+    /// Uploads and mirrors running.
+    transfers: Transfers,
+    /// Bytes to leave free on the disk.
+    min_free_space: u64,
     /// Held while a blob goes into the store and the index, and while one
     /// comes out of both, so a delete racing an upload of the same blob
     /// can't leave a record without its bytes.
@@ -110,6 +139,9 @@ impl Blossom {
                 trust_proxy,
                 uploads: limiter(config.uploads_per_minute.into(), Duration::from_secs(60)),
                 bytes: limiter(config.upload_bytes_per_hour, Duration::from_secs(60 * 60)),
+                deletes: Mutex::new(RateLimiter::new(DELETES_PER_MINUTE, Duration::from_secs(60), MAX_RATE_LIMITED)),
+                transfers: Transfers::new(MAX_TRANSFERS, MAX_TRANSFERS_PER_CLIENT),
+                min_free_space: config.min_free_space,
                 commit: Arc::new(Mutex::new(())),
                 cancel: cancel.child_token(),
             }),
@@ -186,7 +218,7 @@ impl Server {
                 };
                 match method {
                     Method::GET | Method::HEAD => self.get(sha256, &method, request.headers()).await,
-                    Method::DELETE => self.delete(sha256, request.headers()).await,
+                    Method::DELETE => self.delete(sha256, request).await,
                     _ => not_allowed("GET, HEAD, DELETE"),
                 }
             }
@@ -297,7 +329,8 @@ impl Server {
         {
             return unauthorized("Authorization has no x tag for this blob.");
         }
-        if let Some(length) = header_str(&parts.headers, header::CONTENT_LENGTH).and_then(|v| v.parse::<u64>().ok()) {
+        let length = header_str(&parts.headers, header::CONTENT_LENGTH).and_then(|v| v.parse::<u64>().ok());
+        if let Some(length) = length {
             if let Some(refusal) = self.check_size(length) {
                 return refusal;
             }
@@ -305,16 +338,30 @@ impl Server {
                 return refusal;
             }
         }
-
-        let mut sniffer = Sniffer::default();
-        let staged = match self.blobs.ingest(body.into_data_stream(), declared, self.max_blob_size, &mut sniffer).await {
-            Ok(staged) => staged,
-            Err(failure) if failure.reason == DownloadReason::Network => {
-                return error(StatusCode::BAD_REQUEST, "The upload broke off.");
-            }
-            Err(failure) => return transfer_error(&failure, self.max_blob_size),
+        if let Some(refusal) = self.check_space(length.unwrap_or(self.max_blob_size)) {
+            return refusal;
+        }
+        let Some(_transfer) = self.transfers.start(&client) else {
+            return rate_limited("Too many uploads at once; try again shortly.", 1);
         };
-        self.charge_bytes(&client, staged.size);
+
+        // What it says it'll send is held against its budget from the start,
+        // so uploads started together can't all fit in what's left of it.
+        let reserved = length.unwrap_or(0);
+        self.charge_bytes(&client, reserved);
+        let received = Arc::new(AtomicU64::new(0));
+        let mut sniffer = Sniffer::default();
+        let ingest = self.blobs.ingest(watched(body, received.clone()), declared, self.max_blob_size, &mut sniffer);
+        let result = tokio::time::timeout(UPLOAD_TIMEOUT, ingest).await;
+        self.settle_bytes(&client, reserved, received.load(Ordering::Relaxed));
+        let staged = match result {
+            Ok(Ok(staged)) => staged,
+            Ok(Err(failure)) if failure.reason == DownloadReason::Network => {
+                return error(StatusCode::BAD_REQUEST, "The upload broke off, or stalled.");
+            }
+            Ok(Err(failure)) => return transfer_error(&failure, self.max_blob_size),
+            Err(_) => return error(StatusCode::REQUEST_TIMEOUT, "The upload took too long."),
+        };
         // Without X-SHA-256 the hash is only known now.
         if !token.covers(staged.sha256) {
             return unauthorized("Authorization has no x tag for this blob.");
@@ -353,6 +400,16 @@ impl Server {
         }
 
         self.check_size(length).unwrap_or_else(|| Response::builder().status(StatusCode::OK).body(Body::empty()).expect("response"))
+    }
+
+    /// Whether a blob of `length` would leave the disk at least
+    /// `min_free_space`. If it can't be told, it's let through.
+    fn check_space(&self, length: u64) -> Option<Reply> {
+        if self.min_free_space == 0 {
+            return None;
+        }
+        let free = self.blobs.free_space()?;
+        (free < self.min_free_space.saturating_add(length)).then(|| error(StatusCode::INSUFFICIENT_STORAGE, "This server is out of space for blobs."))
     }
 
     fn check_size(&self, length: u64) -> Option<Reply> {
@@ -397,19 +454,34 @@ impl Server {
         }
 
         // Already here: nothing to fetch, but they become an owner as an
-        // upload would make them.
-        if matches!(self.db.get(sha256), Ok(Some(_))) && self.blobs.size(sha256).is_some() {
-            let pubkey = token.pubkey.clone();
-            return match self.locked(move |db, _| db.add(sha256, 0, &pubkey, now())).await {
-                Ok((record, _)) => descriptor(StatusCode::OK, sha256, record, &origin),
-                Err(error) => internal(error),
-            };
+        // upload would make them. Looked at under the commit lock, so a
+        // delete can't take the blob between the look and the record.
+        let pubkey = token.pubkey.clone();
+        let existing = self
+            .locked(move |db, blobs| match db.get(sha256)? {
+                Some(_) if blobs.size(sha256).is_some() => db.add(sha256, 0, &pubkey, now()).map(|(record, _)| Some(record)),
+                _ => Ok(None),
+            })
+            .await;
+        match existing {
+            Ok(Some(record)) => return descriptor(StatusCode::OK, sha256, record, &origin),
+            Ok(None) => {}
+            Err(error) => return internal(error),
         }
 
+        if let Some(refusal) = self.check_space(self.max_blob_size) {
+            return refusal;
+        }
+        let Some(_transfer) = self.transfers.start(&client) else {
+            return rate_limited("Too many uploads at once; try again shortly.", 1);
+        };
         let mut sniffer = Sniffer::default();
         let staged = match self.blobs.download_staged(&url, sha256, self.max_blob_size, &mut sniffer, &self.cancel).await {
             Ok(staged) => staged,
-            Err(error) => return transfer_error(&error, self.max_blob_size),
+            Err(error) => {
+                self.charge_bytes(&client, error.received);
+                return transfer_error(&error, self.max_blob_size);
+            }
         };
         self.charge_bytes(&client, staged.size);
         self.keep(staged, &token, &origin).await
@@ -437,11 +509,21 @@ impl Server {
         Some(rate_limited("Too many bytes uploaded; try again later.", retry_after))
     }
 
-    /// Spend what a blob took to receive. Only blobs that arrive whole count:
-    /// the rest were cut off early, or at `max_blob_size`, and never kept.
+    /// Spend what a blob took to receive, whether or not it was kept.
     fn charge_bytes(&self, client: &str, size: u64) {
         if let Some(bytes) = &self.bytes {
             bytes.lock().charge(client, size, Instant::now());
+        }
+    }
+
+    /// Settle what an upload `reserved` against what it turned out to send.
+    fn settle_bytes(&self, client: &str, reserved: u64, received: u64) {
+        let Some(bytes) = &self.bytes else { return };
+        let mut bytes = bytes.lock();
+        match received.cmp(&reserved) {
+            std::cmp::Ordering::Greater => bytes.charge(client, received - reserved, Instant::now()),
+            std::cmp::Ordering::Less => bytes.refund(client, reserved - received, Instant::now()),
+            std::cmp::Ordering::Equal => {}
         }
     }
 
@@ -477,7 +559,15 @@ impl Server {
 
     /// `DELETE /<sha256>` (BUD-12). Removes the requester as an owner, and
     /// the blob itself with its last owner.
-    async fn delete(&self, sha256: BlobHash, headers: &HeaderMap) -> Reply {
+    async fn delete(&self, sha256: BlobHash, request: Request) -> Reply {
+        let (parts, _) = request.into_parts();
+        let Some(client) = self.client(&parts) else {
+            return error(StatusCode::BAD_REQUEST, "Cannot determine the client's address.");
+        };
+        if let Err(retry_after) = self.deletes.lock().admit(&client, Instant::now()) {
+            return rate_limited("Too many deletes; try again later.", retry_after);
+        }
+        let headers = &parts.headers;
         let token = match authorize(headers, "delete", self.origin(headers).host.as_deref(), now()) {
             Ok(token) => token,
             Err(error) => return unauthorized(error.reason()),
@@ -507,6 +597,74 @@ impl Server {
     /// on, and the domain `server` tags must name.
     fn origin(&self, headers: &HeaderMap) -> Origin {
         request_origin(self.public_url.as_ref(), headers)
+    }
+}
+
+/// A request body that fails once it goes [`UPLOAD_IDLE`] without sending
+/// anything, counting into `received` every byte that passes.
+fn watched(body: Body, received: Arc<AtomicU64>) -> impl Stream<Item = Result<Bytes, std::io::Error>> {
+    futures_util::stream::unfold(Some(body.into_data_stream()), move |stream| {
+        let received = received.clone();
+        async move {
+            let mut stream = stream?;
+            match tokio::time::timeout(UPLOAD_IDLE, stream.next()).await {
+                Ok(Some(Ok(chunk))) => {
+                    received.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+                    Some((Ok(chunk), Some(stream)))
+                }
+                Ok(Some(Err(error))) => Some((Err(std::io::Error::other(error)), None)),
+                Ok(None) => None,
+                Err(_) => Some((Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "the upload stalled")), None)),
+            }
+        }
+    })
+}
+
+/// Uploads and mirrors running, in all and by client.
+struct Transfers {
+    total: Semaphore,
+    per_client: usize,
+    running: Mutex<HashMap<String, usize>>,
+}
+
+/// One transfer, counted until it's dropped.
+struct Transfer<'a> {
+    transfers: &'a Transfers,
+    client: String,
+    _permit: SemaphorePermit<'a>,
+}
+
+impl Transfers {
+    fn new(total: usize, per_client: usize) -> Transfers {
+        Transfers { total: Semaphore::new(total), per_client, running: Mutex::new(HashMap::new()) }
+    }
+
+    /// Count one from `client`, or `None` if there are already as many as
+    /// may be, from it or in all.
+    fn start(&self, client: &str) -> Option<Transfer<'_>> {
+        let permit = self.total.try_acquire().ok()?;
+        let mut running = self.running.lock();
+        let count = running.entry(client.to_string()).or_default();
+        if *count >= self.per_client {
+            if *count == 0 {
+                running.remove(client);
+            }
+            return None;
+        }
+        *count += 1;
+        Some(Transfer { transfers: self, client: client.to_string(), _permit: permit })
+    }
+}
+
+impl Drop for Transfer<'_> {
+    fn drop(&mut self) {
+        let mut running = self.transfers.running.lock();
+        if let Some(count) = running.get_mut(&self.client) {
+            *count -= 1;
+            if *count == 0 {
+                running.remove(&self.client);
+            }
+        }
     }
 }
 

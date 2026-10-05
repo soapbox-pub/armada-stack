@@ -117,6 +117,15 @@ impl RateLimiter {
         }
     }
 
+    /// Give back `cost` of what was charged to `key` this window: for costs
+    /// charged ahead that turned out smaller.
+    pub fn refund(&mut self, key: &str, cost: u64, now: Instant) {
+        self.expire(now);
+        if let Some(window) = self.counts.get_mut(key) {
+            window.count = window.count.saturating_sub(cost);
+        }
+    }
+
     fn expire(&mut self, now: Instant) {
         while let Some((front, resets)) = self.order.front() {
             if *resets > now {
@@ -238,6 +247,14 @@ mod tests {
         limiter.charge("a", 60, start);
         assert_eq!(limiter.check("a", 1, start + Duration::from_secs(30)), Err(30));
         assert_eq!(limiter.check("a", 100, start + Duration::from_secs(60)), Ok(()));
+
+        // A cost charged ahead, then given back in part.
+        limiter.charge("b", 100, start);
+        limiter.refund("b", 30, start);
+        assert_eq!(limiter.check("b", 30, start), Ok(()));
+        assert!(limiter.check("b", 31, start).is_err());
+        limiter.refund("b", 1000, start);
+        assert_eq!(limiter.check("b", 100, start), Ok(()));
     }
 
     #[test]

@@ -486,3 +486,81 @@ async fn blob_urls_name_a_public_host_over_https() {
         assert_eq!(descriptor.url, format!("{base}/{sha}.bin"));
     }
 }
+
+/// Bytes received count against the hour's budget whether or not the blob
+/// is kept: refusing a blob at its last byte mustn't make it free.
+#[tokio::test]
+async fn charges_uploads_that_fail() {
+    let harness = Harness::with(BlossomConfig { max_blob_size: 10_000, upload_bytes_per_hour: 10_000, ..BlossomConfig::default() });
+    for n in [40, 41] {
+        let blob = ciphertext(n, 4500);
+        // A hash it doesn't have.
+        let wrong = sha_of(&ciphertext(n + 100, 10));
+        let request = Request::put("/upload").header("authorization", auth(ALICE, "upload", &[&wrong])).header("x-sha-256", &wrong).body(Body::from(blob)).unwrap();
+        assert_eq!(harness.send(request).await.0, StatusCode::CONFLICT);
+    }
+    let blob = ciphertext(42, 4500);
+    let mut request = upload_request(ALICE, &blob);
+    request.headers_mut().insert("content-length", http::HeaderValue::from_static("4500"));
+    let (status, headers, _) = harness.send(request).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(reason(&headers), "Too many bytes uploaded; try again later.");
+}
+
+/// A declared length is held against the budget while the upload runs,
+/// and what it didn't send is given back.
+#[tokio::test]
+async fn reserves_declared_lengths() {
+    let harness = Harness::with(BlossomConfig { max_blob_size: 10_000, upload_bytes_per_hour: 10_000, ..BlossomConfig::default() });
+    // Says 9,000, sends 3,000, and breaks off.
+    let sha = sha_of(&ciphertext(50, 9000));
+    let stream = futures_util::stream::iter([Ok(bytes::Bytes::from(ciphertext(50, 3000))), Err(std::io::Error::other("gone"))]);
+    let request = Request::put("/upload")
+        .header("authorization", auth(ALICE, "upload", &[&sha]))
+        .header("x-sha-256", &sha)
+        .header("content-length", "9000")
+        .body(Body::from_stream(stream))
+        .unwrap();
+    assert_eq!(harness.send(request).await.0, StatusCode::BAD_REQUEST);
+    // The 3,000 it sent count; the 6,000 it didn't don't.
+    let mut fits = upload_request(ALICE, &ciphertext(51, 7000));
+    fits.headers_mut().insert("content-length", http::HeaderValue::from_static("7000"));
+    assert_eq!(harness.send(fits).await.0, StatusCode::CREATED);
+    let mut over = upload_request(ALICE, &ciphertext(52, 1000));
+    over.headers_mut().insert("content-length", http::HeaderValue::from_static("1000"));
+    assert_eq!(harness.send(over).await.0, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn leaves_the_disk_room() {
+    let harness = Harness::with(BlossomConfig { max_blob_size: MAX, min_free_space: u64::MAX / 2, ..BlossomConfig::default() });
+    let (status, headers, _) = harness.upload(ALICE, &ciphertext(60, 5000)).await;
+    assert_eq!(status, StatusCode::INSUFFICIENT_STORAGE);
+    assert_eq!(reason(&headers), "This server is out of space for blobs.");
+    let harness = Harness::with(BlossomConfig { max_blob_size: MAX, min_free_space: 0, ..BlossomConfig::default() });
+    assert_eq!(harness.upload(ALICE, &ciphertext(60, 5000)).await.0, StatusCode::CREATED);
+}
+
+#[test]
+fn caps_transfers_running_at_once() {
+    let transfers = Transfers::new(3, 2);
+    let a = transfers.start("a").unwrap();
+    let _b = transfers.start("a").unwrap();
+    assert!(transfers.start("a").is_none());
+    let _c = transfers.start("c").unwrap();
+    // In all, too.
+    assert!(transfers.start("d").is_none());
+    drop(a);
+    assert!(transfers.start("a").is_some());
+    assert_eq!(transfers.running.lock().len(), 2);
+}
+
+#[tokio::test]
+async fn rate_limits_deletes() {
+    let harness = Harness::new();
+    let sha = "ab".repeat(32);
+    for _ in 0..DELETES_PER_MINUTE {
+        assert_eq!(harness.delete(ALICE, &sha).await, StatusCode::NOT_FOUND);
+    }
+    assert_eq!(harness.delete(ALICE, &sha).await, StatusCode::TOO_MANY_REQUESTS);
+}

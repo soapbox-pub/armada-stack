@@ -193,6 +193,10 @@ pub struct BlossomConfig {
     /// Bytes one client may upload or mirror an hour, by IPv4 address or
     /// IPv6 /64: at least `max_blob_size`, or 0 for no limit.
     pub upload_bytes_per_hour: u64,
+    /// Bytes to leave free on the disk blobs are kept on: uploads and
+    /// mirrors that would leave less are refused, so the relay and the web
+    /// app, which share it, keep room to write. 0 for no floor.
+    pub min_free_space: u64,
 }
 
 /// A blind Concord AV broker (CORD-07 §2), handing out seats on LiveKit
@@ -305,7 +309,7 @@ impl Default for RelayConfig {
 
 impl Default for BlossomConfig {
     fn default() -> Self {
-        BlossomConfig { max_blob_size: 100 << 20, uploads_per_minute: 60, upload_bytes_per_hour: 1 << 30 }
+        BlossomConfig { max_blob_size: 100 << 20, uploads_per_minute: 60, upload_bytes_per_hour: 1 << 30, min_free_space: 1 << 30 }
     }
 }
 

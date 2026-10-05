@@ -172,6 +172,9 @@ pub struct DownloadError {
     pub message: String,
     pub reason: DownloadReason,
     pub status: Option<u16>,
+    /// Bytes of the blob received before it failed: what it cost, though
+    /// nothing was kept.
+    pub received: u64,
 }
 
 impl std::fmt::Display for DownloadError {
@@ -183,7 +186,14 @@ impl std::fmt::Display for DownloadError {
 impl std::error::Error for DownloadError {}
 
 fn fail(message: impl Into<String>, reason: DownloadReason, status: Option<u16>) -> DownloadError {
-    DownloadError { message: message.into(), reason, status }
+    DownloadError { message: message.into(), reason, status, received: 0 }
+}
+
+impl DownloadError {
+    fn after(mut self, received: u64) -> DownloadError {
+        self.received = received;
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -429,30 +439,32 @@ impl BlobStore {
     ) -> Result<Staged, DownloadError> {
         let storage = |e: std::io::Error| fail(e.to_string(), DownloadReason::Storage, None);
         let tmp = self.temp_file().map_err(|e| fail(e.to_string(), DownloadReason::Storage, None))?;
-        let mut file = tokio::io::BufWriter::with_capacity(256 * 1024, tokio::fs::File::create(&tmp).await.map_err(storage)?);
+        // Smaller than a deploy's own buffers might be: a client can hold
+        // an upload open, and this, for as long as it's let.
+        let mut file = tokio::io::BufWriter::with_capacity(64 * 1024, tokio::fs::File::create(&tmp).await.map_err(storage)?);
         let mut hash = Sha256::new();
         let mut size: u64 = 0;
 
         let mut body = std::pin::pin!(body);
         while let Some(chunk) = body.next().await {
-            let chunk = chunk.map_err(|e| fail(error_chain(&e), DownloadReason::Network, None))?;
+            let chunk = chunk.map_err(|e| fail(error_chain(&e), DownloadReason::Network, None).after(size))?;
             size += chunk.len() as u64;
             // Senders may omit content-length, so enforce the cap mid-stream too.
             if size > max_size {
-                return Err(fail(format!("Body exceeds the {max_size} byte limit"), DownloadReason::TooLarge, None));
+                return Err(fail(format!("Body exceeds the {max_size} byte limit"), DownloadReason::TooLarge, None).after(size));
             }
-            inspector.chunk(&chunk).map_err(|reason| fail(reason, DownloadReason::Rejected, None))?;
+            inspector.chunk(&chunk).map_err(|reason| fail(reason, DownloadReason::Rejected, None).after(size))?;
             hash.update(&chunk);
             file.write_all(&chunk).await.map_err(storage)?;
         }
         file.flush().await.map_err(storage)?;
-        inspector.finish().map_err(|reason| fail(reason, DownloadReason::Rejected, None))?;
+        inspector.finish().map_err(|reason| fail(reason, DownloadReason::Rejected, None).after(size))?;
 
         let digest = BlobHash::from_bytes(hash.finalize().into());
         if let Some(expected) = expected
             && digest != expected
         {
-            return Err(fail(format!("Expected {expected}, got {digest}"), DownloadReason::HashMismatch, None));
+            return Err(fail(format!("Expected {expected}, got {digest}"), DownloadReason::HashMismatch, None).after(size));
         }
         Ok(Staged { store: self.clone(), tmp, sha256: digest, size })
     }
@@ -565,6 +577,22 @@ impl BlobStore {
             DownloadReason::Blocked,
             None,
         ))
+    }
+
+    /// Bytes free to an unprivileged user on the filesystem the store is
+    /// on, or `None` if that can't be told.
+    pub fn free_space(&self) -> Option<u64> {
+        use std::os::unix::ffi::OsStrExt;
+        // The store's directory is made with its first blob.
+        let dir = self.inner.dir.ancestors().find(|dir| dir.exists())?;
+        let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+        // SAFETY: statvfs is plain data, filled in by the call.
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        // SAFETY: a NUL-terminated path and a statvfs to write to.
+        if unsafe { libc::statvfs(path.as_ptr(), &mut stat) } != 0 {
+            return None;
+        }
+        Some((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
     }
 
     /// Delete any temp files left behind by an interrupted download.
@@ -732,6 +760,14 @@ mod tests {
         store.ensure_variants(sha).unwrap();
         let variants = store.variants(sha).unwrap();
         assert!(variants.br.is_none_or(|br| (br as f64) <= 4096.0 * 0.95));
+    }
+
+    #[test]
+    fn tells_free_space() {
+        let dir = tempfile::tempdir().unwrap();
+        // Before its directory exists, by the nearest one that does.
+        let store = BlobStore::new(&dir.path().join("not/yet"));
+        assert!(store.free_space().is_some_and(|free| free > 0));
     }
 
     #[tokio::test]

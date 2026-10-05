@@ -84,6 +84,9 @@ max_blob_size = 104857600
 uploads_per_minute = 60
 # At least max_blob_size.
 upload_bytes_per_hour = 1073741824
+# Bytes to leave free on the disk: uploads that would leave less are
+# refused, so the relay and web app keep room to write. 0 for no floor.
+min_free_space = 1073741824
 
 # A Web Push service for the web app, speaking nostr-push2's protocol. It
 # pushes events stored on this relay: NIP-17 DMs to users whose DM relay this
