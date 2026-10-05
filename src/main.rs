@@ -107,6 +107,7 @@ async fn main() -> Result<()> {
     }
     let web = web::Web::open(&config.web, client_env, &storage, nostr).await?;
     let blossom = blossom::Blossom::open(&config.blossom, config.public_url()?, config.trusts_proxy(), &storage, &cancel)?;
+    blossom.start();
     let relay = relay::Relay::open(&config.relay, config.public_url()?, config.trusts_proxy(), &storage, &cancel)?;
     if let Some(push) = push {
         let relay_url = config.public_url()?.and_then(|url| origin::public_origin(Some(&url), &http::HeaderMap::new())).map(|origin| origin.websocket());

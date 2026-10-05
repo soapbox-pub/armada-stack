@@ -8,9 +8,10 @@
 //!   [`sniff`]). Whatever type a client declares is ignored.
 //! - Blobs are only ever served as `application/octet-stream`, as an
 //!   attachment, sandboxed, whatever extension the URL asks for.
-//! - The server keeps a blob's size, the day it arrived, and who uploaded it
-//!   (which deleting needs) — never its declared type, the name a token
-//!   mentions, or anything about the request. There is no `/list`.
+//! - The server keeps a blob's size, the day it arrived, who uploaded it
+//!   (which deleting needs), and the day each uploader's claim expires, if
+//!   it does — never its declared type, the name a token mentions, or
+//!   anything about the request. There is no `/list`.
 //! - Nothing is logged per request. Each client's address is held in
 //!   memory while it's rate limited, and no longer.
 //!
@@ -20,6 +21,14 @@
 //! kept. An upload has [`UPLOAD_TIMEOUT`] in all, and is dropped if its
 //! body stalls for [`UPLOAD_IDLE`]. None is taken that would leave the disk
 //! with less than `min_free_space`.
+//!
+//! An uploader may ask for a blob to expire, with `X-Expiration: <unix
+//! time>` on an upload or mirror (blossom#115): an attachment to a
+//! disappearing message needn't outlive it. It's rounded up to the end of
+//! its day, so the server learns no more of when the message was sent than
+//! it does of when the blob arrived. A blob goes once every uploader's claim
+//! on it has expired, never while any keeps it for good, and says when with
+//! `Sunset` (BUD-01).
 //!
 //! Its blobs live in a store of their own, apart from the site's.
 
@@ -50,10 +59,10 @@ use crate::hash::BlobHash;
 use crate::origin::{Origin, request_origin};
 use crate::ratelimit::{self, RateLimiter};
 use crate::storage::Storage;
-use crate::util::now;
+use crate::util::{http_date, now};
 use crate::web::serve::{Range, matches_etag, parse_range};
 use auth::{Token, authorize};
-use db::{BlossomDb, Record, Removal};
+use db::{BlossomDb, DAY, Record, Removal};
 use sniff::Sniffer;
 
 /// The only type a blob is ever served or described as.
@@ -90,6 +99,16 @@ const MAX_TRANSFERS_PER_CLIENT: usize = 4;
 
 /// Deletes one client may make a minute. Each costs a signature check.
 const DELETES_PER_MINUTE: u64 = 120;
+
+/// The latest expiration taken: the start of the last day an HTTP date,
+/// as `Sunset` gives it, can name.
+const MAX_EXPIRATION: i64 = 253_402_214_400;
+
+/// How often blobs past their expiration are deleted, and how many claims
+/// one step of that takes on, holding the commit lock. Until they're
+/// deleted they're already not served.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const SWEEP_BATCH: usize = 1000;
 
 type Reply = Response<Body>;
 
@@ -157,6 +176,25 @@ impl Blossom {
     pub async fn handle(&self, request: Request) -> Reply {
         self.server.handle(request).await
     }
+
+    /// Delete blobs once they expire, until shutdown.
+    pub fn start(&self) {
+        let server = self.server.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(SWEEP_INTERVAL);
+            loop {
+                tokio::select! {
+                    _ = server.cancel.cancelled() => break,
+                    _ = interval.tick() => {}
+                }
+                match server.sweep().await {
+                    Ok(0) => {}
+                    Ok(gone) => tracing::info!(gone, "blossom: deleted expired blobs"),
+                    Err(error) => tracing::error!(%error, "blossom: deleting expired blobs failed"),
+                }
+            }
+        });
+    }
 }
 
 /// Whether a path is one of the Blossom server's endpoints, whatever the
@@ -175,6 +213,9 @@ struct Descriptor {
     #[serde(rename = "type")]
     kind: String,
     uploaded: i64,
+    /// When it's due to go, if it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expiration: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -229,19 +270,23 @@ impl Server {
     /// never anything else that happens to be on disk.
     async fn get(&self, sha256: BlobHash, method: &Method, request: &HeaderMap) -> Reply {
         let record = match self.db.get(sha256) {
-            Ok(Some(record)) => record,
-            Ok(None) => return error(StatusCode::NOT_FOUND, "Blob not found."),
+            // Past its expiration it's gone, whether or not it's been swept.
+            Ok(Some(record)) if !record.expired(now()) => record,
+            Ok(_) => return error(StatusCode::NOT_FOUND, "Blob not found."),
             Err(error) => return internal(error),
         };
 
         let etag = format!("\"{sha256}\"");
-        let builder = Response::builder()
+        let mut builder = Response::builder()
             .header(header::CONTENT_TYPE, BINARY)
             .header(header::CONTENT_DISPOSITION, "attachment")
             .header(header::CONTENT_SECURITY_POLICY, BLOB_CSP)
             .header(header::CACHE_CONTROL, CACHE_CONTROL)
             .header(header::ETAG, &etag)
             .header(header::ACCEPT_RANGES, "bytes");
+        if let Some(expires) = record.expires {
+            builder = builder.header("sunset", http_date(expires));
+        }
 
         if matches_etag(header_str(request, header::IF_NONE_MATCH), &etag) {
             return builder.status(StatusCode::NOT_MODIFIED).body(Body::empty()).expect("response");
@@ -329,6 +374,10 @@ impl Server {
         {
             return unauthorized("Authorization has no x tag for this blob.");
         }
+        let expires = match expiration(&parts.headers, now()) {
+            Ok(expires) => expires,
+            Err(reason) => return error(StatusCode::BAD_REQUEST, reason),
+        };
         let length = header_str(&parts.headers, header::CONTENT_LENGTH).and_then(|v| v.parse::<u64>().ok());
         if let Some(length) = length {
             if let Some(refusal) = self.check_size(length) {
@@ -366,7 +415,7 @@ impl Server {
         if !token.covers(staged.sha256) {
             return unauthorized("Authorization has no x tag for this blob.");
         }
-        self.keep(staged, &token, &origin).await
+        self.keep(staged, &token, expires, &origin).await
     }
 
     /// `HEAD /upload` (BUD-06): whether an upload would be accepted, from its
@@ -439,6 +488,10 @@ impl Server {
             Ok(token) => token,
             Err(error) => return unauthorized(error.reason()),
         };
+        let expires = match expiration(&parts.headers, now()) {
+            Ok(expires) => expires,
+            Err(reason) => return error(StatusCode::BAD_REQUEST, reason),
+        };
 
         let Ok(body) = axum::body::to_bytes(body, MAX_MIRROR_REQUEST).await else {
             return error(StatusCode::BAD_REQUEST, "The request body is too large.");
@@ -459,7 +512,7 @@ impl Server {
         let pubkey = token.pubkey.clone();
         let existing = self
             .locked(move |db, blobs| match db.get(sha256)? {
-                Some(_) if blobs.size(sha256).is_some() => db.add(sha256, 0, &pubkey, now()).map(|(record, _)| Some(record)),
+                Some(_) if blobs.size(sha256).is_some() => db.add(sha256, 0, &pubkey, expires, now()).map(|(record, _)| Some(record)),
                 _ => Ok(None),
             })
             .await;
@@ -484,7 +537,7 @@ impl Server {
             }
         };
         self.charge_bytes(&client, staged.size);
-        self.keep(staged, &token, &origin).await
+        self.keep(staged, &token, expires, &origin).await
     }
 
     /// The key a request's client is limited under.
@@ -527,15 +580,16 @@ impl Server {
         }
     }
 
-    /// Commit a staged blob, record its uploader, and describe it.
-    async fn keep(&self, staged: Staged, token: &Token, origin: &Origin) -> Reply {
+    /// Commit a staged blob, record its uploader's claim on it until
+    /// `expires`, and describe it.
+    async fn keep(&self, staged: Staged, token: &Token, expires: Option<i64>, origin: &Origin) -> Reply {
         let sha256 = staged.sha256;
         let pubkey = token.pubkey.clone();
         let result = self
             .locked(move |db, _| {
                 let size = staged.size;
                 staged.commit()?;
-                db.add(sha256, size, &pubkey, now())
+                db.add(sha256, size, &pubkey, expires, now())
             })
             .await;
         match result {
@@ -590,6 +644,30 @@ impl Server {
             Ok(Removal::NotOwner) => error(StatusCode::NOT_FOUND, "No blob of yours to delete."),
             Ok(_) => Response::builder().status(StatusCode::NO_CONTENT).body(Body::empty()).expect("response"),
             Err(error) => internal(error),
+        }
+    }
+
+    /// Delete what's expired, a step at a time, so uploads and deletes
+    /// waiting on the commit lock get their turn. Returns how many blobs went.
+    async fn sweep(&self) -> Result<usize> {
+        let mut total = 0;
+        loop {
+            let now = now();
+            let (gone, more) = self
+                .locked(move |db, blobs| {
+                    let (gone, more) = db.sweep(now, SWEEP_BATCH)?;
+                    for &sha256 in &gone {
+                        if let Err(error) = blobs.remove(sha256) {
+                            tracing::error!(%error, "blossom: an expired blob's bytes couldn't be deleted");
+                        }
+                    }
+                    Ok((gone.len(), more))
+                })
+                .await?;
+            total += gone;
+            if !more || self.cancel.is_cancelled() {
+                return Ok(total);
+            }
         }
     }
 
@@ -668,6 +746,22 @@ impl Drop for Transfer<'_> {
     }
 }
 
+/// When an upload's uploader asks for its claim to expire, from
+/// `X-Expiration`, rounded up to the end of its day: `None` for never.
+fn expiration(headers: &HeaderMap, now: i64) -> Result<Option<i64>, &'static str> {
+    let Some(value) = header_str(headers, "x-expiration") else { return Ok(None) };
+    let Ok(at) = value.trim().parse::<i64>() else {
+        return Err("X-Expiration is not a unix time.");
+    };
+    if at <= now {
+        return Err("X-Expiration is in the past.");
+    }
+    if at > MAX_EXPIRATION {
+        return Err("X-Expiration is too far off.");
+    }
+    Ok(Some(at + (DAY - at.rem_euclid(DAY)) % DAY))
+}
+
 /// The blob a request path names: `/<sha256>`, with any extension.
 fn blob_path(path: &str) -> Option<BlobHash> {
     path.strip_prefix('/').filter(|name| !name.contains('/')).and_then(blob_name)
@@ -696,6 +790,7 @@ fn descriptor(status: StatusCode, sha256: BlobHash, record: Record, origin: &Ori
         size: record.size,
         kind: BINARY.into(),
         uploaded: record.uploaded,
+        expiration: record.expires,
     };
     Response::builder()
         .status(status)

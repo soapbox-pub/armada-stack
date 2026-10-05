@@ -564,3 +564,96 @@ async fn rate_limits_deletes() {
     }
     assert_eq!(harness.delete(ALICE, &sha).await, StatusCode::TOO_MANY_REQUESTS);
 }
+
+fn expiring_upload(secret: &str, bytes: &[u8], expiration: &str) -> Request<Body> {
+    let mut request = upload_request(secret, bytes);
+    request.headers_mut().insert("x-expiration", expiration.parse().unwrap());
+    request
+}
+
+#[tokio::test]
+async fn expires_blobs_when_asked() {
+    let harness = Harness::new();
+    let blob = ciphertext(70, 4000);
+    let sha = sha_of(&blob);
+    let path = harness.storage.root().join(format!("blossom/blobs/{}/{}/{sha}", &sha[..2], &sha[2..4]));
+    let soon = now() + 3600;
+    let end_of_day = soon + (DAY - soon.rem_euclid(DAY)) % DAY;
+
+    // Rounded up to the end of its day, and said back.
+    let (status, headers, body) = harness.send(expiring_upload(ALICE, &blob, &soon.to_string())).await;
+    assert_eq!(status, StatusCode::CREATED, "{}", reason(&headers));
+    let descriptor: Descriptor = serde_json::from_slice(&body).unwrap();
+    assert_eq!(descriptor.expiration, Some(end_of_day));
+    let (_, headers, _) = harness.get(&format!("/{sha}")).await;
+    assert_eq!(headers["sunset"], http_date(end_of_day));
+    let (_, headers, _) = harness.send(Request::head(format!("/{sha}")).body(Body::empty()).unwrap()).await;
+    assert_eq!(headers["sunset"], http_date(end_of_day));
+
+    // Bob keeps it for good, so it has no end.
+    let (status, _, body) = harness.upload(BOB, &blob).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!String::from_utf8(body).unwrap().contains("expiration"));
+    assert!(!harness.get(&format!("/{sha}")).await.1.contains_key("sunset"));
+    // Until he deletes it.
+    assert_eq!(harness.delete(BOB, &sha).await, StatusCode::NO_CONTENT);
+    assert_eq!(harness.get(&format!("/{sha}")).await.1["sunset"], http_date(end_of_day));
+
+    // Once it's past, it's not served, and the sweep deletes it.
+    let db = &harness.blossom.server.db;
+    let other = ciphertext(71, 4000);
+    let other_sha = BlobHash::of(&other);
+    assert_eq!(harness.upload(ALICE, &other).await.0, StatusCode::CREATED);
+    // As if Alice's claim had run out.
+    let alice = crate::nostr::event::public_key(ALICE);
+    db.remove_owner(BlobHash::parse(&sha).unwrap(), &alice).unwrap();
+    db.add(BlobHash::parse(&sha).unwrap(), 4000, &alice, Some(now() - 1), now()).unwrap();
+    assert_eq!(harness.get(&format!("/{sha}")).await.0, StatusCode::NOT_FOUND);
+    assert!(path.exists());
+    assert_eq!(harness.blossom.server.sweep().await.unwrap(), 1);
+    assert!(!path.exists());
+    assert_eq!(harness.get(&format!("/{sha}")).await.0, StatusCode::NOT_FOUND);
+    // What hasn't expired stays.
+    assert_eq!(harness.get(&format!("/{other_sha}")).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn refuses_bad_expirations() {
+    let harness = Harness::new();
+    let blob = ciphertext(72, 4000);
+    for (value, why) in [
+        ("tomorrow", "X-Expiration is not a unix time."),
+        (&(now() - 10).to_string(), "X-Expiration is in the past."),
+        ("999999999999", "X-Expiration is too far off."),
+    ] {
+        let (status, headers, _) = harness.send(expiring_upload(ALICE, &blob, value)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(reason(&headers), why);
+    }
+    assert_eq!(harness.get(&format!("/{}", sha_of(&blob))).await.0, StatusCode::NOT_FOUND);
+    // The last day there is will do.
+    assert_eq!(harness.send(expiring_upload(ALICE, &blob, &MAX_EXPIRATION.to_string())).await.0, StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn mirrors_expire_too() {
+    let harness = Harness::new();
+    let blob = ciphertext(73, 6000);
+    let sha = sha_of(&blob);
+    let elsewhere = origin(vec![blob.clone()]).await;
+    let mirror = |secret: &str, expiration: i64| {
+        Request::put("/mirror")
+            .header("authorization", auth(secret, "upload", &[&sha]))
+            .header("x-expiration", expiration.to_string())
+            .body(Body::from(serde_json::json!({ "url": format!("{elsewhere}/{sha}") }).to_string()))
+            .unwrap()
+    };
+    let (status, headers, body) = harness.send(mirror(ALICE, now() + DAY)).await;
+    assert_eq!(status, StatusCode::CREATED, "{}", reason(&headers));
+    let first: Descriptor = serde_json::from_slice(&body).unwrap();
+    // Already here: Bob's later claim extends it.
+    let (status, _, body) = harness.send(mirror(BOB, now() + 3 * DAY)).await;
+    assert_eq!(status, StatusCode::OK);
+    let second: Descriptor = serde_json::from_slice(&body).unwrap();
+    assert_eq!(second.expiration, first.expiration.map(|at| at + 2 * DAY));
+}

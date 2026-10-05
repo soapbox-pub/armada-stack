@@ -8,6 +8,14 @@ A release's notes are its section here, so tag `vX.Y.Z` only once
 - The relay's NIP-11 document has an `icon` and a `banner`: Armada's logo
   and social card, built into the binary and served at
   `/_armada/icon.png` and `/_armada/banner.png`, whatever site is live.
+- Blossom uploads and mirrors may ask to expire, with `X-Expiration: <unix
+  time>` (blossom#115), as Armada does for attachments to disappearing
+  messages. It's rounded up to the end of its day. A blob goes once every
+  uploader's claim on it has expired, never while anyone keeps it for good,
+  so an avatar can't vanish because the same bytes were attached to a
+  disappearing message. Its expiration is in the descriptor and in a
+  `Sunset` header, it's not served past it, and an hourly sweep deletes it.
+  Blobs uploaded before, and uploads without the header, are kept as ever.
 - A built-in Web Push service, `[push]`, on by default. It speaks
   nostr-push2's protocol (kind 25742), so the web app needs no changes:
   `window.ENV` points `NOSTR_PUSH2_PUBKEY` and `NOSTR_PUSH2_RELAYS` at it.
