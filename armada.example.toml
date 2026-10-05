@@ -36,20 +36,24 @@ max_site_size = 1073741824
 keep_versions = 60
 
 # What the web app is told through window.ENV, at /_armada/env.js, by the
-# names Armada reads. Unset, armada's own relay (also a home for new
-# communities), Blossom server (preferred for uploads) and AV broker join
-# Armada's public ones, once public_url or a public Host says where armada is
-# reached. A name set here replaces that. "" turns off CONCORD_AV_SERVERS,
-# BROADCAST_RELAYS and PREFERRED_BLOSSOM_SERVER, but brings back Armada's own
-# default for APP_RELAYS, COMMUNITY_RELAYS, APP_BLOSSOM_SERVERS and
-# SEARCH_RELAYS. To lean on this armada's services alone:
+# names Armada reads. Unset, armada's own relay and Blossom server (preferred
+# for uploads) join Armada's public ones as RELAYS and BLOSSOM_SERVERS, and
+# its AV broker joins Armada's, once public_url or a public Host says where
+# armada is reached. A name set here replaces that; "" brings back Armada's
+# own default, except for CONCORD_AV_SERVERS, which "" turns off.
+#
+# RELAYS is every relay the app uses by default: account data, search, new
+# communities, and the backups of each user's community and invite lists.
+# Naming relays also stops the app's helper relays (a broadcast relay, NIP-65
+# indexes at login, a git index). To lean on this armada's services alone:
 # [web.env]
-# APP_RELAYS = "wss://armada.example.com"
-# COMMUNITY_RELAYS = "wss://armada.example.com"
+# RELAYS = "wss://armada.example.com"
 # CONCORD_AV_SERVERS = "https://armada.example.com"
 # Keep a public Blossom server besides this one, which takes only encrypted
 # blobs: avatars, banners and emoji are uploaded in the clear.
-# APP_BLOSSOM_SERVERS = "https://armada.example.com/,https://blossom.ditto.pub/"
+# BLOSSOM_SERVERS = "https://armada.example.com/,https://blossom.ditto.pub/"
+# With RELAYS on this relay alone, losing this server loses every user's list
+# of communities, and search finds nothing: this relay has no NIP-50 search.
 
 # A Nostr relay for the kinds Armada uses, within these limits.
 [relay]

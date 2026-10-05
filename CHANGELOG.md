@@ -3,6 +3,17 @@
 A release's notes are its section here, so tag `vX.Y.Z` only once
 `## X.Y.Z` exists: publishing fails without it.
 
+## Unreleased
+
+- `window.ENV` names the web app's relays and Blossom servers the way
+  Armada now reads them: `RELAYS` and `BLOSSOM_SERVERS`, armada's own first,
+  in place of `APP_RELAYS`, `COMMUNITY_RELAYS`, `APP_BLOSSOM_SERVERS` and
+  `PREFERRED_BLOSSOM_SERVER`. `RELAYS` is every relay the app uses by
+  default, the backups of each user's community and invite lists included,
+  so setting it in `[web.env]` to this relay alone keeps the app off every
+  other relay. Armada's versions from before the change don't read it.
+  **A `[web.env]` that sets the old names does nothing now; rename them.**
+
 ## 0.3.1
 
 - install.sh sets up a new server again. It enabled the systemd unit before

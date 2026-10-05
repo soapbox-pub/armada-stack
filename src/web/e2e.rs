@@ -243,8 +243,8 @@ async fn pages_name_the_onion() {
     // The onion's own pages point the app at the onion.
     let (_, _, body) = web.get("/_armada/env.js", &[("host", onion)]).await;
     let body = String::from_utf8(body).unwrap();
-    assert!(body.contains(&format!(r#""APP_RELAYS":"ws://{onion},"#)), "{body}");
-    assert!(body.contains(&format!(r#""PREFERRED_BLOSSOM_SERVER":"http://{onion}/""#)), "{body}");
+    assert!(body.contains(&format!(r#""RELAYS":"ws://{onion},"#)), "{body}");
+    assert!(body.contains(&format!(r#""BLOSSOM_SERVERS":"http://{onion}/,"#)), "{body}");
     web.stop().await;
 }
 

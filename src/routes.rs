@@ -195,7 +195,7 @@ mod tests {
         assert_eq!(headers["cache-control"], "private, no-cache");
         assert_eq!(headers["vary"], "Host");
         assert!(body.starts_with("self.ENV = {"), "{body}");
-        assert!(body.contains(r#""APP_RELAYS":"wss://armada.example.com,"#), "{body}");
+        assert!(body.contains(r#""RELAYS":"wss://armada.example.com,"#), "{body}");
 
         let etag = headers["etag"].to_str().unwrap().to_string();
         let (status, _, body) = harness.send(Method::GET, "/_armada/env.js", &[("host", "armada.example.com"), ("if-none-match", &etag)]).await;

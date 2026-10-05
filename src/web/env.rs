@@ -10,8 +10,8 @@
 //!
 //! Unconfigured, it adds armada's own services to Armada's public ones, so
 //! a new user gets both. `[web.env]` replaces any of them by name — say
-//! `APP_RELAYS = "wss://armada.example.com"` for this relay alone — and
-//! sets anything else Armada reads.
+//! `RELAYS = "wss://armada.example.com"` for this relay alone — and sets
+//! anything else Armada reads.
 //!
 //! These are defaults for a new install, not settings: once a user's synced
 //! settings arrive, their lists win, and what this armada seeded travels to
@@ -29,16 +29,18 @@ use crate::origin::{Names, Origin, public_origin};
 /// Where the script is served. Out of the way of any path a site would use.
 pub const ENV_PATH: &str = "/_armada/env.js";
 
-/// Armada's own defaults for the lists armada adds to, from `APP_RELAYS` in
-/// its `src/lib/platform.ts` and `APP_BLOSSOM_SERVERS` in `src/lib/blossom.ts`.
-/// Setting a name replaces Armada's default rather than adding to it, so
-/// they're restated here to keep using them.
+/// Armada's own defaults for the lists armada adds to, from `src/lib/platform.ts`
+/// and `src/lib/blossom.ts`. Setting a name replaces Armada's default rather
+/// than adding to it, so they're restated here to keep using them.
+///
+/// `RELAYS` is every relay default at once, the backups of a user's
+/// community and invite lists included, so these two public ones keep a copy
+/// of those off this server. Naming relays also turns off Armada's helper
+/// relays (a broadcast relay, NIP-65 indexes and a git index).
 const ARMADA_RELAYS: &[&str] = &["wss://relay.ditto.pub", "wss://relay.dreamith.to"];
+/// The first of `BLOSSOM_SERVERS` is preferred for uploads, so armada's own
+/// goes first.
 const ARMADA_BLOSSOM_SERVERS: &[&str] = &["https://blossom.ditto.pub/", "https://blossom.dreamith.to/", "https://blossom.primal.net/"];
-/// `COMMUNITY_RELAYS`' default, the CORD stock set in Armada's
-/// `src/concord/lib/stockRelays.ts`. A community has at most five relays, so
-/// this one and these four fill it.
-const ARMADA_COMMUNITY_RELAYS: &[&str] = &["wss://jskitty.com/nostr", "wss://asia.vectorapp.io/nostr", "wss://relay.ditto.pub", "wss://relay.dreamith.to"];
 /// `CONCORD_AV_SERVERS`' default, in `src/lib/platform.ts`.
 const ARMADA_AV_SERVERS: &[&str] = &["https://armada.buzz"];
 
@@ -84,12 +86,9 @@ impl ClientEnv {
 
     fn own(&self, origin: &Origin) -> BTreeMap<String, String> {
         let join = |own: String, rest: &[&str]| std::iter::once(own.as_str()).chain(rest.iter().copied()).collect::<Vec<_>>().join(",");
-        let blossom = format!("{}/", origin.base);
         let mut values = BTreeMap::from([
-            ("APP_RELAYS".to_string(), join(origin.websocket(), ARMADA_RELAYS)),
-            ("COMMUNITY_RELAYS".to_string(), join(origin.websocket(), ARMADA_COMMUNITY_RELAYS)),
-            ("APP_BLOSSOM_SERVERS".to_string(), join(blossom.clone(), ARMADA_BLOSSOM_SERVERS)),
-            ("PREFERRED_BLOSSOM_SERVER".to_string(), blossom),
+            ("RELAYS".to_string(), join(origin.websocket(), ARMADA_RELAYS)),
+            ("BLOSSOM_SERVERS".to_string(), join(format!("{}/", origin.base), ARMADA_BLOSSOM_SERVERS)),
             // This armada, not armada.buzz, on purpose: see the module docs.
             ("PUBLIC_WEB_ORIGIN".to_string(), origin.base.clone()),
         ]);
@@ -142,13 +141,8 @@ mod tests {
     fn adds_its_own_services_for_a_public_host() {
         let env = ClientEnv::new(&Config::default()).unwrap();
         let values = env.values(&host("armada.example.com"));
-        assert_eq!(values["APP_RELAYS"], "wss://armada.example.com,wss://relay.ditto.pub,wss://relay.dreamith.to");
-        assert_eq!(
-            values["COMMUNITY_RELAYS"],
-            "wss://armada.example.com,wss://jskitty.com/nostr,wss://asia.vectorapp.io/nostr,wss://relay.ditto.pub,wss://relay.dreamith.to"
-        );
-        assert_eq!(values["APP_BLOSSOM_SERVERS"], "https://armada.example.com/,https://blossom.ditto.pub/,https://blossom.dreamith.to/,https://blossom.primal.net/");
-        assert_eq!(values["PREFERRED_BLOSSOM_SERVER"], "https://armada.example.com/");
+        assert_eq!(values["RELAYS"], "wss://armada.example.com,wss://relay.ditto.pub,wss://relay.dreamith.to");
+        assert_eq!(values["BLOSSOM_SERVERS"], "https://armada.example.com/,https://blossom.ditto.pub/,https://blossom.dreamith.to/,https://blossom.primal.net/");
         assert_eq!(values["PUBLIC_WEB_ORIGIN"], "https://armada.example.com");
         // No AV or push here, so Armada keeps its own.
         assert!(!values.contains_key("CONCORD_AV_SERVERS"));
@@ -189,7 +183,7 @@ mod tests {
             ..Config::default()
         };
         let values = ClientEnv::new(&config).unwrap().values(&host("other.example.org"));
-        assert_eq!(values["APP_RELAYS"].split(',').next(), Some("wss://armada.example.com"));
+        assert_eq!(values["RELAYS"].split(',').next(), Some("wss://armada.example.com"));
         assert_eq!(values["CONCORD_AV_SERVERS"], "https://armada.example.com,https://armada.buzz");
     }
 
@@ -206,14 +200,14 @@ mod tests {
         };
         let env = ClientEnv::new(&config).unwrap().with_push("ab").with_onion(Some(onion.into()));
         let values = env.values(&host(onion));
-        assert_eq!(values["APP_RELAYS"].split(',').next(), Some(format!("ws://{onion}").as_str()));
-        assert_eq!(values["APP_BLOSSOM_SERVERS"].split(',').next(), Some(format!("http://{onion}/").as_str()));
+        assert_eq!(values["RELAYS"].split(',').next(), Some(format!("ws://{onion}").as_str()));
+        assert_eq!(values["BLOSSOM_SERVERS"].split(',').next(), Some(format!("http://{onion}/").as_str()));
         assert_eq!(values["PUBLIC_WEB_ORIGIN"], format!("http://{onion}"));
         assert_eq!(values["NOSTR_PUSH2_RELAYS"], format!("ws://{onion}"));
         assert!(!values.contains_key("CONCORD_AV_SERVERS"));
         // Everyone else still gets public_url.
         let values = env.values(&host("armada.example.com"));
-        assert_eq!(values["APP_RELAYS"].split(',').next(), Some("wss://armada.example.com"));
+        assert_eq!(values["RELAYS"].split(',').next(), Some("wss://armada.example.com"));
         assert!(values.contains_key("CONCORD_AV_SERVERS"));
     }
 
@@ -221,16 +215,16 @@ mod tests {
     fn overrides_replace_by_name() {
         let mut config = Config::default();
         config.web.env = BTreeMap::from([
-            ("APP_RELAYS".into(), "wss://armada.example.com".into()),
+            ("RELAYS".into(), "wss://armada.example.com".into()),
             ("CONCORD_AV_SERVERS".into(), "".into()),
             ("KLIPY_API_KEY".into(), "key".into()),
         ]);
         let env = ClientEnv::new(&config).unwrap();
         let values = env.values(&host("armada.example.com"));
-        assert_eq!(values["APP_RELAYS"], "wss://armada.example.com");
+        assert_eq!(values["RELAYS"], "wss://armada.example.com");
         assert_eq!(values["CONCORD_AV_SERVERS"], "");
         assert_eq!(values["KLIPY_API_KEY"], "key");
-        assert_eq!(values["PREFERRED_BLOSSOM_SERVER"], "https://armada.example.com/");
+        assert_eq!(values["BLOSSOM_SERVERS"].split(',').next(), Some("https://armada.example.com/"));
         // And with no origin to go on, only what was set.
         assert_eq!(env.values(&HeaderMap::new()).len(), 3);
     }
@@ -243,7 +237,7 @@ mod tests {
 
     #[test]
     fn names() {
-        for name in ["APP_RELAYS", "_x", "a1"] {
+        for name in ["RELAYS", "_x", "a1"] {
             assert!(valid_name(name), "{name}");
         }
         for name in ["", "1A", "A-B", "a.b", "ä"] {

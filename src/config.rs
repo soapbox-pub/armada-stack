@@ -717,8 +717,8 @@ mod tests {
         assert!(Config::parse("[web]\ntypo = 1").is_err());
         assert!(Config::parse("[web]\nkeep_versions = 0").is_err());
         assert!(Config::parse("[web.env]\n\"APP-RELAYS\" = \"x\"").is_err());
-        assert!(Config::parse("[web.env]\nAPP_RELAYS = 1").is_err());
-        assert_eq!(Config::parse("[web.env]\nAPP_RELAYS = \"\"").unwrap().web.env["APP_RELAYS"], "");
+        assert!(Config::parse("[web.env]\nRELAYS = 1").is_err());
+        assert_eq!(Config::parse("[web.env]\nRELAYS = \"\"").unwrap().web.env["RELAYS"], "");
         assert!(Config::parse("public_url = \"ftp://example.com\"").is_err());
         assert!(Config::parse("public_url = \"https://example.com/armada\"").is_err());
         assert!(Config::parse("[blossom]\nmax_blob_size = 0").is_err());
