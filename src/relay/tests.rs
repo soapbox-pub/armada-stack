@@ -360,6 +360,23 @@ async fn shares_an_event_budget_across_an_addresss_connections() {
     assert_eq!(c.publish(&note(ALICE, "5")).await[3], "rate-limited: slow down");
 }
 
+#[tokio::test]
+async fn shares_a_req_budget_across_an_addresss_connections() {
+    let harness = Harness::new(RelayConfig { reqs_per_minute_per_ip: 3, ..RelayConfig::default() }).await;
+    let mut a = harness.client().await;
+    let mut b = harness.client().await;
+    let filter = json!({"kinds": [STATUS]});
+    a.query("1", std::slice::from_ref(&filter)).await;
+    a.query("2", std::slice::from_ref(&filter)).await;
+    b.query("3", std::slice::from_ref(&filter)).await;
+    b.send(json!(["REQ", "3", filter])).await;
+    assert_eq!(b.recv().await, json!(["CLOSED", "3", "rate-limited: slow down"]));
+    // Which closes the subscription it would have replaced.
+    let mut c = harness.client().await;
+    assert_eq!(c.publish(&note(ALICE, "x")).await[2], true);
+    b.quiet().await;
+}
+
 /// Queries replaced, closed, or left behind by a closed connection give
 /// back their client's place, so the next one runs.
 #[tokio::test]

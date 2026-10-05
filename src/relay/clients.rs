@@ -23,6 +23,7 @@ pub struct Clients {
     max_connections: usize,
     max_queries: usize,
     events_per_minute: u32,
+    reqs_per_minute: u32,
     table: Mutex<Table>,
 }
 
@@ -36,6 +37,7 @@ struct Table {
 struct Client {
     connections: usize,
     events: TokenBucket,
+    reqs: TokenBucket,
     /// Its queries' places, if they're limited.
     queries: Option<Arc<Semaphore>>,
 }
@@ -43,7 +45,7 @@ struct Client {
 impl Client {
     /// Holds nothing that forgetting it would give away.
     fn is_idle(&mut self, now: Instant) -> bool {
-        self.connections == 0 && self.events.is_full(now)
+        self.connections == 0 && self.events.is_full(now) && self.reqs.is_full(now)
     }
 }
 
@@ -63,6 +65,7 @@ impl Clients {
             max_connections: config.max_connections_per_ip,
             max_queries: config.max_queries_per_ip,
             events_per_minute: config.events_per_minute_per_ip,
+            reqs_per_minute: config.reqs_per_minute_per_ip,
             table: Mutex::new(Table { clients: HashMap::new(), sweep_at: SWEEP_FLOOR }),
         })
     }
@@ -78,6 +81,7 @@ impl Clients {
         let client = table.clients.entry(key.clone()).or_insert_with(|| Client {
             connections: 0,
             events: TokenBucket::new(self.events_per_minute, now),
+            reqs: TokenBucket::new(self.reqs_per_minute, now),
             queries: (self.max_queries != 0).then(|| Arc::new(Semaphore::new(self.max_queries))),
         });
         if self.max_connections != 0 && client.connections >= self.max_connections {
@@ -99,6 +103,12 @@ impl Slot {
     pub fn take_event(&self, now: Instant) -> bool {
         let mut table = self.clients.table.lock();
         table.clients.get_mut(&self.key).is_none_or(|client| client.events.take(now))
+    }
+
+    /// Spend one of the client's REQs, shared by all its connections.
+    pub fn take_req(&self, now: Instant) -> bool {
+        let mut table = self.clients.table.lock();
+        table.clients.get_mut(&self.key).is_none_or(|client| client.reqs.take(now))
     }
 }
 
@@ -148,6 +158,22 @@ mod tests {
         assert!(a.take_event(now) && a.take_event(now) && b.take_event(now));
         assert!(!b.take_event(now));
         assert!(!a.take_event(now));
+    }
+
+    #[test]
+    fn shares_one_req_budget() {
+        let clients = Clients::new(&RelayConfig { reqs_per_minute_per_ip: 2, ..RelayConfig::default() });
+        let now = Instant::now();
+        let a = clients.connect("a".into(), now).unwrap();
+        let b = clients.connect("a".into(), now).unwrap();
+        assert!(a.take_req(now) && b.take_req(now));
+        assert!(!a.take_req(now));
+        // Apart from its events.
+        assert!(a.take_event(now));
+        assert!(b.take_req(now + std::time::Duration::from_secs(30)));
+        // Remembered after disconnecting, until it refills.
+        drop((a, b));
+        assert_eq!(clients.len(), 1);
     }
 
     #[test]

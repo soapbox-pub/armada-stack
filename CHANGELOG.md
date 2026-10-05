@@ -25,6 +25,9 @@ A release's notes are its section here, so tag `vX.Y.Z` only once
   address may have `relay.max_queries_per_ip` (4) queries running or
   waiting for a core at once, and a REQ's filters together examine at most
   200,000 events, so one client can't keep everyone else's REQs waiting.
+- Each client address may send `relay.reqs_per_minute_per_ip` (1,200) REQs
+  a minute across its connections. `relay.max_filters` is now 32 by
+  default, down from 100: Armada sends at most 32 in one REQ.
 
 ## 0.2.0
 

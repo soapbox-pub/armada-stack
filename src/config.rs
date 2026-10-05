@@ -159,6 +159,9 @@ pub struct RelayConfig {
     /// Events one client may publish a minute across all its connections,
     /// in bursts of as many, by IPv4 address or IPv6 /64. 0 for no limit.
     pub events_per_minute_per_ip: u32,
+    /// REQs one client may send a minute across all its connections, in
+    /// bursts of as many, by IPv4 address or IPv6 /64. 0 for no limit.
+    pub reqs_per_minute_per_ip: u32,
     /// Ignored: the relay once did NIP-42 AUTH, and configs from then may
     /// still set this.
     pub max_authed_keys: Option<serde::de::IgnoredAny>,
@@ -269,7 +272,7 @@ impl Default for RelayConfig {
         RelayConfig {
             max_message_length: 2 << 20,
             max_subscriptions: 32,
-            max_filters: 100,
+            max_filters: 32,
             max_limit: 500,
             max_event_tags: 2000,
             max_content_length: 1 << 20,
@@ -278,6 +281,7 @@ impl Default for RelayConfig {
             max_connections_per_ip: 50,
             max_queries_per_ip: 4,
             events_per_minute_per_ip: 1200,
+            reqs_per_minute_per_ip: 1200,
             max_authed_keys: None,
             map_size: 256 << 30,
         }

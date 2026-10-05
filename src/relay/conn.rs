@@ -244,6 +244,11 @@ impl Session {
         if message.len() - 2 > config.max_filters {
             return self.closed(&sub, "invalid: too many filters").await;
         }
+        // Before parsing, which is most of what a refused one would cost.
+        if !self.slot.take_req(Instant::now()) {
+            self.end(&sub).await;
+            return self.closed(&sub, "rate-limited: slow down").await;
+        }
         let scoped = |value| {
             let mut filter = Filter::parse(value)?;
             policy::scope(&mut filter)?;
