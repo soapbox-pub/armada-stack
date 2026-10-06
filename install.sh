@@ -1,23 +1,25 @@
 #!/bin/sh
-# Install armada, the self-hosted Armada server, from its latest release.
+# Installs the latest version of Armada Stack on your server.
 #
-#   curl -fsSL https://armada.buzz/install.sh | sudo sh -s -- armada.example.com
+#   curl -fsSL https://armada.buzz/install.sh | sudo sh
 #
-# With a domain, this sets up a whole server: the binary, an armada user,
-# /etc/armada/armada.toml, and a systemd service that gets its own HTTPS
-# certificate from Let's Encrypt. Without one, on a fresh install with a
-# terminal, it asks for the domain. Run it again, with or without the
-# domain, to upgrade: it installs the latest binary and refreshes and
-# restarts the service if one is set up.
+# It's safe to run this script multiple times (eg to upgrade).
 #
-# Releases are found on Nostr and trusted only if signed by Soapbox's key,
-# npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj. The
-# binary is checked against the sha256 in its signed release before it's
-# installed. That work is done by the Python program below, which uses only
-# Python's standard library; if there is no Python 3, this installs it.
+# This is a long-ass script with a bunch of Python code in it. The reason
+# is because Armada releases are deployed on Nostr itself (decentralized
+# releases / file storage!) so there is some complexity. We need to fetch
+# data from Nostr (WebSockets) and verify Nostr signatures, neither of
+# which can be done with basic commands. In the end it just puts a
+# precompiled Rust binary on your system and sets up systemd.
 #
-# Everything is in functions, called on the last line, so a download cut
-# short runs nothing.
+# This script will continue to work even if half the Nostr network is
+# down. Python is used because Python is installed on most distros by
+# default.
+#
+# If you just want the precompiled binary, you can grab it here:
+#   https://gitworkshop.dev/soapbox.pub/armada-stack/releases
+#
+# (Source code there too^)
 
 set -eu
 
@@ -41,11 +43,11 @@ Install armada from its latest signed release.
                      certificate
   --version VERSION  install this release instead of the latest
 
-Run as root: curl -fsSL https://armada.buzz/install.sh | sudo sh -s -- armada.example.com
+Run as root: curl -fsSL https://armada.buzz/install.sh | sudo sh
 EOF
 }
 
-# Python 3.6 or newer, by name, or nothing.
+# Do you have Python? If not, it's so over.
 find_python() {
 	for candidate in python3 python; do
 		if command -v "$candidate" >/dev/null 2>&1 &&
@@ -56,8 +58,7 @@ find_python() {
 	done
 }
 
-# Package managers' output goes to $TMP/packages, and is shown only if they
-# fail.
+# Non-consensual Python
 install_python() {
 	say "Python 3 isn't installed; installing it to check the release's signature"
 	log="$TMP/packages"
@@ -81,10 +82,8 @@ install_python() {
 	}
 }
 
-# Find the release, download the binary for $1 into $3/armada, and write
-# its version to $3/version. $2 is a version to insist on, or empty; $4 is
-# the version installed, or empty. Exits 3 if, not insisting on one, the
-# newest release found is older than what's installed.
+# Grab the latest Armada Stack from Nostr and validate it.
+# All those codes are just Nostr signature verification. We're not hacking your server ya weirdos
 fetch_release() {
 	"$PYTHON" - "$1" "$2" "$3" "$4" <<'PYTHON'
 import base64, hashlib, json, os, socket, ssl, struct, sys, time
@@ -183,6 +182,7 @@ def tagged_hash(tag, data):
     return hashlib.sha256(tag_hash + tag_hash + data).digest()
 
 
+# An AI wrote this shit and I'm not ashamed to admit it
 def schnorr_verify(message, pubkey, signature):
     if len(pubkey) != 32 or len(signature) != 64:
         return False
@@ -550,8 +550,7 @@ write_config() {
 	say "wrote $CONFIG; every other setting has a default"
 }
 
-# The config can hold secrets, like an AV node's api_secret: it's root's to
-# write and the armada user's to read, and no one else's.
+# Don't let your mom see your config
 protect_config() {
 	group=$(id -gn armada)
 	chown root:"$group" "$(dirname "$CONFIG")" "$CONFIG"
@@ -559,7 +558,7 @@ protect_config() {
 	chmod 640 "$CONFIG"
 }
 
-# The systemd unit, as deploy/armada.service has it.
+# Devuan users shaking and crying
 unit_text() {
 	cat <<'EOF'
 [Unit]
@@ -615,8 +614,6 @@ WantedBy=multi-user.target
 EOF
 }
 
-# Whether https://$DOMAIN/ answers with a certificate this machine trusts,
-# within $1 seconds.
 wait_for_https() {
 	"$PYTHON" - "$DOMAIN" "$1" <<'PYTHON'
 import sys, time, urllib.request
@@ -695,7 +692,7 @@ start_service() {
 	fi
 }
 
-# The domain in the existing config's public_url, or nothing.
+# Yeah we're parsing toml in bash. nbd
 config_domain() {
 	sed -n 's|^[[:space:]]*public_url[[:space:]]*=[[:space:]]*"https://\([^/"]*\)/\{0,1\}".*|\1|p' "$CONFIG" | head -n 1
 }
@@ -706,7 +703,6 @@ valid_domain() {
 	esac
 }
 
-# Ask for the domain on the terminal; under curl | sh, stdin is the script.
 prompt_domain() {
 	while :; do
 		printf '%s\n%s' "armada: Domain for this server, e.g. armada.example.com" \
@@ -826,3 +822,6 @@ main() {
 }
 
 main "$@"
+
+# You made it this far, huh?
+# What were you expecting to find down here, another easter egg?
