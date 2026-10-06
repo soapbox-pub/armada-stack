@@ -27,6 +27,9 @@ rtc:
   # participant; this way a node is bounded by bandwidth and CPU instead.
   # Open 7882/udp, or clients fall back to TCP and calls suffer.
   udp_port: 7882
+  # Find the public address over STUN, which LiveKit won't start without.
+  # armada gives the built-in one its address instead, with --node-ip, and
+  # leaves only a machine with no public address of its own to STUN.
   use_external_ip: true
 
 # TURN over TLS reaches clients whose networks allow nothing else — the usual

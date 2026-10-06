@@ -120,6 +120,12 @@ onion_service = true
 # livekit/ in storage_dir. A node in [[av.nodes]] on armada's own origin
 # takes its place.
 livekit = true
+# The public address clients send the built-in LiveKit's media to: an IPv4
+# address, an IPv6 one, or both as "v4,v6". Unset, it's the public addresses
+# on this machine's own interfaces, or, on a machine with none, behind a NAT
+# as on AWS or GCP, whatever STUN finds; LiveKit won't start if no STUN
+# server can be reached. Set it there to the public or elastic IP.
+# node_ip = "203.0.113.7"
 # Seconds a token lasts. At most 86400.
 token_ttl = 21600
 max_skew = 60

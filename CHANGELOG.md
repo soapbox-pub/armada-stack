@@ -3,6 +3,16 @@
 A release's notes are its section here, so tag `vX.Y.Z` only once
 `## X.Y.Z` exists: publishing fails without it.
 
+## Unreleased
+
+- The built-in LiveKit is told the machine's public address, from its
+  network interfaces, rather than finding it over STUN, which it wouldn't
+  start without: a server that couldn't reach Google's or Twilio's STUN
+  servers had no calls, and restarted LiveKit over and over. Only a machine
+  with no public address of its own, behind a NAT as on AWS or GCP, still
+  uses STUN, and armada warns that it does; set the new `[av] node_ip`
+  there to its public IP.
+
 ## 0.4.0
 
 - Calls, built in. armada carries LiveKit 1.13.7 and runs it itself, as the

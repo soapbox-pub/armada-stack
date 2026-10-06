@@ -10,9 +10,15 @@
 //! origin like one configured by hand; only its media ports, 7881/tcp and
 //! 7882/udp, are reached directly.
 //!
+//! Clients are told to send media to `[av] node_ip`, or else to this
+//! machine's own public addresses. Only a machine with none, behind a NAT,
+//! is left to LiveKit to find its address over STUN, which it won't start
+//! without; [`CONFIG`] asks for STUN, so LiveKit run by hand does that.
+//!
 //! A node in `[[av.nodes]]` on armada's own origin takes its place, and
 //! `[av] livekit = false` turns it off.
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -61,6 +67,8 @@ pub struct LiveKit {
     binary: PathBuf,
     keys: Keys,
     version: &'static str,
+    /// `[av] node_ip`.
+    node_ip: Option<String>,
 }
 
 impl LiveKit {
@@ -85,7 +93,7 @@ impl LiveKit {
         let dir = storage.service_dir("livekit")?;
         let keys = Keys::load_or_create(&dir.join("keys"))?;
         let binary = write_binary(&dir, embedded)?;
-        Ok(Some(LiveKit { dir, binary, keys, version: embedded.version }))
+        Ok(Some(LiveKit { dir, binary, keys, version: embedded.version, node_ip: config.av.node_ip.clone() }))
     }
 
     /// The node it is, on `public_url`'s origin.
@@ -143,9 +151,19 @@ impl LiveKit {
         if std::fs::read_to_string(&config).ok().as_deref() != Some(CONFIG) {
             write_private(&config, CONFIG.as_bytes())?;
         }
-        let mut child = Command::new(&self.binary)
-            .arg("--config")
-            .arg(&config)
+        let mut command = Command::new(&self.binary);
+        command.arg("--config").arg(&config);
+        // Found again on every start, in case the machine's have changed.
+        match node_ip(self.node_ip.as_deref(), &interface_addresses()) {
+            Some((ip, from)) => {
+                tracing::info!(node_ip = ip, "the built-in LiveKit has clients send media to {from}");
+                command.arg("--rtc.use_external_ip=false").arg("--node-ip").arg(ip);
+            }
+            None => tracing::warn!(
+                "This machine has no public IP address of its own, so the built-in LiveKit finds the address it's reached at over STUN, and won't start if it can't reach a STUN server. If it's behind a NAT, set [av] node_ip to the public address."
+            ),
+        }
+        let mut child = command
             .env_clear()
             .env("LIVEKIT_KEYS", format!("{}: {}", self.keys.key, self.keys.secret))
             .current_dir(&self.dir)
@@ -195,6 +213,66 @@ async fn log_lines(output: impl tokio::io::AsyncRead + Unpin) {
             _ => tracing::info!(target: "livekit", "{message}"),
         }
     }
+}
+
+/// What LiveKit is given as its node IP, as `v4,v6`, and where that came
+/// from: `configured`, which is `[av] node_ip`, or else the first public
+/// address of each family in `interfaces`. None leaves it to STUN.
+fn node_ip(configured: Option<&str>, interfaces: &[IpAddr]) -> Option<(String, &'static str)> {
+    let (v4, v6, from) = match configured {
+        Some(configured) => {
+            let (v4, v6) = crate::config::parse_node_ip(configured).expect("validated");
+            (v4, v6, "av.node_ip")
+        }
+        None => {
+            let public = || interfaces.iter().copied().filter(|&ip| crate::net::is_public_address(ip));
+            let v4 = public().find_map(|ip| match ip {
+                IpAddr::V4(ip) => Some(ip),
+                IpAddr::V6(_) => None,
+            });
+            let v6 = public().find_map(|ip| match ip {
+                IpAddr::V6(ip) => Some(ip),
+                IpAddr::V4(_) => None,
+            });
+            (v4, v6, "this machine's public address")
+        }
+    };
+    let ips: Vec<String> = v4.map(|ip| ip.to_string()).into_iter().chain(v6.map(|ip| ip.to_string())).collect();
+    (!ips.is_empty()).then(|| (ips.join(","), from))
+}
+
+/// The addresses on this machine's network interfaces, as `ip address`
+/// lists them, or none if they can't be read.
+fn interface_addresses() -> Vec<IpAddr> {
+    let mut addresses = Vec::new();
+    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: getifaddrs makes a list that's only read here, then freed.
+    // Each entry's address is read as the type its family says it is.
+    unsafe {
+        if libc::getifaddrs(&mut list) != 0 {
+            return addresses;
+        }
+        let mut entry = list;
+        while !entry.is_null() {
+            let address = (*entry).ifa_addr;
+            if !address.is_null() {
+                match i32::from((*address).sa_family) {
+                    libc::AF_INET => {
+                        let address = &*(address as *const libc::sockaddr_in);
+                        addresses.push(IpAddr::V4(Ipv4Addr::from(u32::from_be(address.sin_addr.s_addr))));
+                    }
+                    libc::AF_INET6 => {
+                        let address = &*(address as *const libc::sockaddr_in6);
+                        addresses.push(IpAddr::V6(Ipv6Addr::from(address.sin6_addr.s6_addr)));
+                    }
+                    _ => {}
+                }
+            }
+            entry = (*entry).ifa_next;
+        }
+        libc::freeifaddrs(list);
+    }
+    addresses
 }
 
 /// Write the built-in binary out, named for its hash, unless it's there
@@ -304,11 +382,30 @@ mod tests {
     #[test]
     fn its_node_is_on_armadas_origin() {
         let keys = Keys { key: "APIk".into(), secret: "s".into() };
-        let livekit = LiveKit { dir: PathBuf::new(), binary: PathBuf::new(), keys, version: "test" };
+        let livekit = LiveKit { dir: PathBuf::new(), binary: PathBuf::new(), keys, version: "test", node_ip: None };
         let public_url = url::Url::parse("https://armada.example.com").unwrap();
         let node = livekit.node(&public_url);
         assert_eq!(node.url, "wss://armada.example.com");
         assert!(node.is_on(&public_url));
         assert_eq!(node.api_url().unwrap(), API_URL);
+    }
+
+    #[test]
+    fn gives_livekit_the_machines_public_addresses() {
+        let ips = |list: &[&str]| list.iter().map(|ip| ip.parse().unwrap()).collect::<Vec<IpAddr>>();
+        // A VPS: loopback, Docker's bridge, a link-local and a ULA skipped.
+        let vps = ips(&["127.0.0.1", "::1", "172.17.0.1", "fe80::1", "fd00::1", "93.184.215.14", "2606:4700::1111", "93.184.215.15"]);
+        assert_eq!(node_ip(None, &vps), Some(("93.184.215.14,2606:4700::1111".into(), "this machine's public address")));
+        assert_eq!(node_ip(None, &ips(&["::1", "2606:4700::1111"])), Some(("2606:4700::1111".into(), "this machine's public address")));
+        // Behind a NAT, as on AWS: left to STUN.
+        assert_eq!(node_ip(None, &ips(&["127.0.0.1", "10.0.1.5", "100.64.0.9"])), None);
+        assert_eq!(node_ip(None, &[]), None);
+        // The config wins, whatever it names.
+        assert_eq!(node_ip(Some("2606:4700::1111, 10.0.1.5"), &vps), Some(("10.0.1.5,2606:4700::1111".into(), "av.node_ip")));
+    }
+
+    #[test]
+    fn reads_the_machines_addresses() {
+        assert!(interface_addresses().iter().any(|ip| ip.is_loopback()));
     }
 }

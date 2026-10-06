@@ -373,9 +373,9 @@ async fn reports_a_node_that_is_down() {
 /// unpacks and starts with its keys, passes the health check, takes the
 /// broker's tokens, and seats two callers in one room through `/rtc`.
 /// Only builds with `ARMADA_LIVEKIT` have one, and it takes LiveKit's
-/// fixed ports, so 7880-7882 have to be free. LiveKit won't start without
-/// a STUN server to find its external IP by, so this needs the internet.
-/// Media isn't exchanged: that needs a WebRTC peer, and the ports open.
+/// fixed ports, so 7880-7882 have to be free. It's given its node IP, so it
+/// needs no STUN server, nor any network but loopback. Media isn't
+/// exchanged: that needs a WebRTC peer.
 #[cfg(armada_livekit)]
 #[tokio::test]
 async fn places_a_call_on_the_built_in_livekit() {
@@ -390,7 +390,7 @@ async fn places_a_call_on_the_built_in_livekit() {
     );
     let storage_dir = tempfile::tempdir().unwrap();
     let storage = crate::storage::Storage::open(storage_dir.path()).unwrap();
-    let mut config = Config::parse(&format!("public_url = \"{ORIGIN}\"\n")).unwrap();
+    let mut config = Config::parse(&format!("public_url = \"{ORIGIN}\"\n[av]\nnode_ip = \"127.0.0.1\"\n")).unwrap();
     let livekit = builtin::LiveKit::prepare(&config, &storage).unwrap().expect("this build has LiveKit built in");
     config.av.nodes.push(livekit.node(&config.public_url().unwrap().unwrap()));
     config.validate_av().unwrap();
@@ -402,7 +402,7 @@ async fn places_a_call_on_the_built_in_livekit() {
     let http = reqwest::Client::new();
     let started = Instant::now();
     while let Err(error) = livekit::probe(&http, &node, Duration::from_secs(2), now()).await {
-        assert!(started.elapsed() < Duration::from_secs(30), "the built-in LiveKit didn't come up (can it reach a STUN server?): {error:#}");
+        assert!(started.elapsed() < Duration::from_secs(30), "the built-in LiveKit didn't come up: {error:#}");
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 

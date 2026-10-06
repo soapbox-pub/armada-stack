@@ -199,6 +199,17 @@ signaling goes through armada at `wss://<domain>/rtc`; only the media ports,
 7881/tcp and 7882/udp, have to be open (step 2). Its key and secret are made
 on first start, in `livekit/` in the storage directory.
 
+Clients send media to the server's own public address, which armada reads
+from its network interfaces. On a cloud server behind a NAT, such as AWS,
+GCP or Azure, the interfaces only have a private address, so LiveKit finds
+the public one over STUN instead, and can't start without it. There, give
+it the public (or elastic) IP:
+
+```toml
+[av]
+node_ip = "203.0.113.7"   # or "v4,v6"
+```
+
 Calls aren't offered over the onion, nor without `public_url`.
 
 To run LiveKit yourself instead, on this machine or others, turn the

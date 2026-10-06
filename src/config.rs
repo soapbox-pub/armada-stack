@@ -11,7 +11,7 @@
 //! (`~/.local/share/armada`), which they can write to.
 
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -235,6 +235,10 @@ pub struct AvConfig {
     /// Run the LiveKit built into armada as a node on armada's own origin
     /// (see [`crate::av::builtin`]), unless a node in `nodes` is there.
     pub livekit: bool,
+    /// The public address the built-in LiveKit has clients send media to:
+    /// an IPv4 address, an IPv6 one, or both as `v4,v6`. Unset, it's the
+    /// machine's own public addresses, or else found over STUN.
+    pub node_ip: Option<String>,
     /// Seconds a LiveKit token lasts. Clients use one for a whole call and
     /// never fetch another, so it must outlive a long call.
     pub token_ttl: u64,
@@ -288,6 +292,7 @@ impl Default for AvConfig {
         AvConfig {
             nodes: Vec::new(),
             livekit: true,
+            node_ip: None,
             token_ttl: 6 * 60 * 60,
             max_skew: 60,
             replay_ttl: 240,
@@ -518,6 +523,9 @@ impl Config {
             bail!("blossom.upload_bytes_per_hour has to be at least blossom.max_blob_size, or 0 for no limit.");
         }
         self.validate_av()?;
+        if let Some(node_ip) = &self.av.node_ip {
+            parse_node_ip(node_ip)?;
+        }
         if self.push.subject.as_deref().is_some_and(|subject| !subject.starts_with("mailto:") && !subject.starts_with("https://")) {
             bail!("push.subject has to start with mailto: or https://.");
         }
@@ -661,6 +669,23 @@ impl WebConfig {
 /// `wss://relay.example.com/` and `wss://relay.example.com` are one relay.
 /// `ws://` is allowed here, unlike for relays an author names, so a relay on
 /// the same box or LAN can be used.
+/// `av.node_ip`: at most one IPv4 address and one IPv6 one, by commas, as
+/// LiveKit takes it.
+pub fn parse_node_ip(input: &str) -> Result<(Option<Ipv4Addr>, Option<Ipv6Addr>)> {
+    let (mut v4, mut v6) = (None, None);
+    for part in input.split(',').map(str::trim) {
+        let duplicate = match part.parse::<IpAddr>() {
+            Ok(IpAddr::V4(ip)) => v4.replace(ip).is_some(),
+            Ok(IpAddr::V6(ip)) => v6.replace(ip).is_some(),
+            Err(_) => bail!("av.node_ip: {part:?} isn't an IP address."),
+        };
+        if duplicate {
+            bail!("av.node_ip can name one IPv4 address and one IPv6 address, as \"v4,v6\", not two of either.");
+        }
+    }
+    Ok((v4, v6))
+}
+
 pub fn parse_relay_url(input: &str) -> Result<String> {
     let value = input.trim();
     let url = url::Url::parse(value).with_context(|| format!("Not a valid relay URL: {value}"))?;
@@ -774,6 +799,18 @@ mod tests {
         let twice = format!("public_url = \"https://a.example.com\"\n{NODE}{NODE}");
         assert!(Config::parse(&twice).unwrap_err().to_string().contains("listed twice"));
         assert!(Config::parse("public_url = \"https://a.example.com\"\n[[av.nodes]]\nurl = \"wss://sfu.example.com\"\napi_key = \"k\"\napi_secret = \"\"").is_err());
+    }
+
+    #[test]
+    fn av_node_ip() {
+        let node_ip = |value: &str| Config::parse(&format!("[av]\nnode_ip = \"{value}\"\n"));
+        assert_eq!(parse_node_ip("198.51.100.4").unwrap(), (Some("198.51.100.4".parse().unwrap()), None));
+        assert_eq!(parse_node_ip("2001:db8::1").unwrap(), (None, Some("2001:db8::1".parse().unwrap())));
+        assert_eq!(parse_node_ip("2001:db8::1, 198.51.100.4").unwrap(), (Some("198.51.100.4".parse().unwrap()), Some("2001:db8::1".parse().unwrap())));
+        assert!(node_ip("198.51.100.4,2001:db8::1").is_ok());
+        assert!(node_ip("198.51.100.4,198.51.100.5").is_err());
+        assert!(node_ip("armada.example.com").is_err());
+        assert!(node_ip("").is_err());
     }
 
     #[test]
