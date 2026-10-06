@@ -90,7 +90,9 @@ jobs:
           done
 
       - name: Test
-        run: cargo test --locked
+        run: |
+          export ARMADA_LIVEKIT="$RUNNER_TEMP/livekit/amd64/livekit-server" ARMADA_LIVEKIT_VERSION="$LIVEKIT_VERSION"
+          cargo test --locked
 
       - name: Build
         env:

@@ -368,3 +368,141 @@ async fn reports_a_node_that_is_down() {
     let reply = reqwest::get(format!("http://{armada}/rtc/validate")).await.unwrap();
     assert_eq!(reply.status(), StatusCode::BAD_GATEWAY);
 }
+
+/// The LiveKit built into this build, run for real, as armada runs it: it
+/// unpacks and starts with its keys, passes the health check, takes the
+/// broker's tokens, and seats two callers in one room through `/rtc`.
+/// Only builds with `ARMADA_LIVEKIT` have one, and it takes LiveKit's
+/// fixed ports, so 7880-7882 have to be free. LiveKit won't start without
+/// a STUN server to find its external IP by, so this needs the internet.
+/// Media isn't exchanged: that needs a WebRTC peer, and the ports open.
+#[cfg(armada_livekit)]
+#[tokio::test]
+async fn places_a_call_on_the_built_in_livekit() {
+    use std::time::Duration;
+
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    assert!(
+        std::net::TcpListener::bind("127.0.0.1:7880").is_ok(),
+        "127.0.0.1:7880 is taken, which the built-in LiveKit needs; is another LiveKit running?"
+    );
+    let storage_dir = tempfile::tempdir().unwrap();
+    let storage = crate::storage::Storage::open(storage_dir.path()).unwrap();
+    let mut config = Config::parse(&format!("public_url = \"{ORIGIN}\"\n")).unwrap();
+    let livekit = builtin::LiveKit::prepare(&config, &storage).unwrap().expect("this build has LiveKit built in");
+    config.av.nodes.push(livekit.node(&config.public_url().unwrap().unwrap()));
+    config.validate_av().unwrap();
+    let cancel = CancellationToken::new();
+    let running = livekit.start(cancel.clone());
+
+    // Up, and its keys are the ones armada signs with.
+    let node = Node::from_config(&config.av.nodes[0]).unwrap();
+    let http = reqwest::Client::new();
+    let started = Instant::now();
+    while let Err(error) = livekit::probe(&http, &node, Duration::from_secs(2), now()).await {
+        assert!(started.elapsed() < Duration::from_secs(30), "the built-in LiveKit didn't come up (can it reach a STUN server?): {error:#}");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    // armada's broker and /rtc, as routes.rs serves them.
+    let av = Av::new(&config).unwrap().unwrap();
+    let router = axum::Router::new().fallback(move |request: Request| {
+        let av = av.clone();
+        async move {
+            match av.signaling().filter(|_| signaling::wants(request.uri().path())) {
+                Some(signaling) => signaling.handle(request).await,
+                None => av.handle(request),
+            }
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let armada = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await });
+
+    // Two members of one Channel join its room.
+    let secret = secret();
+    let mut callers = Vec::new();
+    for _ in 0..2 {
+        let (room, header) = grant(&secret);
+        let reply = http.get(format!("http://{armada}{}", room_path(&room))).header("authorization", header).send().await.unwrap();
+        assert_eq!(reply.status(), StatusCode::OK);
+        let seat: Value = serde_json::from_slice(&reply.bytes().await.unwrap()).unwrap();
+        assert_eq!(seat["url"], "wss://armada.example.com");
+        let token = seat["token"].as_str().unwrap();
+        let url = format!("ws://{armada}/rtc?access_token={token}&protocol=16&sdk=js&version=2.15.0&auto_subscribe=1");
+        let (mut socket, _) = tokio_tungstenite::connect_async(url).await.expect("LiveKit refused the broker's token");
+        let first = tokio::time::timeout(Duration::from_secs(10), socket.next()).await.expect("LiveKit said nothing").unwrap().unwrap();
+        let Message::Binary(signal) = first else { panic!("LiveKit's first message wasn't a signal: {first:?}") };
+        // SignalResponse.join: JoinResponse.
+        let join = protobuf::field(&signal, 1).expect("LiveKit's first signal wasn't a JoinResponse");
+        let room_name = protobuf::field(protobuf::field(join, 1).unwrap(), 2).unwrap();
+        assert_eq!(room_name, room.as_bytes());
+        let me = protobuf::field(protobuf::field(join, 2).unwrap(), 2).unwrap();
+        assert_eq!(me, seat["identity"].as_str().unwrap().as_bytes());
+        let others: Vec<String> = protobuf::fields(join, 3).map(|other| String::from_utf8_lossy(protobuf::field(other, 2).unwrap()).into_owned()).collect();
+        callers.push((seat["identity"].as_str().unwrap().to_string(), others, socket));
+    }
+    // The first found the room empty; the second, the first in it.
+    assert!(callers[0].1.is_empty());
+    assert_eq!(callers[1].1, vec![callers[0].0.clone()]);
+
+    drop(callers);
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(15), running).await.expect("the built-in LiveKit didn't stop").unwrap();
+}
+
+/// Just enough protobuf to read LiveKit's signals.
+#[cfg(armada_livekit)]
+mod protobuf {
+    /// Every length-delimited value of field `number` in `message`.
+    pub fn fields(mut message: &[u8], number: u64) -> impl Iterator<Item = &[u8]> {
+        std::iter::from_fn(move || {
+            while !message.is_empty() {
+                let key = varint(&mut message)?;
+                let value: &[u8] = match key & 7 {
+                    0 => {
+                        varint(&mut message)?;
+                        continue;
+                    }
+                    1 => take(&mut message, 8)?,
+                    2 => {
+                        let length = varint(&mut message)? as usize;
+                        take(&mut message, length)?
+                    }
+                    5 => take(&mut message, 4)?,
+                    _ => return None,
+                };
+                if key >> 3 == number && key & 7 == 2 {
+                    return Some(value);
+                }
+            }
+            None
+        })
+    }
+
+    /// The first length-delimited value of field `number` in `message`.
+    pub fn field(message: &[u8], number: u64) -> Option<&[u8]> {
+        fields(message, number).next()
+    }
+
+    fn varint(bytes: &mut &[u8]) -> Option<u64> {
+        let mut value = 0u64;
+        for shift in (0..64).step_by(7) {
+            let (&byte, rest) = bytes.split_first()?;
+            *bytes = rest;
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return Some(value);
+            }
+        }
+        None
+    }
+
+    fn take<'a>(bytes: &mut &'a [u8], length: usize) -> Option<&'a [u8]> {
+        let (taken, rest) = bytes.split_at_checked(length)?;
+        *bytes = rest;
+        Some(taken)
+    }
+}

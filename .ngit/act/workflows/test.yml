@@ -1,7 +1,8 @@
 name: Test
 
-# `cargo test` on pushes to main and on every Nostr PR. Version tags are
-# tested by release.yml before it builds.
+# `cargo test` on pushes to main and on every Nostr PR, with LiveKit built
+# in as releases have it, so the test that runs it runs too. Version tags
+# are tested by release.yml before it builds.
 
 on:
   push:
@@ -12,6 +13,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      # The same as release.yml's.
+      LIVEKIT_VERSION: 1.13.7
+      LIVEKIT_AMD64_SHA256: 6634aeeb2fb1366b6723708ae4320b9d5408106a4c63457c5e845ae3979c90e2
     steps:
       - uses: actions/checkout@v4
 
@@ -23,4 +28,16 @@ jobs:
             echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           fi
 
-      - run: cargo test --locked
+      - name: Download LiveKit
+        run: |
+          set -eu
+          dir="$RUNNER_TEMP/livekit"
+          mkdir -p "$dir"
+          curl -fsSL -o "$dir/livekit.tar.gz" "https://github.com/livekit/livekit/releases/download/v$LIVEKIT_VERSION/livekit_${LIVEKIT_VERSION}_linux_amd64.tar.gz"
+          echo "$LIVEKIT_AMD64_SHA256  $dir/livekit.tar.gz" | sha256sum -c -
+          tar -xzf "$dir/livekit.tar.gz" -C "$dir" livekit-server
+
+      - name: Test
+        run: |
+          export ARMADA_LIVEKIT="$RUNNER_TEMP/livekit/livekit-server" ARMADA_LIVEKIT_VERSION="$LIVEKIT_VERSION"
+          cargo test --locked
