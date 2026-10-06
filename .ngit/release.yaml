@@ -9,8 +9,14 @@ pubkey: npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj
 name: Armada Stack
 summary: Self-host Armada in one binary
 description: |
-  Armada's web app, a Nostr relay, a Blossom server, and a Concord AV broker,
-  served from one domain by one static binary. See INSTALL.md.
+  Armada's web app, a Nostr relay, a Blossom server, push notifications, and
+  voice and video calls on a built-in LiveKit, served from one domain by one
+  static binary, with HTTPS from Let's Encrypt and an onion over a built-in
+  Tor. Install it on a Linux server with:
+
+    curl -fsSL https://armada.buzz/install.sh | sudo sh -s -- armada.example.com
+
+  See INSTALL.md.
 license: AGPL-3.0-only
 repository: nostr://npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/git.shakespeare.diy/armada-stack
 release_notes: CHANGELOG.md

@@ -1,6 +1,7 @@
 //! `armada`: a self-hosted Armada in one binary — its web app, a relay, a
-//! Blossom server, and optionally a Concord AV broker, all on one origin and
-//! sharing one storage directory.
+//! Blossom server, a push service, and voice and video calls on the LiveKit
+//! it runs, all on one origin and sharing one storage directory, and served
+//! as an onion over Tor too.
 
 mod av;
 mod blobs;
@@ -38,7 +39,7 @@ use nostr::service::NostrService;
 use storage::Storage;
 
 #[derive(Parser)]
-#[command(name = "armada", version, about = "Self-host Armada: its web app, a relay, a Blossom server, and a Concord AV broker")]
+#[command(name = "armada", version, about = "Self-host Armada: its web app, a relay, a Blossom server, push notifications, and voice and video calls")]
 struct Cli {
     /// Configuration file [default: the first that exists of
     /// $XDG_CONFIG_HOME/armada/armada.toml (~/.config/armada/armada.toml)
