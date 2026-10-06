@@ -18,7 +18,6 @@ A release's notes are its section here, so tag `vX.Y.Z` only once
   `/etc/sysctl.d/60-armada.conf`. The service unit no longer hides the rest
   of `/proc` (`ProcSubset=pid`), which LiveKit reads the machine's load from;
   install.sh installs the new unit, or copy `deploy/armada.service` in.
-
 - `window.ENV` names the web app's relays and Blossom servers the way
   Armada now reads them: `RELAYS` and `BLOSSOM_SERVERS`, armada's own first,
   in place of `APP_RELAYS`, `COMMUNITY_RELAYS`, `APP_BLOSSOM_SERVERS` and

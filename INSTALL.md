@@ -75,9 +75,9 @@ It needs Python 3 to check the signature, and installs it if the server
 doesn't have it. It finishes in about a minute:
 
 ```
-armada: found armada-stack 0.2.0, released 2026-10-05, signed by Soapbox
-armada: downloaded https://blossom.ditto.pub/6363…8794 and checked its sha256, 6363…8794
-armada: installed armada 0.2.0 at /usr/local/bin/armada
+armada: found armada-stack 0.4.0, released 2026-10-05, signed by Soapbox
+armada: downloaded https://blossom.ditto.pub/3dd2…1a39 and checked its sha256, 3dd2…1a39
+armada: installed armada 0.4.0 at /usr/local/bin/armada
 armada: created the armada user
 armada: wrote /etc/armada/armada.toml; every other setting has a default
 armada: started the armada service; waiting for https://armada.example.com/
@@ -249,21 +249,21 @@ repository:
 REPO=nostr://npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj/git.shakespeare.diy/armada-stack
 git init -q /tmp/armada-releases && cd /tmp/armada-releases
 ngit release list --repo "$REPO"
-ngit release view armada-stack@0.2.0 --repo "$REPO" --verify
+ngit release view armada-stack@0.4.0 --repo "$REPO" --verify
 ```
 
 `view` prints each file's URL and sha256, and `--verify` downloads and checks
-them. For 0.2.0, on x86_64 (use the aarch64 URL on ARM64):
+them. For 0.4.0, on x86_64 (use the aarch64 URL on ARM64):
 
 ```sh
 # x86_64
-curl -fLo armada-0.2.0-linux-x86_64 https://blossom.ditto.pub/6363a8c7a51993d1e7d8158e934ff8c807251ce42cd35f8c7bde46526a858794
+curl -fLo armada-0.4.0-linux-x86_64 https://blossom.ditto.pub/3dd21c68b9c3bd332fb4365977d7d6f13f5fc9e547d9a862efe84b3096f81a39
 # aarch64
-curl -fLo armada-0.2.0-linux-aarch64 https://blossom.ditto.pub/f24f68bc08620fbeca4c0d54b6f2c8f5b402a0501e4bc9d7d4abaa3912fdcc50
+curl -fLo armada-0.4.0-linux-aarch64 https://blossom.ditto.pub/c5d33e36cad3d7d81909f380ce72fbf87141f190a1e17027de11a8d162d928ee
 
-curl -fLo SHA256SUMS https://blossom.ditto.pub/5c3f113eac80a38ab5e4cf29bce33e97e15128704a9f6c66ead673934e4c0a18
+curl -fLo SHA256SUMS https://blossom.ditto.pub/d50f8fcc24e49acdc7f7e79043c893c3dcdab0cf7ae175ed11a39b880d948150
 sha256sum --check --ignore-missing SHA256SUMS
-install -m 755 armada-0.2.0-linux-x86_64 /usr/local/bin/armada
+install -m 755 armada-0.4.0-linux-x86_64 /usr/local/bin/armada
 ```
 
 **Configure it.** Create a user for it and write `/etc/armada/armada.toml`:
@@ -321,6 +321,15 @@ Cloning a `nostr://` URL needs [ngit](https://ngit.dev/install). The binary is
 `target/release/armada`. It links glibc dynamically, so build it on a machine
 whose glibc is no newer than the server's. The simplest way is to build on the
 server itself.
+
+That build has no LiveKit in it, so it offers calls only on nodes in
+`[[av.nodes]]`. To build LiveKit in, name a `livekit-server` binary for the
+target, from [LiveKit's releases](https://github.com/livekit/livekit/releases),
+in `ARMADA_LIVEKIT`, and its version in `ARMADA_LIVEKIT_VERSION`:
+
+```sh
+ARMADA_LIVEKIT=/path/to/livekit-server ARMADA_LIVEKIT_VERSION=1.13.7 cargo build --release
+```
 
 The release binaries are built differently: statically against musl, by
 [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild). See
