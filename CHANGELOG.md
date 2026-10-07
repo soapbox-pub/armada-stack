@@ -3,6 +3,12 @@
 A release's notes are its section here, so tag `vX.Y.Z` only once
 `## X.Y.Z` exists: publishing fails without it.
 
+## Unreleased
+
+- `armada onion`, run by a user who can't read `/etc/armada/armada.toml`,
+  says so and to use sudo, rather than reading no config at all and saying
+  there's no onion address yet.
+
 ## 0.4.1
 
 - The built-in LiveKit is told the machine's public address, from its

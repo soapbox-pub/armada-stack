@@ -408,7 +408,13 @@ impl Config {
     pub fn load(path: Option<&Path>, env: &Environment) -> Result<Loaded> {
         let source = match path {
             Some(path) => Some(path.to_path_buf()),
-            None => env.config_candidates().into_iter().find(|candidate| candidate.is_file()),
+            // One this user can't look into, like /etc/armada to anyone but
+            // root and armada, is there all the same: reading it says so,
+            // where the defaults would quietly be another server's.
+            None => env.config_candidates().into_iter().find(|candidate| match candidate.metadata() {
+                Ok(metadata) => metadata.is_file(),
+                Err(error) => error.kind() == std::io::ErrorKind::PermissionDenied,
+            }),
         };
         let config = match &source {
             Some(path) => Self::read(path)?,
@@ -427,7 +433,13 @@ impl Config {
     }
 
     fn read(path: &Path) -> Result<Config> {
-        let text = std::fs::read_to_string(path).with_context(|| format!("Could not read the config file {}", path.display()))?;
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                return Err(error).with_context(|| format!("Could not read the config file {}; run this as root, with sudo", path.display()));
+            }
+            Err(error) => return Err(error).with_context(|| format!("Could not read the config file {}", path.display())),
+        };
         toml::from_str(&text).with_context(|| format!("{} is not a valid config file", path.display()))
     }
 
@@ -923,5 +935,28 @@ mod tests {
 
         std::fs::write(&file, "storage_dir = \"/srv/armada\"\n").unwrap();
         assert_eq!(Config::load(None, &env).unwrap().storage_dir, Path::new("/srv/armada"));
+    }
+
+    #[test]
+    fn a_config_out_of_reach_is_not_skipped() {
+        use std::os::unix::fs::PermissionsExt;
+        // Root can read anything.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let env = user(home.path().to_str().unwrap());
+        let dir = home.path().join(".config/armada");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("armada.toml"), "storage_dir = \"/srv/armada\"\n").unwrap();
+
+        // As /etc/armada is to anyone but root and armada.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let error = Config::load(None, &env).unwrap_err();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(format!("{error:#}").contains("run this as root"), "{error:#}");
+
+        std::fs::set_permissions(dir.join("armada.toml"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(format!("{:#}", Config::load(None, &env).unwrap_err()).contains("run this as root"));
     }
 }
