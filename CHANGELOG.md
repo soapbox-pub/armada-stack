@@ -8,6 +8,9 @@ A release's notes are its section here, so tag `vX.Y.Z` only once
 - `armada onion`, run by a user who can't read `/etc/armada/armada.toml`,
   says so and to use sudo, rather than reading no config at all and saying
   there's no onion address yet.
+- A certificate that can't be had logs why, as the CA put it, such as
+  "Timeout during connect (likely firewall problem)", rather than only
+  that the CA left the order invalid.
 
 ## 0.4.1
 

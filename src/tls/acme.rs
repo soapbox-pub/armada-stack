@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use instant_acme::{Account, AuthorizationStatus, ChallengeType, Identifier, NewAccount, NewOrder, OrderStatus, RetryPolicy};
+use instant_acme::{Account, AuthorizationStatus, ChallengeType, Identifier, NewAccount, NewOrder, Order, OrderStatus, RetryPolicy};
 use rcgen::{CertificateParams, CustomExtension, KeyPair};
 use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::sign::CertifiedKey;
@@ -149,12 +149,29 @@ impl Acme {
         let retries = RetryPolicy::new().initial_delay(Duration::from_secs(1)).timeout(ORDER_TIMEOUT);
         let status = order.poll_ready(&retries).await?;
         if status != OrderStatus::Ready {
-            bail!("The CA left the order {status:?}");
+            match challenge_problem(&mut order, kind).await {
+                Some(problem) => bail!("The CA left the order {status:?}: {problem}"),
+                None => bail!("The CA left the order {status:?}"),
+            }
         }
         let key = order.finalize().await.context("Could not finalize the order")?;
         let chain = order.poll_certificate(&retries).await.context("Could not fetch the certificate")?;
         Ok((chain, key))
     }
+}
+
+/// What the CA says went wrong with the order's `kind` challenge, such as
+/// "Timeout during connect (likely firewall problem)".
+async fn challenge_problem(order: &mut Order, kind: &ChallengeType) -> Option<String> {
+    let mut authorizations = order.authorizations();
+    while let Some(Ok(mut authorization)) = authorizations.next().await {
+        let state = authorization.refresh().await.ok()?;
+        let problem = state.challenges.iter().filter(|challenge| challenge.r#type == *kind).find_map(|challenge| challenge.error.as_ref());
+        if let Some(problem) = problem {
+            return Some(problem.detail.clone().unwrap_or_else(|| problem.to_string()));
+        }
+    }
+    None
 }
 
 struct Cleanup<'a>(&'a State);
