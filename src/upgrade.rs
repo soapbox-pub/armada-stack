@@ -67,7 +67,7 @@ pub async fn run(options: Options) -> Result<()> {
     let service = service_installed();
     let runs_this = std::fs::canonicalize(BIN).is_ok_and(|bin| bin == exe);
     if !options.check && service && runs_this && euid() != 0 {
-        bail!("Restarting the armada service needs root. Run: sudo armada upgrade");
+        bail!("Restarting the armada service needs root. Run: {}", sudo_upgrade(&exe));
     }
 
     let pool = Pool::new(Arc::new(|_: &str| true), None);
@@ -90,7 +90,7 @@ pub async fn run(options: Options) -> Result<()> {
         if version == current {
             say(&format!("armada {current} is installed: nothing to do"));
         } else {
-            say(&format!("armada {current} is installed; to install {version}, run: sudo armada upgrade"));
+            say(&format!("armada {current} is installed; to install {version}, run: {}", sudo_upgrade(&exe)));
         }
         return Ok(());
     }
@@ -202,6 +202,12 @@ fn pick_asset(events: &[Event], release: &Event, pubkey: &str, platform: &str) -
         .with_context(|| format!("Release {} has no build for {platform}.", version.unwrap_or_default()))
 }
 
+/// The command to upgrade as root. By path, since sudo on RHEL and its
+/// kin doesn't search /usr/local/bin.
+fn sudo_upgrade(exe: &Path) -> String {
+    format!("sudo {} upgrade", exe.display())
+}
+
 /// Download the asset beside `exe`, check it, and move it over `exe`.
 ///
 /// The new binary is written and then run beside the old one, so anyone
@@ -216,7 +222,7 @@ async fn install(asset: &Event, version: &str, exe: &Path) -> Result<()> {
     check_directory(dir)?;
     // Made here first, so a directory that can't be written stops this
     // before anything is downloaded.
-    let mut file = create(&new).with_context(|| format!("Couldn't write {}. Run: sudo armada upgrade", new.display()))?;
+    let mut file = create(&new).with_context(|| format!("Couldn't write {}. Run: {}", new.display(), sudo_upgrade(exe)))?;
 
     let result = async {
         let url = download(asset, &mut file).await?;
