@@ -250,7 +250,9 @@ fn init_logging() {
     if std::env::var("LOG_FORMAT").as_deref() == Ok("json") {
         tracing_subscriber::fmt().json().flatten_event(true).with_env_filter(filter).init();
     } else {
-        tracing_subscriber::fmt().with_env_filter(filter).init();
+        // Colors only for a terminal: in the journal they're escape codes.
+        let ansi = std::io::IsTerminal::is_terminal(&std::io::stdout());
+        tracing_subscriber::fmt().with_ansi(ansi).with_env_filter(filter).init();
     }
 }
 

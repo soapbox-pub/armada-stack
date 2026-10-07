@@ -11,6 +11,8 @@ A release's notes are its section here, so tag `vX.Y.Z` only once
 - A certificate that can't be had logs why, as the CA put it, such as
   "Timeout during connect (likely firewall problem)", rather than only
   that the CA left the order invalid.
+- Logs are colored only on a terminal, so the journal has no escape codes
+  in it.
 
 ## 0.4.1
 
