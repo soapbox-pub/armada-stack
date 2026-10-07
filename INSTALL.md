@@ -31,7 +31,7 @@ dig +short armada.example.com
 ## 2. Open the firewall
 
 Allow inbound TCP 22 (SSH), 80, 443 and 7881, and UDP 7882. The last two
-carry calls' audio and video. On Ubuntu with `ufw`:
+carry calls' audio and video. On Ubuntu or Debian with `ufw`:
 
 ```sh
 ufw allow OpenSSH
@@ -42,8 +42,20 @@ ufw allow 7882/udp
 ufw enable
 ```
 
-If your host has a cloud firewall, such as DigitalOcean's, open the same
-ports there.
+On Fedora, RHEL, Rocky, AlmaLinux or CentOS Stream with `firewalld`, which
+allows SSH already:
+
+```sh
+firewall-cmd --permanent --add-service=http
+firewall-cmd --permanent --add-service=https
+firewall-cmd --permanent --add-port=7881/tcp
+firewall-cmd --permanent --add-port=7882/udp
+firewall-cmd --reload
+```
+
+Some cloud images, such as DigitalOcean's, come with neither turned on, and
+nothing on the server to open. If your host has a cloud firewall, such as
+DigitalOcean's, open the same ports there.
 
 ## 3. Install
 
@@ -91,6 +103,10 @@ new versions of the web app and deploys them on its own.
 The config it writes is all armada needs; `armada.example.toml` lists and
 explains every other setting. After changing it, run `systemctl restart armada`.
 
+On RHEL, Rocky, AlmaLinux and CentOS Stream, sudo doesn't look in
+`/usr/local/bin`. There, where this guide says `sudo armada`, run
+`sudo /usr/local/bin/armada`.
+
 ## 4. Check it
 
 ```sh
@@ -117,7 +133,7 @@ HTTP on the onion's port 80, since Tor encrypts the connection itself. The
 address is made the first time armada starts. Print it with:
 
 ```sh
-armada onion
+sudo armada onion
 ```
 
 A browser that comes over the onion is pointed at the onion's relay and
@@ -131,7 +147,7 @@ published the onion service" once it's up. Check it from any machine with Tor
 running:
 
 ```sh
-curl --socks5-hostname 127.0.0.1:9050 -H 'Accept: application/nostr+json' http://$(armada onion)/
+curl --socks5-hostname 127.0.0.1:9050 -H 'Accept: application/nostr+json' http://$(sudo armada onion)/
 ```
 
 The address is its key, `tor/hs_ed25519_secret_key` in `storage_dir`. Back it
