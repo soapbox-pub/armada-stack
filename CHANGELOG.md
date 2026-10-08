@@ -3,7 +3,7 @@
 A release's notes are its section here, so tag `vX.Y.Z` only once
 `## X.Y.Z` exists: publishing fails without it.
 
-## Unreleased
+## 0.4.2
 
 - Behind Cloudflare's proxy (the orange cloud), each visitor is limited as
   itself, by the address Cloudflare names in `CF-Connecting-IP`, rather than
