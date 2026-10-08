@@ -303,6 +303,19 @@ fn keeps_certificates_privately_per_ca() {
     assert!(Certificate::from_pem(issued.chain.as_bytes()).is_err());
 }
 
+#[test]
+fn remembers_whether_http01_worked() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), "https://acme-v02.api.letsencrypt.org/directory").unwrap();
+    assert!(!store.http01_worked("armada.example.com"));
+    store.remember_http01("armada.example.com", true).unwrap();
+    assert!(store.http01_worked("armada.example.com"));
+    assert!(!store.http01_worked("other.example.com"));
+    store.remember_http01("armada.example.com", false).unwrap();
+    assert!(!store.http01_worked("armada.example.com"));
+    store.remember_http01("armada.example.com", false).unwrap();
+}
+
 /// Gets real certificates from Pebble, Let's Encrypt's test CA, by both
 /// challenges. Pebble validates against 127.0.0.1, so armada listens where
 /// it looks: 5001 for TLS-ALPN-01 and 5002 for HTTP-01, its defaults.

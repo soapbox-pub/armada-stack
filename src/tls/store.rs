@@ -7,6 +7,7 @@
 //! ```text
 //! tls/acme-v02.api.letsencrypt.org/account.json
 //! tls/acme-v02.api.letsencrypt.org/<domain>.pem   chain, then key
+//! tls/acme-v02.api.letsencrypt.org/<domain>.http-01   if HTTP-01 worked last
 //! ```
 //!
 //! Both hold private keys, so they're readable by armada's user alone.
@@ -53,6 +54,27 @@ impl Store {
 
     fn certificate_path(&self, domain: &str) -> PathBuf {
         self.dir.join(format!("{domain}.pem"))
+    }
+
+    fn http01_path(&self, domain: &str) -> PathBuf {
+        self.dir.join(format!("{domain}.http-01"))
+    }
+
+    /// Whether `domain`'s last certificate was validated over HTTP-01.
+    pub fn http01_worked(&self, domain: &str) -> bool {
+        self.http01_path(domain).exists()
+    }
+
+    pub fn remember_http01(&self, domain: &str, worked: bool) -> Result<()> {
+        let path = self.http01_path(domain);
+        let result = match worked {
+            true => write_private(&path, b""),
+            false => match std::fs::remove_file(&path) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
+                _ => Ok(()),
+            },
+        };
+        result.with_context(|| format!("Could not note which challenge worked in {}", path.display()))
     }
 
     pub fn load_account(&self) -> Result<Option<AccountCredentials>> {

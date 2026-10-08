@@ -14,6 +14,9 @@ A release's notes are its section here, so tag `vX.Y.Z` only once
 - Cloudflare's Flexible SSL mode works: Cloudflare's requests to port 80
   for visitors on HTTPS are served, where they were redirected to HTTPS,
   which sent the visitor round in a loop.
+- A certificate is renewed by whichever challenge worked last. Behind
+  Cloudflare's proxy, which ends TLS itself, that's HTTP-01, so renewals no
+  longer start with a failed TLS-ALPN-01 validation.
 - `armada onion`, run by a user who can't read `/etc/armada/armada.toml`,
   says so and to use sudo, rather than reading no config at all and saying
   there's no onion address yet.

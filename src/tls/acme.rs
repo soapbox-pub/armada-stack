@@ -2,7 +2,8 @@
 //!
 //! A certificate is asked for when there's none, and again once a third of
 //! its lifetime is left. Each attempt tries TLS-ALPN-01 first, answered on
-//! the HTTPS port, then HTTP-01 if port 80 is being listened on. A failed
+//! the HTTPS port, then HTTP-01 if port 80 is being listened on, or HTTP-01
+//! first if that's what worked last, as behind Cloudflare's proxy. A failed
 //! attempt is retried after a minute, then two, and so on up to an hour:
 //! Let's Encrypt allows only a few failed validations an hour, and a
 //! misconfigured DNS record doesn't fix itself any faster.
@@ -82,14 +83,20 @@ impl Acme {
     /// Get a certificate from the CA, trying each challenge it can answer.
     async fn issue(&self) -> Result<Certificate> {
         let account = self.account().await?;
-        let mut kinds = vec![ChallengeType::TlsAlpn01];
-        if self.http01 {
-            kinds.push(ChallengeType::Http01);
-        }
+        let http01_worked = self.store.http01_worked(&self.domain);
         let mut failure = None;
-        for kind in kinds {
+        for kind in challenges(self.http01, http01_worked) {
             match self.order(&account, &kind).await {
-                Ok((chain, key)) => return self.store.save_certificate(&self.domain, &chain, &key),
+                Ok((chain, key)) => {
+                    let certificate = self.store.save_certificate(&self.domain, &chain, &key)?;
+                    let http01 = kind == ChallengeType::Http01;
+                    if http01 != http01_worked
+                        && let Err(error) = self.store.remember_http01(&self.domain, http01)
+                    {
+                        tracing::warn!(domain = self.domain, "{error:#}");
+                    }
+                    return Ok(certificate);
+                }
                 Err(error) => {
                     tracing::warn!(domain = self.domain, challenge = ?kind, "validation failed: {error:#}");
                     failure = Some(error);
@@ -160,6 +167,22 @@ impl Acme {
     }
 }
 
+/// The challenges to try, in order: TLS-ALPN-01, answered on the HTTPS port,
+/// then HTTP-01 if port 80 is listened on. HTTP-01 goes first if it's what
+/// worked last time: behind a proxy that ends TLS itself, as Cloudflare's
+/// does, TLS-ALPN-01 can't reach armada, and would spend one of the CA's few
+/// failures an hour on every renewal.
+///
+/// (Whether the domain resolves to Cloudflare can't say: a machine named
+/// for its domain, as DigitalOcean names droplets, resolves it to itself.)
+fn challenges(http01: bool, http01_worked: bool) -> Vec<ChallengeType> {
+    match (http01, http01_worked) {
+        (false, _) => vec![ChallengeType::TlsAlpn01],
+        (true, false) => vec![ChallengeType::TlsAlpn01, ChallengeType::Http01],
+        (true, true) => vec![ChallengeType::Http01, ChallengeType::TlsAlpn01],
+    }
+}
+
 /// What the CA says went wrong with the order's `kind` challenge, such as
 /// "Timeout during connect (likely firewall problem)".
 async fn challenge_problem(order: &mut Order, kind: &ChallengeType) -> Option<String> {
@@ -193,4 +216,17 @@ pub fn alpn_challenge_certificate(domain: &str, digest: &[u8]) -> Result<Certifi
     let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der()));
     let signer = rustls::crypto::ring::sign::any_supported_type(&key)?;
     Ok(CertifiedKey::new(vec![certificate.der().clone()], signer))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tries_first_what_worked_last() {
+        assert_eq!(challenges(true, false), [ChallengeType::TlsAlpn01, ChallengeType::Http01]);
+        assert_eq!(challenges(true, true), [ChallengeType::Http01, ChallengeType::TlsAlpn01]);
+        // With nothing on port 80 now, there's only the one.
+        assert_eq!(challenges(false, true), [ChallengeType::TlsAlpn01]);
+    }
 }
