@@ -39,6 +39,7 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 
 use super::ACME_TLS_ALPN;
+use crate::ratelimit::Trust;
 
 /// How long a client has to finish its TLS handshake.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -68,6 +69,10 @@ pub struct Limits {
     /// peer. Not behind a proxy, every connection from which comes from
     /// one address.
     pub per_address: Option<usize>,
+    /// Whether Cloudflare's addresses go unlimited by `per_address`: every
+    /// visitor through Cloudflare's proxy comes from a few of them, and is
+    /// limited as itself once its request says who it is.
+    pub spare_cloudflare: bool,
     /// How long a client has to send a request's headers.
     pub header_timeout: Duration,
     /// How long a connection may go with nothing read or written.
@@ -75,9 +80,16 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// The defaults, limiting each peer address unless a proxy's in front.
-    pub fn new(behind_proxy: bool) -> Limits {
-        Limits { total: MAX_CONNECTIONS, per_address: (!behind_proxy).then_some(MAX_CONNECTIONS_PER_ADDRESS), header_timeout: HEADER_TIMEOUT, idle_timeout: IDLE_TIMEOUT }
+    /// The defaults, limiting each peer address unless a proxy's in front,
+    /// or it's Cloudflare's and Cloudflare is trusted.
+    pub fn new(trust: Trust) -> Limits {
+        Limits {
+            total: MAX_CONNECTIONS,
+            per_address: (!trust.proxy).then_some(MAX_CONNECTIONS_PER_ADDRESS),
+            spare_cloudflare: trust.cloudflare,
+            header_timeout: HEADER_TIMEOUT,
+            idle_timeout: IDLE_TIMEOUT,
+        }
     }
 }
 
@@ -108,7 +120,7 @@ pub async fn serve<A: Accept>(mut listener: A, tls: Option<Arc<rustls::ServerCon
     let builder = Arc::new(builder);
     let graceful = GracefulShutdown::new();
     let total = Arc::new(Semaphore::new(limits.total));
-    let addresses = Arc::new(Addresses { max: limits.per_address, open: Mutex::new(HashMap::new()) });
+    let addresses = Arc::new(Addresses { max: limits.per_address, spare_cloudflare: limits.spare_cloudflare, open: Mutex::new(HashMap::new()) });
     loop {
         let (stream, peer) = tokio::select! {
             accepted = listener.accept() => match accepted {
@@ -244,6 +256,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Idle<S> {
 /// Connections open from each address, if they're limited.
 struct Addresses {
     max: Option<usize>,
+    spare_cloudflare: bool,
     open: Mutex<HashMap<String, usize>>,
 }
 
@@ -256,6 +269,9 @@ struct Held {
 impl Addresses {
     fn open(self: &Arc<Self>, peer: SocketAddr) -> Option<Option<Held>> {
         let Some(max) = self.max else { return Some(None) };
+        if self.spare_cloudflare && crate::cloudflare::is_cloudflare(peer.ip()) {
+            return Some(None);
+        }
         let key = crate::ratelimit::key(&peer.ip().to_string());
         let mut open = self.open.lock();
         let count = open.entry(key.clone()).or_default();
@@ -320,7 +336,7 @@ mod tests {
 
     #[tokio::test]
     async fn serves_plain_http() {
-        let (address, _guard) = listening(Limits::new(false)).await;
+        let (address, _guard) = listening(Limits::new(Trust::default())).await;
         let mut stream = TcpStream::connect(address).await.unwrap();
         stream.write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await.unwrap();
         let mut response = String::new();
@@ -331,7 +347,7 @@ mod tests {
 
     #[tokio::test]
     async fn caps_each_addresss_connections() {
-        let (address, _guard) = listening(Limits { total: 100, per_address: Some(2), header_timeout: HEADER_TIMEOUT, idle_timeout: IDLE_TIMEOUT }).await;
+        let (address, _guard) = listening(Limits { total: 100, per_address: Some(2), spare_cloudflare: false, header_timeout: HEADER_TIMEOUT, idle_timeout: IDLE_TIMEOUT }).await;
         let _a = TcpStream::connect(address).await.unwrap();
         let _b = TcpStream::connect(address).await.unwrap();
         let mut c = TcpStream::connect(address).await.unwrap();
@@ -349,10 +365,25 @@ mod tests {
         assert!(freed);
     }
 
+    #[test]
+    fn spares_cloudflare_the_cap_on_each_address() {
+        let addresses = |spare_cloudflare| Arc::new(Addresses { max: Some(1), spare_cloudflare, open: Mutex::new(HashMap::new()) });
+        let cloudflare = SocketAddr::from(([172, 70, 111, 150], 443));
+        let sparing = addresses(true);
+        let held: Vec<_> = (0..10).map(|_| sparing.open(cloudflare).expect("not capped")).collect();
+        assert!(held.iter().all(Option::is_none), "nor even counted");
+        let _one = sparing.open(SocketAddr::from(([198, 51, 100, 1], 443))).unwrap();
+        assert!(sparing.open(SocketAddr::from(([198, 51, 100, 1], 443))).is_none());
+
+        let strict = addresses(false);
+        let _one = strict.open(cloudflare).unwrap();
+        assert!(strict.open(cloudflare).is_none());
+    }
+
     /// Between requests, a connection is kept only so long.
     #[tokio::test]
     async fn closes_idle_connections() {
-        let (address, _guard) = listening(Limits { idle_timeout: Duration::from_millis(300), ..Limits::new(false) }).await;
+        let (address, _guard) = listening(Limits { idle_timeout: Duration::from_millis(300), ..Limits::new(Trust::default()) }).await;
         let mut stream = TcpStream::connect(address).await.unwrap();
         stream.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n").await.unwrap();
         let mut buf = [0; 1024];
@@ -362,7 +393,7 @@ mod tests {
 
     #[tokio::test]
     async fn caps_connections_in_all() {
-        let (address, _guard) = listening(Limits { total: 1, per_address: None, header_timeout: HEADER_TIMEOUT, idle_timeout: IDLE_TIMEOUT }).await;
+        let (address, _guard) = listening(Limits { total: 1, per_address: None, spare_cloudflare: false, header_timeout: HEADER_TIMEOUT, idle_timeout: IDLE_TIMEOUT }).await;
         let _a = TcpStream::connect(address).await.unwrap();
         let mut b = TcpStream::connect(address).await.unwrap();
         assert!(closed(&mut b, Duration::from_secs(2)).await);
@@ -372,7 +403,7 @@ mod tests {
     /// dropped.
     #[tokio::test]
     async fn drops_a_client_slow_with_its_headers() {
-        let (address, _guard) = listening(Limits { header_timeout: Duration::from_millis(300), idle_timeout: Duration::from_millis(600), ..Limits::new(false) }).await;
+        let (address, _guard) = listening(Limits { header_timeout: Duration::from_millis(300), idle_timeout: Duration::from_millis(600), ..Limits::new(Trust::default()) }).await;
         let mut stream = TcpStream::connect(address).await.unwrap();
         stream.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n").await.unwrap();
         assert!(closed(&mut stream, Duration::from_secs(5)).await);

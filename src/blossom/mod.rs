@@ -57,7 +57,7 @@ use crate::blobs::{BlobStore, DownloadError, DownloadReason, Staged};
 use crate::config::BlossomConfig;
 use crate::hash::BlobHash;
 use crate::origin::{Names, Origin, request_origin};
-use crate::ratelimit::{self, RateLimiter};
+use crate::ratelimit::{self, RateLimiter, Trust};
 use crate::storage::Storage;
 use crate::util::{http_date, now};
 use crate::web::serve::{Range, matches_etag, parse_range};
@@ -122,8 +122,8 @@ struct Server {
     blobs: BlobStore,
     names: Names,
     max_blob_size: u64,
-    /// Whether to believe `X-Forwarded-For`; see [`crate::config::Config::trust_proxy`].
-    trust_proxy: bool,
+    /// Whose word on a client's address to take; see [`crate::config::Config::trust`].
+    trust: Trust,
     /// Uploads and mirrors each client may start a minute, and bytes it may
     /// send an hour. `None` for no limit.
     uploads: Option<Mutex<RateLimiter>>,
@@ -145,7 +145,7 @@ impl Blossom {
     /// Open the server's index and store. `names` are the origins clients
     /// reach it at, where known; mirrors in progress are abandoned once
     /// `cancel` fires.
-    pub fn open(config: &BlossomConfig, names: Names, trust_proxy: bool, storage: &Storage, cancel: &CancellationToken) -> Result<Blossom> {
+    pub fn open(config: &BlossomConfig, names: Names, trust: Trust, storage: &Storage, cancel: &CancellationToken) -> Result<Blossom> {
         let db = BlossomDb::open(storage)?;
         let blobs = storage.blob_store("blossom/blobs");
         blobs.clear_temp();
@@ -155,7 +155,7 @@ impl Blossom {
                 blobs,
                 names,
                 max_blob_size: config.max_blob_size,
-                trust_proxy,
+                trust,
                 uploads: limiter(config.uploads_per_minute.into(), Duration::from_secs(60)),
                 bytes: limiter(config.upload_bytes_per_hour, Duration::from_secs(60 * 60)),
                 deletes: Mutex::new(RateLimiter::new(DELETES_PER_MINUTE, Duration::from_secs(60), MAX_RATE_LIMITED)),
@@ -542,7 +542,7 @@ impl Server {
 
     /// The key a request's client is limited under.
     fn client(&self, parts: &http::request::Parts) -> Option<String> {
-        ratelimit::client_key(&parts.headers, &parts.extensions, self.trust_proxy)
+        ratelimit::client_key(&parts.headers, &parts.extensions, self.trust)
     }
 
     /// Count an upload or mirror against its client, before its token is

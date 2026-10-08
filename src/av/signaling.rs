@@ -28,6 +28,8 @@ use http::{Response, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
 
+use crate::ratelimit::Trust;
+
 /// How long the node has to accept a connection, and then to answer.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -43,15 +45,15 @@ pub struct Signaling {
     /// What `api_url`'s path puts ahead of the request's, without a
     /// trailing slash.
     prefix: String,
-    trust_proxy: bool,
+    trust: Trust,
 }
 
 impl Signaling {
-    pub fn new(api_url: &str, trust_proxy: bool) -> Result<Signaling> {
+    pub fn new(api_url: &str, trust: Trust) -> Result<Signaling> {
         let url = url::Url::parse(api_url).with_context(|| format!("Not a valid api_url: {api_url}"))?;
         let host = url.host_str().ok_or_else(|| anyhow!("api_url has no host: {api_url}"))?;
         let port = url.port_or_known_default().unwrap_or(80);
-        Ok(Signaling { authority: format!("{host}:{port}"), prefix: url.path().trim_end_matches('/').to_string(), trust_proxy })
+        Ok(Signaling { authority: format!("{host}:{port}"), prefix: url.path().trim_end_matches('/').to_string(), trust })
     }
 
     pub async fn handle(&self, request: Request) -> Response<Body> {
@@ -90,7 +92,7 @@ impl Signaling {
         for name in ["x-real-ip", "forwarded"] {
             parts.headers.remove(name);
         }
-        if !self.trust_proxy {
+        if !self.trust.proxy {
             for name in ["x-forwarded-host", "x-forwarded-proto"] {
                 parts.headers.remove(name);
             }
@@ -126,10 +128,12 @@ impl Signaling {
         Ok(Response::from_parts(parts, Body::new(body)))
     }
 
-    /// `X-Forwarded-For`, ending with the client's address. What came before
-    /// is kept only from a proxy armada trusts.
+    /// `X-Forwarded-For`, ending with the client's address: the peer's, or
+    /// Cloudflare's visitor's. What came before is kept only from a proxy
+    /// armada trusts.
     fn forwarded_for(&self, headers: &mut HeaderMap, peer: std::net::IpAddr) {
-        let earlier = if self.trust_proxy {
+        let peer = self.trust.cloudflare.then(|| crate::cloudflare::visitor(headers, peer)).flatten().unwrap_or(peer);
+        let earlier = if self.trust.proxy {
             let values: Vec<&str> = headers.get_all("x-forwarded-for").iter().filter_map(|value| value.to_str().ok()).collect();
             (!values.is_empty()).then(|| values.join(", "))
         } else {
@@ -196,11 +200,24 @@ mod tests {
     fn drops_what_says_who_the_client_is() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", HeaderValue::from_static("6.6.6.6"));
-        let signaling = Signaling::new("http://127.0.0.1:7880", false).unwrap();
+        let signaling = Signaling::new("http://127.0.0.1:7880", Trust::default()).unwrap();
         signaling.forwarded_for(&mut headers, "203.0.113.9".parse().unwrap());
         assert_eq!(headers["x-forwarded-for"], "203.0.113.9");
-        let trusting = Signaling::new("http://127.0.0.1:7880", true).unwrap();
+        let trusting = Signaling::new("http://127.0.0.1:7880", Trust { proxy: true, cloudflare: false }).unwrap();
         trusting.forwarded_for(&mut headers, "127.0.0.1".parse().unwrap());
         assert_eq!(headers["x-forwarded-for"], "203.0.113.9, 127.0.0.1");
+    }
+
+    #[test]
+    fn names_cloudflares_visitor() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("6.6.6.6"));
+        headers.insert("cf-connecting-ip", HeaderValue::from_static("203.0.113.9"));
+        let signaling = Signaling::new("http://127.0.0.1:7880", Trust { proxy: false, cloudflare: true }).unwrap();
+        signaling.forwarded_for(&mut headers, "172.70.111.150".parse().unwrap());
+        assert_eq!(headers["x-forwarded-for"], "203.0.113.9");
+        // From anyone else, it's the peer.
+        signaling.forwarded_for(&mut headers, "198.51.100.1".parse().unwrap());
+        assert_eq!(headers["x-forwarded-for"], "198.51.100.1");
     }
 }

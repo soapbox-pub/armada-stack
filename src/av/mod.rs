@@ -39,7 +39,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
 use crate::nostr::event::is_hex64;
-use crate::ratelimit::{self, RateLimiter};
+use crate::ratelimit::{self, RateLimiter, Trust};
 use crate::util::{now, random_hex};
 use fleet::{Fleet, Node};
 use grant::ReplaySet;
@@ -66,7 +66,7 @@ struct Broker {
     /// Grants are signed over it, so it's never taken from the request,
     /// whose headers a client could forge.
     base_url: String,
-    trust_proxy: bool,
+    trust: Trust,
     token_ttl: u64,
     max_skew: i64,
     replays: Mutex<ReplaySet>,
@@ -101,13 +101,13 @@ impl Av {
         let nodes = av.nodes.iter().map(Node::from_config).collect::<Result<Vec<_>>>()?;
         let public_url = config.public_url()?.expect("validated: public_url is set when AV is on");
         let local = av.nodes.iter().find(|node| node.is_on(&public_url));
-        let signaling = local.map(|node| signaling::Signaling::new(&node.api_url().expect("validated"), config.trusts_proxy())).transpose()?;
+        let signaling = local.map(|node| signaling::Signaling::new(&node.api_url().expect("validated"), config.trust())).transpose()?;
         Ok(Some(Av {
             signaling: signaling.map(Arc::new),
             broker: Arc::new(Broker {
                 fleet: Fleet::new(nodes),
                 base_url: format!("{}{PATH}/", public_url.origin().ascii_serialization()),
-                trust_proxy: config.trusts_proxy(),
+                trust: config.trust(),
                 token_ttl: av.token_ttl,
                 max_skew: av.max_skew as i64,
                 replays: Mutex::new(ReplaySet::new(Duration::from_secs(av.replay_ttl), MAX_REPLAY_IDS)),
@@ -171,7 +171,7 @@ impl Broker {
             return error(StatusCode::NOT_FOUND, "invalid room name");
         }
 
-        let Some(key) = ratelimit::client_key(request.headers(), request.extensions(), self.trust_proxy) else {
+        let Some(key) = ratelimit::client_key(request.headers(), request.extensions(), self.trust) else {
             // Without one there's nothing to limit by, and a shared bucket
             // would let any such caller exhaust it for the rest.
             return error(StatusCode::BAD_REQUEST, "cannot determine peer address");

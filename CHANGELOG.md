@@ -5,6 +5,12 @@ A release's notes are its section here, so tag `vX.Y.Z` only once
 
 ## Unreleased
 
+- Behind Cloudflare's proxy (the orange cloud), each visitor is limited as
+  itself, by the address Cloudflare names in `CF-Connecting-IP`, rather than
+  every visitor sharing the limits of whichever Cloudflare address it came
+  through. It's believed only from Cloudflare's own addresses, and
+  connections from those aren't capped per address. The built-in LiveKit is
+  told the visitor's address too. `trust_cloudflare = false` turns it off.
 - `armada onion`, run by a user who can't read `/etc/armada/armada.toml`,
   says so and to use sudo, rather than reading no config at all and saying
   there's no onion address yet.

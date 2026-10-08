@@ -11,6 +11,11 @@
 # public_url = "https://armada.example.com"
 # Believe X-Forwarded-For. On by default when listen is loopback.
 # trust_proxy = true
+# Behind Cloudflare's proxy (the orange cloud): a request from one of
+# Cloudflare's addresses is for the visitor CF-Connecting-IP names. Only
+# Cloudflare sends from its addresses, though a Cloudflare Worker can still
+# name any visitor it likes.
+# trust_cloudflare = true
 
 # HTTPS with a Let's Encrypt certificate for public_url's domain. Needs DNS
 # pointing here, ports 443 and 80 open, and root or CAP_NET_BIND_SERVICE.

@@ -13,6 +13,16 @@ use std::time::{Duration, Instant};
 use axum::extract::ConnectInfo;
 use http::{Extensions, HeaderMap};
 
+/// Whose word on a client's address is taken besides the socket's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Trust {
+    /// The operator's own proxy, in `X-Forwarded-For`; see
+    /// [`crate::config::Config::trust_proxy`].
+    pub proxy: bool,
+    /// Cloudflare's, in `CF-Connecting-IP`; see [`crate::cloudflare`].
+    pub cloudflare: bool,
+}
+
 /// The address a request came from. Behind a trusted proxy that's the
 /// rightmost `X-Forwarded-For` entry, the one the proxy appended:
 /// everything left of it came from the client, which could otherwise rotate
@@ -22,15 +32,25 @@ use http::{Extensions, HeaderMap};
 /// add: anything else is taken for a proxy that doesn't append one, and
 /// the socket peer is used, rather than keying the client by text it may
 /// have written itself.
-pub fn client_address(headers: &HeaderMap, extensions: &Extensions, trust_proxy: bool) -> Option<String> {
-    if trust_proxy {
-        let forwarded = headers.get_all("x-forwarded-for").iter().next_back();
-        let last = forwarded.and_then(|value| value.to_str().ok()).and_then(|value| value.rsplit(',').next());
-        if let Some(address) = last.and_then(forwarded_address) {
-            return Some(address.to_string());
+///
+/// If that address is Cloudflare's, the visitor it says it's proxying for
+/// is the client: whether Cloudflare reaches armada directly or through
+/// the operator's proxy.
+pub fn client_address(headers: &HeaderMap, extensions: &Extensions, trust: Trust) -> Option<String> {
+    client_ip(headers, extensions, trust).map(|ip| ip.to_string())
+}
+
+pub fn client_ip(headers: &HeaderMap, extensions: &Extensions, trust: Trust) -> Option<IpAddr> {
+    let peer = extensions.get::<ConnectInfo<SocketAddr>>().map(|ConnectInfo(peer)| peer.ip());
+    let forwarded = trust.proxy.then(|| headers.get_all("x-forwarded-for").iter().next_back()).flatten();
+    let last = forwarded.and_then(|value| value.to_str().ok()).and_then(|value| value.rsplit(',').next());
+    let address = last.and_then(forwarded_address).or(peer)?;
+    if trust.cloudflare {
+        if let Some(visitor) = crate::cloudflare::visitor(headers, address) {
+            return Some(visitor);
         }
     }
-    extensions.get::<ConnectInfo<SocketAddr>>().map(|ConnectInfo(peer)| peer.ip().to_string())
+    Some(address)
 }
 
 /// An `X-Forwarded-For` entry's address: `203.0.113.9`, `203.0.113.9:4000`,
@@ -41,8 +61,8 @@ fn forwarded_address(entry: &str) -> Option<IpAddr> {
 }
 
 /// [`key`] for the address a request came from; see [`client_address`].
-pub fn client_key(headers: &HeaderMap, extensions: &Extensions, trust_proxy: bool) -> Option<String> {
-    client_address(headers, extensions, trust_proxy).map(|address| key(&address))
+pub fn client_key(headers: &HeaderMap, extensions: &Extensions, trust: Trust) -> Option<String> {
+    client_address(headers, extensions, trust).map(|address| key(&address))
 }
 
 /// The key a client is limited under.
@@ -303,22 +323,51 @@ mod tests {
         headers.append("x-forwarded-for", "203.0.113.9".parse().unwrap());
         let mut extensions = Extensions::new();
         extensions.insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4000))));
-        assert_eq!(client_address(&headers, &extensions, true).as_deref(), Some("203.0.113.9"));
-        assert_eq!(client_address(&headers, &extensions, false).as_deref(), Some("127.0.0.1"));
-        assert_eq!(client_address(&HeaderMap::new(), &extensions, true).as_deref(), Some("127.0.0.1"));
-        assert_eq!(client_address(&headers, &Extensions::new(), false), None);
+        assert_eq!(client_address(&headers, &extensions, PROXY).as_deref(), Some("203.0.113.9"));
+        assert_eq!(client_address(&headers, &extensions, Trust::default()).as_deref(), Some("127.0.0.1"));
+        assert_eq!(client_address(&HeaderMap::new(), &extensions, PROXY).as_deref(), Some("127.0.0.1"));
+        assert_eq!(client_address(&headers, &Extensions::new(), Trust::default()), None);
 
         // A port some proxies add is dropped; anything not an address is
         // the peer's.
         let via = |value: &'static str| {
             let mut headers = HeaderMap::new();
             headers.insert("x-forwarded-for", value.parse().unwrap());
-            client_address(&headers, &extensions, true)
+            client_address(&headers, &extensions, PROXY)
         };
         assert_eq!(via("203.0.113.9:4000").as_deref(), Some("203.0.113.9"));
         assert_eq!(via("[2001:db8::1]:4000").as_deref(), Some("2001:db8::1"));
         assert_eq!(via("2001:db8::1").as_deref(), Some("2001:db8::1"));
         assert_eq!(via("unknown").as_deref(), Some("127.0.0.1"));
         assert_eq!(via("6.6.6.6, made-up").as_deref(), Some("127.0.0.1"));
+    }
+
+    const PROXY: Trust = Trust { proxy: true, cloudflare: false };
+    const CLOUDFLARE: Trust = Trust { proxy: false, cloudflare: true };
+
+    #[test]
+    fn believes_cloudflare_for_its_visitors() {
+        let from = |peer: [u8; 4]| {
+            let mut extensions = Extensions::new();
+            extensions.insert(ConnectInfo(SocketAddr::from((peer, 443))));
+            extensions
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-connecting-ip", "203.0.113.9".parse().unwrap());
+        assert_eq!(client_address(&headers, &from([172, 70, 111, 150]), CLOUDFLARE).as_deref(), Some("203.0.113.9"));
+        // Not from Cloudflare, it's the peer's own say-so.
+        assert_eq!(client_address(&headers, &from([198, 51, 100, 1]), CLOUDFLARE).as_deref(), Some("198.51.100.1"));
+        // Turned off, Cloudflare is the client.
+        assert_eq!(client_address(&headers, &from([172, 70, 111, 150]), Trust::default()).as_deref(), Some("172.70.111.150"));
+        // Nothing said, or nothing usable: Cloudflare is the client.
+        assert_eq!(client_address(&HeaderMap::new(), &from([172, 70, 111, 150]), CLOUDFLARE).as_deref(), Some("172.70.111.150"));
+
+        // Cloudflare, then the operator's proxy, which names Cloudflare.
+        headers.insert("x-forwarded-for", "172.70.111.150".parse().unwrap());
+        let both = Trust { proxy: true, cloudflare: true };
+        assert_eq!(client_address(&headers, &from([127, 0, 0, 1]), both).as_deref(), Some("203.0.113.9"));
+        // A proxy naming someone else isn't passing on Cloudflare's word.
+        headers.insert("x-forwarded-for", "198.51.100.1".parse().unwrap());
+        assert_eq!(client_address(&headers, &from([127, 0, 0, 1]), both).as_deref(), Some("198.51.100.1"));
     }
 }

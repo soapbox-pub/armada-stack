@@ -6,6 +6,7 @@
 mod av;
 mod blobs;
 mod blossom;
+mod cloudflare;
 mod config;
 mod hash;
 mod mime;
@@ -135,9 +136,9 @@ async fn main() -> Result<()> {
         client_env = client_env.with_push(push.pubkey());
     }
     let web = web::Web::open(&config.web, client_env, &storage, nostr).await?;
-    let blossom = blossom::Blossom::open(&config.blossom, names.clone(), config.trusts_proxy(), &storage, &cancel)?;
+    let blossom = blossom::Blossom::open(&config.blossom, names.clone(), config.trust(), &storage, &cancel)?;
     blossom.start();
-    let relay = relay::Relay::open(&config.relay, names.clone(), config.trusts_proxy(), &storage, &cancel)?;
+    let relay = relay::Relay::open(&config.relay, names.clone(), config.trust(), &storage, &cancel)?;
     if let Some(push) = push {
         let relay_url = config.public_url()?.and_then(|url| origin::public_origin(&Some(url).into(), &http::HeaderMap::new())).map(|origin| origin.websocket());
         let options = push::Options { relay_url, subject: config.push_subject()?, public_only: true };
@@ -177,28 +178,28 @@ async fn main() -> Result<()> {
         let cancel = cancel.clone();
         tokio::spawn(async move {
             // Each circuit is limited as one client, so per address.
-            if let Err(error) = tls::serve(onions, None, router, tls::Limits::new(false), cancel).await {
+            if let Err(error) = tls::serve(onions, None, router, tls::Limits::new(Default::default()), cancel).await {
                 tracing::error!("serving the onion service: {error}");
             }
         });
     }
-    let behind_proxy = config.trusts_proxy();
+    let trust = config.trust();
     let served = match tls {
         Some(tls) => {
             if let Some(redirect_listener) = redirect_listener {
                 let redirect = tls.redirect_router();
                 let cancel = cancel.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = tls::serve(redirect_listener, None, redirect, tls::Limits::new(behind_proxy), cancel).await {
+                    if let Err(error) = tls::serve(redirect_listener, None, redirect, tls::Limits::new(trust), cancel).await {
                         tracing::error!("serving the HTTPS redirect: {error}");
                     }
                 });
             }
             let config = tls.server_config();
             tls.start(cancel.clone());
-            tls::serve(listener, Some(config), router, tls::Limits::new(behind_proxy), cancel.clone()).await
+            tls::serve(listener, Some(config), router, tls::Limits::new(trust), cancel.clone()).await
         }
-        None => tls::serve(listener, None, router, tls::Limits::new(behind_proxy), cancel.clone()).await,
+        None => tls::serve(listener, None, router, tls::Limits::new(trust), cancel.clone()).await,
     };
     // However serving ended, the rest stops with it.
     cancel.cancel();

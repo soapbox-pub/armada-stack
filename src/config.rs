@@ -52,6 +52,11 @@ pub struct Config {
     /// when `listen` is a loopback address, since then nothing but a local
     /// proxy can reach armada at all.
     pub trust_proxy: Option<bool>,
+    /// Whether a request from one of Cloudflare's addresses is taken to be
+    /// for the visitor it names in `CF-Connecting-IP`; see
+    /// [`crate::cloudflare`]. Unset, on: only Cloudflare can send from its
+    /// addresses.
+    pub trust_cloudflare: Option<bool>,
     pub web: WebConfig,
     pub relay: RelayConfig,
     pub blossom: BlossomConfig,
@@ -488,6 +493,12 @@ impl Config {
         self.trust_proxy.unwrap_or_else(|| self.listen().ip().is_loopback())
     }
 
+    /// Whose word on a client's address to take; see [`Config::trust_proxy`]
+    /// and [`Config::trust_cloudflare`].
+    pub fn trust(&self) -> crate::ratelimit::Trust {
+        crate::ratelimit::Trust { proxy: self.trusts_proxy(), cloudflare: self.trust_cloudflare.unwrap_or(true) }
+    }
+
     #[cfg(test)]
     pub fn parse(text: &str) -> Result<Config> {
         let config: Config = toml::from_str(text)?;
@@ -849,6 +860,13 @@ mod tests {
         assert!(!elsewhere.av.nodes[0].is_on(&public_url));
         let elsewhere = Config::parse(&format!("public_url = \"https://armada.example.com\"\n{}", node("wss://armada.example.com/sfu", None))).unwrap();
         assert!(!elsewhere.av.nodes[0].is_on(&public_url));
+    }
+
+    #[test]
+    fn trusts_cloudflare_unless_told_not_to() {
+        assert!(Config::parse("").unwrap().trust().cloudflare);
+        assert!(Config::parse("listen = \"0.0.0.0:8080\"").unwrap().trust().cloudflare);
+        assert!(!Config::parse("trust_cloudflare = false").unwrap().trust().cloudflare);
     }
 
     #[test]

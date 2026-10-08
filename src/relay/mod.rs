@@ -50,7 +50,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::RelayConfig;
 use crate::origin::{Names, request_origin};
-use crate::ratelimit;
+use crate::ratelimit::{self, Trust};
 use crate::storage::Storage;
 use crate::nostr::Event;
 use crate::web::brand::{BANNER_PATH, ICON_PATH};
@@ -77,8 +77,8 @@ struct Shared {
     authorities: Arc<[String]>,
     /// Where NIP-11's icon and banner are, when it's set.
     names: Names,
-    /// Whether to believe `X-Forwarded-For`; see [`crate::config::Config::trust_proxy`].
-    trust_proxy: bool,
+    /// Whose word on a client's address to take; see [`crate::config::Config::trust`].
+    trust: Trust,
     clients: Arc<Clients>,
     store: Arc<Store>,
     hub: Hub,
@@ -95,7 +95,7 @@ struct Shared {
 impl Relay {
     /// Open the relay's store. Every connection closes once `cancel` fires.
     /// `names` are where clients reach it, as requests to vanish name it.
-    pub fn open(config: &RelayConfig, names: Names, trust_proxy: bool, storage: &Storage, cancel: &CancellationToken) -> Result<Relay> {
+    pub fn open(config: &RelayConfig, names: Names, trust: Trust, storage: &Storage, cancel: &CancellationToken) -> Result<Relay> {
         let store = Arc::new(Store::open(&storage.service_dir("relay")?, config.map_size as usize)?);
         let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
         let hub = Hub::spawn((cores / 2).clamp(1, 8));
@@ -105,7 +105,7 @@ impl Relay {
                 config: config.clone(),
                 authorities: names.authorities().into(),
                 names,
-                trust_proxy,
+                trust,
                 clients: Clients::new(config),
                 store,
                 hub,
@@ -130,7 +130,7 @@ impl Relay {
         let (mut parts, _) = request.into_parts();
         match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
             Ok(upgrade) => {
-                let Some(key) = ratelimit::client_key(&parts.headers, &parts.extensions, shared.trust_proxy) else {
+                let Some(key) = ratelimit::client_key(&parts.headers, &parts.extensions, shared.trust) else {
                     // Without one there's nothing to limit by, and a shared
                     // count would let any such client exhaust it for the rest.
                     return (StatusCode::BAD_REQUEST, "cannot determine peer address").into_response();

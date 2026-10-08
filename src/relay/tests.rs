@@ -45,7 +45,7 @@ impl Harness {
     async fn open(config: RelayConfig, trust_proxy: bool, public_url: Option<url::Url>) -> Harness {
         let dir = tempfile::tempdir().unwrap();
         let cancel = CancellationToken::new();
-        let relay = Relay::open(&config, public_url.into(), trust_proxy, &Storage::allowing_private(dir.path()), &cancel).unwrap();
+        let relay = Relay::open(&config, public_url.into(), crate::ratelimit::Trust { proxy: trust_proxy, cloudflare: true }, &Storage::allowing_private(dir.path()), &cancel).unwrap();
         let router = relay.router();
         let handle = relay.clone();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
