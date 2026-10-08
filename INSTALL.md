@@ -18,11 +18,21 @@ Encrypt. You won't need a reverse proxy.
 Create an `A` record for your domain with the server's IPv4 address. If the
 server has IPv6, add an `AAAA` record for it too.
 
-**If you use Cloudflare, turn the proxy off (grey cloud, "DNS only").**
-armada handles TLS itself, and the relay and Blossom server must be reached
-directly.
+If you use Cloudflare, its proxy can be on (orange cloud) or off (grey
+cloud, "DNS only"). Off is simplest. On, armada tells visitors apart by the
+address Cloudflare passes on, and still gets its own certificate. Then:
 
-Check it before going on:
+- Set SSL/TLS to **Full (strict)** in Cloudflare's dashboard. Flexible works
+  too, but leaves the hop from Cloudflare to the server unencrypted.
+- Calls' audio and video go to the server directly, not through
+  Cloudflare, so the ports in step 2 still have to be open.
+- Cloudflare's Free and Pro plans refuse uploads over 100 MB, a little less
+  than armada's own limit. If that matters, set
+  `[blossom] max_blob_size = 100000000` to match, so the app is told the
+  real limit.
+
+Check it before going on. With Cloudflare's proxy on, it shows Cloudflare's
+addresses rather than the server's.
 
 ```sh
 dig +short armada.example.com
@@ -250,8 +260,8 @@ above, takes the built-in one's place even without `livekit = false`.
 
 If something else already owns ports 80 and 443 on the server, leave `[tls]`
 off and let the proxy terminate TLS. armada listens on `127.0.0.1:8080` by
-default. Because that's a loopback address, it trusts `X-Forwarded-For` and
-`X-Forwarded-Proto` from the proxy:
+default. Because that's a loopback address, it tells clients apart by the
+`X-Forwarded-For` entry the proxy appends:
 
 ```toml
 storage_dir = "/var/lib/armada"

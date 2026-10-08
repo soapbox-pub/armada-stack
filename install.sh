@@ -686,7 +686,7 @@ start_service() {
 		fi
 	else
 		say "https://$DOMAIN/ isn't answering yet. Ports 80 and 443 have to be open,"
-		say "and if the domain is on Cloudflare, its proxy has to be off (grey cloud)."
+		say "and the domain has to point here (or at Cloudflare's proxy, in front of here)."
 		say "See what armada says with: journalctl -u armada -e"
 		exit 1
 	fi
