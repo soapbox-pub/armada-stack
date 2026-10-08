@@ -53,7 +53,8 @@ pub struct Config {
     /// proxy can reach armada at all.
     pub trust_proxy: Option<bool>,
     /// Whether a request from one of Cloudflare's addresses is taken to be
-    /// for the visitor it names in `CF-Connecting-IP`; see
+    /// for the visitor it names in `CF-Connecting-IP`, and on port 80 is
+    /// served rather than redirected if that visitor came over HTTPS; see
     /// [`crate::cloudflare`]. Unset, on: only Cloudflare can send from its
     /// addresses.
     pub trust_cloudflare: Option<bool>,

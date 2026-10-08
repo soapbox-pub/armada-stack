@@ -187,7 +187,7 @@ async fn main() -> Result<()> {
     let served = match tls {
         Some(tls) => {
             if let Some(redirect_listener) = redirect_listener {
-                let redirect = tls.redirect_router();
+                let redirect = tls.redirect_router(trust.cloudflare.then(|| router.clone()));
                 let cancel = cancel.clone();
                 tokio::spawn(async move {
                     if let Err(error) = tls::serve(redirect_listener, None, redirect, tls::Limits::new(trust), cancel).await {

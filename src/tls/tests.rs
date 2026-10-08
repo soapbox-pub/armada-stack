@@ -221,7 +221,7 @@ async fn a_validating_ca_gets_the_challenge_certificate() {
 async fn port_80_redirects_and_answers_challenges() {
     let state = Arc::new(State::default());
     state.http_challenges.lock().insert("tok".into(), "tok.thumb".into());
-    let router = redirect::router("armada.example.com".into(), state);
+    let router = redirect::router("armada.example.com".into(), state, None);
     let send = |method: Method, uri: &str| {
         let request = Request::builder().method(method).uri(uri).header("host", "evil.example").body(Body::empty()).unwrap();
         router.clone().oneshot(request)
@@ -238,6 +238,41 @@ async fn port_80_redirects_and_answers_challenges() {
     assert_eq!(response.headers()["location"], "https://armada.example.com/upload?x=1");
     let response = send(Method::GET, "/").await.unwrap();
     assert_eq!(response.headers()["location"], "https://armada.example.com/");
+}
+
+#[tokio::test]
+async fn port_80_serves_cloudflares_https_visitors() {
+    let state = Arc::new(State::default());
+    state.http_challenges.lock().insert("tok".into(), "tok.thumb".into());
+    let site = axum::Router::new().fallback(|| async { "the site" });
+    let router = redirect::router("armada.example.com".into(), state, Some(site));
+    let send = |peer: [u8; 4], visitor: Option<&'static str>, uri: &str| {
+        let mut request = Request::builder().uri(uri).header("host", "armada.example.com");
+        if let Some(visitor) = visitor {
+            request = request.header("cf-visitor", visitor);
+        }
+        let mut request = request.body(Body::empty()).unwrap();
+        request.extensions_mut().insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((peer, 80))));
+        router.clone().oneshot(request)
+    };
+    let body = |response: http::Response<Body>| async { response.into_body().collect().await.unwrap().to_bytes() };
+    const CLOUDFLARE: [u8; 4] = [172, 70, 111, 150];
+
+    // Flexible SSL: Cloudflare's HTTPS visitor gets the site, not a loop.
+    let response = send(CLOUDFLARE, Some(r#"{"scheme":"https"}"#), "/").await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(&body(response).await[..], b"the site");
+    // Its HTTP visitor is sent to HTTPS, as anyone is.
+    let response = send(CLOUDFLARE, Some(r#"{"scheme":"http"}"#), "/x").await.unwrap();
+    assert_eq!(response.headers()["location"], "https://armada.example.com/x");
+    // And no one else can say they're Cloudflare.
+    let response = send([198, 51, 100, 1], Some(r#"{"scheme":"https"}"#), "/").await.unwrap();
+    assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
+    // Challenges are answered whoever relays them.
+    let response = send(CLOUDFLARE, Some(r#"{"scheme":"https"}"#), "/.well-known/acme-challenge/tok").await.unwrap();
+    assert_eq!(&body(response).await[..], b"tok.thumb");
+    let response = send([198, 51, 100, 1], None, "/.well-known/acme-challenge/tok").await.unwrap();
+    assert_eq!(&body(response).await[..], b"tok.thumb");
 }
 
 #[test]
@@ -300,7 +335,7 @@ async fn pebble() {
     let tls = TcpListener::bind("127.0.0.1:5001").await.unwrap();
     tokio::spawn(serve(tls, Some(server_config(state.clone())), Router::new(), super::Limits::new(Default::default()), cancel.clone()));
     let http = TcpListener::bind("127.0.0.1:5002").await.unwrap();
-    let redirect = redirect::router("armada.test".into(), state.clone());
+    let redirect = redirect::router("armada.test".into(), state.clone(), None);
     tokio::spawn(async move { axum::serve(http, redirect).await });
 
     let account = acme.account().await.unwrap();

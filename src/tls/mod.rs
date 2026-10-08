@@ -85,9 +85,10 @@ impl Tls {
         server_config(self.state.clone())
     }
 
-    /// Answers the CA's HTTP-01 challenges, and redirects the rest.
-    pub fn redirect_router(&self) -> axum::Router {
-        redirect::router(self.domain.clone(), self.state.clone())
+    /// Answers the CA's HTTP-01 challenges, and redirects the rest, but for
+    /// Cloudflare's HTTPS visitors, who are served `site` if it's given.
+    pub fn redirect_router(&self, site: Option<axum::Router>) -> axum::Router {
+        redirect::router(self.domain.clone(), self.state.clone(), site)
     }
 
     /// Get a certificate if there isn't a current one, and renew it as it

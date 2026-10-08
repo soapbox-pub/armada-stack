@@ -12,9 +12,10 @@
 # Believe X-Forwarded-For. On by default when listen is loopback.
 # trust_proxy = true
 # Behind Cloudflare's proxy (the orange cloud): a request from one of
-# Cloudflare's addresses is for the visitor CF-Connecting-IP names. Only
-# Cloudflare sends from its addresses, though a Cloudflare Worker can still
-# name any visitor it likes.
+# Cloudflare's addresses is for the visitor CF-Connecting-IP names, and on
+# port 80 is served, not redirected, if that visitor used HTTPS (Cloudflare's
+# Flexible SSL). Only Cloudflare sends from its addresses, though a
+# Cloudflare Worker can still name any visitor it likes.
 # trust_cloudflare = true
 
 # HTTPS with a Let's Encrypt certificate for public_url's domain. Needs DNS

@@ -11,6 +11,9 @@ A release's notes are its section here, so tag `vX.Y.Z` only once
   through. It's believed only from Cloudflare's own addresses, and
   connections from those aren't capped per address. The built-in LiveKit is
   told the visitor's address too. `trust_cloudflare = false` turns it off.
+- Cloudflare's Flexible SSL mode works: Cloudflare's requests to port 80
+  for visitors on HTTPS are served, where they were redirected to HTTPS,
+  which sent the visitor round in a loop.
 - `armada onion`, run by a user who can't read `/etc/armada/armada.toml`,
   says so and to use sudo, rather than reading no config at all and saying
   there's no onion address yet.
