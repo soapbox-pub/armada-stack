@@ -3,17 +3,16 @@
 A release's notes are its section here, so tag `vX.Y.Z` only once
 `## X.Y.Z` exists: publishing fails without it.
 
-## Unreleased
+## 0.5.1
 
-- The `.deb` and `.rpm` packages are named `armada-stack`, not `armada`.
+0.5.0 was withdrawn; this is its replacement.
 
-## 0.5.0
-
-- Releases have `.deb` and `.rpm` packages beside the binaries, which
-  install armada at `/usr/bin/armada` with its user, unit and UDP buffer
-  limits, and a config to set `public_url` in. See "From a package" in
-  INSTALL.md. `armada upgrade` and `install.sh` leave a packaged armada to
-  its package manager, and pick the plain binary over the packages.
+- Releases have `.deb` and `.rpm` packages, named `armada-stack`, beside the
+  binaries. They install armada at `/usr/bin/armada` with its user, unit and
+  UDP buffer limits, and a config to set `public_url` in. See "From a
+  package" in INSTALL.md. `armada upgrade` and `install.sh` leave a packaged
+  armada to its package manager, and pick the plain binary over the
+  packages.
 - Releases no longer have a `SHA256SUMS`: the signed release gives each
   file's sha256 already.
 
