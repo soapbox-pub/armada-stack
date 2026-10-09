@@ -5,11 +5,7 @@ A release's notes are its section here, so tag `vX.Y.Z` only once
 
 ## Unreleased
 
-- The `.deb` and `.rpm` packages are named `armada-stack`, rather than
-  `armada`, and take the place of 0.5.0's `armada` package when installed
-  over it. The config and data stay, but removing the old package stops
-  and disables the service: start it again with
-  `sudo systemctl enable --now armada`.
+- The `.deb` and `.rpm` packages are named `armada-stack`, not `armada`.
 
 ## 0.5.0
 

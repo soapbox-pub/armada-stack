@@ -21,11 +21,6 @@ license: AGPL-3.0-only
 # systemd-sysctl.
 depends:
   - systemd
-# 0.5.0's packages were named armada; this one takes their place.
-conflicts:
-  - armada
-replaces:
-  - armada
 
 contents:
   - src: armada
