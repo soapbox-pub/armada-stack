@@ -3,6 +3,11 @@
 A release's notes are its section here, so tag `vX.Y.Z` only once
 `## X.Y.Z` exists: publishing fails without it.
 
+## Unreleased
+
+- The `.deb` and `.rpm` files are named `armada-stack-X.Y.Z-linux-ARCH`,
+  after the package, rather than `armada-X.Y.Z-linux-ARCH`.
+
 ## 0.5.1
 
 0.5.0 was withdrawn; this is its replacement.

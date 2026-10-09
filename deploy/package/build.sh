@@ -4,8 +4,8 @@
 #
 #   deploy/package/build.sh VERSION ARCH BINARY OUTDIR
 #
-# ARCH is x86_64 or aarch64. Writes armada-VERSION-linux-ARCH.deb and .rpm to
-# OUTDIR.
+# ARCH is x86_64 or aarch64. Writes armada-stack-VERSION-linux-ARCH.deb and
+# .rpm to OUTDIR.
 set -eu
 
 if [ $# -ne 4 ]; then
@@ -47,5 +47,5 @@ mkdir -p "$outdir"
 outdir="$(cd "$outdir" && pwd)"
 export ARMADA_VERSION="$version" ARMADA_ARCH="$nfpm_arch"
 for packager in deb rpm; do
-    (cd "$stage" && nfpm package --packager "$packager" --target "$outdir/armada-$version-linux-$arch.$packager")
+    (cd "$stage" && nfpm package --packager "$packager" --target "$outdir/armada-stack-$version-linux-$arch.$packager")
 done

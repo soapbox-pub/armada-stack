@@ -284,8 +284,8 @@ Debian, Ubuntu, Fedora, RHEL and their relatives. Find them with ngit, as in
 architecture:
 
 ```sh
-sudo apt install ./armada-X.Y.Z-linux-x86_64.deb    # or
-sudo dnf install ./armada-X.Y.Z-linux-x86_64.rpm
+sudo apt install ./armada-stack-X.Y.Z-linux-x86_64.deb    # or
+sudo dnf install ./armada-stack-X.Y.Z-linux-x86_64.rpm
 ```
 
 The package is named `armada-stack`. It does what `install.sh` does, with the
