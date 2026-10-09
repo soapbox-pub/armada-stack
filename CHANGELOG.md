@@ -3,7 +3,7 @@
 A release's notes are its section here, so tag `vX.Y.Z` only once
 `## X.Y.Z` exists: publishing fails without it.
 
-## Unreleased
+## 0.5.0
 
 - Releases have `.deb` and `.rpm` packages beside the binaries, which
   install armada at `/usr/bin/armada` with its user, unit and UDP buffer
