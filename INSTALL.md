@@ -288,10 +288,10 @@ sudo apt install ./armada-X.Y.Z-linux-x86_64.deb    # or
 sudo dnf install ./armada-X.Y.Z-linux-x86_64.rpm
 ```
 
-It does what `install.sh` does, with the binary at `/usr/bin/armada` rather
-than `/usr/local/bin`: the `armada` user, the unit, the UDP buffer limits, and
-an `/etc/armada/armada.toml` with `[tls] acme = true` and `public_url` unset.
-Set `public_url` there, then start it:
+The package is named `armada-stack`. It does what `install.sh` does, with the
+binary at `/usr/bin/armada` rather than `/usr/local/bin`: the `armada` user,
+the unit, the UDP buffer limits, and an `/etc/armada/armada.toml` with `[tls]
+acme = true` and `public_url` unset. Set `public_url` there, then start it:
 
 ```sh
 sudo $EDITOR /etc/armada/armada.toml
