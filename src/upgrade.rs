@@ -40,6 +40,9 @@ const BLOSSOM: &[&str] = &["https://blossom.ditto.pub", "https://blossom.dreamit
 const RELEASE_KIND: i64 = 30063;
 const ASSET_KIND: i64 = 3063;
 const APPLICATION_KIND: i64 = 32267;
+/// The MIME types of the .deb and .rpm a release has beside each binary, for
+/// the same platform.
+const PACKAGE_TYPES: &[&str] = &["application/vnd.debian.binary-package", "application/x-rpm"];
 
 const MAX_BINARY: u64 = 256 * 1024 * 1024;
 const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -51,6 +54,9 @@ const SETTLE_TIME: Duration = Duration::from_secs(3);
 const BIN: &str = "/usr/local/bin/armada";
 const UNIT: &str = "/etc/systemd/system/armada.service";
 const DEPLOY_UNIT: &str = include_str!("../deploy/armada.service");
+/// Where the .deb and .rpm put the binary, which their package manager
+/// upgrades.
+const PACKAGE_BIN: &str = "/usr/bin/armada";
 
 pub struct Options {
     /// A release to install instead of the latest.
@@ -63,6 +69,9 @@ pub async fn run(options: Options) -> Result<()> {
     let platform = platform()?;
     let current = env!("CARGO_PKG_VERSION");
     let exe = std::env::current_exe().context("finding this binary")?;
+    if exe == Path::new(PACKAGE_BIN) {
+        bail!("{PACKAGE_BIN} was installed from a package. Upgrade it the way it was installed, with apt or dnf.");
+    }
     // The service runs BIN, so it's only restarted when that's what's upgraded.
     let service = service_installed();
     let runs_this = std::fs::canonicalize(BIN).is_ok_and(|bin| bin == exe);
@@ -179,7 +188,7 @@ fn pick_release(events: &[Event], pubkey: &str, wanted: Option<&str>) -> Result<
         .with_context(|| format!("Couldn't find a release of {APP} signed by Soapbox on any relay."))
 }
 
-/// The release's file event for `platform`.
+/// The release's binary for `platform`, not one of its packages.
 fn pick_asset(events: &[Event], release: &Event, pubkey: &str, platform: &str) -> Result<Event> {
     let version = release.tag("version");
     let values = |event: &'_ Event, name: &str| -> Vec<String> {
@@ -195,6 +204,7 @@ fn pick_asset(events: &[Event], release: &Event, pubkey: &str, platform: &str) -
                 && ids.contains(&event.id)
                 && values(event, "a").contains(&application)
                 && values(event, "f").iter().any(|f| f == platform)
+                && !event.tag("m").is_some_and(|m| PACKAGE_TYPES.contains(&m))
                 && event.tag("version") == version
                 && event.verify()
         })
@@ -406,16 +416,20 @@ mod tests {
     fn picks_the_asset_for_the_platform() {
         let pubkey = public_key(SECRET);
         let application = format!("{APPLICATION_KIND}:{pubkey}:{APP}");
-        let asset = |platform: &str, version: &str, created_at: i64| {
-            Event::sign(SECRET, created_at, ASSET_KIND, tags(&[("a", &application), ("f", platform), ("version", version), ("x", &"0".repeat(64))]), "")
+        let file = |platform: &str, version: &str, created_at: i64, mime: &str| {
+            Event::sign(SECRET, created_at, ASSET_KIND, tags(&[("a", &application), ("f", platform), ("version", version), ("x", &"0".repeat(64)), ("m", mime)]), "")
         };
+        let asset = |platform: &str, version: &str, created_at: i64| file(platform, version, created_at, "application/octet-stream");
         let x86 = asset("linux-x86_64", "1.0.0", 1);
         let arm = asset("linux-aarch64", "1.0.0", 1);
         let stale = asset("linux-x86_64", "0.9.0", 1);
         // One the release doesn't name.
         let stray = asset("linux-aarch64", "1.0.0", 2);
-        let release = release("1.0.0", "main", 1, &[("e", &x86.id), ("e", &arm.id), ("e", &stale.id)]);
-        let events = vec![stale.clone(), stray.clone(), x86.clone(), arm.clone()];
+        // The same binaries, packaged.
+        let deb = file("linux-x86_64", "1.0.0", 1, "application/vnd.debian.binary-package");
+        let rpm = file("linux-aarch64", "1.0.0", 1, "application/x-rpm");
+        let release = release("1.0.0", "main", 1, &[("e", &deb.id), ("e", &rpm.id), ("e", &x86.id), ("e", &arm.id), ("e", &stale.id)]);
+        let events = vec![deb.clone(), rpm.clone(), stale.clone(), stray.clone(), x86.clone(), arm.clone()];
 
         assert_eq!(pick_asset(&events, &release, &pubkey, "linux-x86_64").unwrap().id, x86.id);
         assert_eq!(pick_asset(&events, &release, &pubkey, "linux-aarch64").unwrap().id, arm.id);
@@ -474,5 +488,8 @@ mod tests {
         assert!(script.contains(&format!("BLOSSOM = [{}]\n", servers.join(", "))), "install.sh's BLOSSOM differs");
         assert!(script.contains(&format!("BIN={BIN}\n")));
         assert!(script.contains(&format!("UNIT={UNIT}\n")));
+        assert!(script.contains(&format!("PACKAGE_BIN={PACKAGE_BIN}\n")));
+        let types: Vec<String> = PACKAGE_TYPES.iter().map(|m| format!("\"{m}\"")).collect();
+        assert!(script.contains(&format!("PACKAGE_TYPES = [{}]\n", types.join(", "))), "install.sh's PACKAGE_TYPES differ");
     }
 }

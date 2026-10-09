@@ -1,10 +1,11 @@
 name: Release
 
 # On a version tag (vX.Y.Z): test, build static Linux binaries for x86_64 and
-# aarch64 with LiveKit built in, and publish them as an ngit release (NIP-82)
-# signed by the Soapbox key, as .ngit/release.yaml describes. The binaries
-# are also uploaded as run artifacts first, so a failed publish still leaves
-# them on the CI result.
+# aarch64 with LiveKit built in, and the same binaries as .deb and .rpm
+# packages (deploy/package/), and publish them as an ngit release (NIP-82)
+# signed by the Soapbox key, as .ngit/release.yaml describes. The files are
+# also uploaded as run artifacts first, so a failed publish still leaves them
+# on the CI result.
 #
 # Secrets, provisioned on the coordinator under its #SOAPBOX alias, which
 # covers every repository of the Soapbox key:
@@ -28,6 +29,8 @@ jobs:
       ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
       ZIGBUILD_VERSION: 0.23.4
       ZIGBUILD_SHA256: 9e3cf73485edbd45905c8aadbc0fdf869c7ddc3848f0c898229f2680db52e44b
+      NFPM_VERSION: 2.47.0
+      NFPM_SHA256: 0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783
       # The LiveKit built into armada (src/av/builtin.rs): its release
       # tarballs, from the release's checksums.txt.
       LIVEKIT_VERSION: 1.13.7
@@ -52,7 +55,7 @@ jobs:
           }
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Install Rust, zig and cargo-zigbuild
+      - name: Install Rust, zig, cargo-zigbuild and nfpm
         run: |
           set -eu
           if ! command -v rustup >/dev/null; then
@@ -71,8 +74,13 @@ jobs:
           curl -fsSL -o zigbuild.tar.xz "https://github.com/rust-cross/cargo-zigbuild/releases/download/v$ZIGBUILD_VERSION/cargo-zigbuild-x86_64-unknown-linux-musl.tar.xz"
           echo "$ZIGBUILD_SHA256  zigbuild.tar.xz" | sha256sum -c -
           tar -xJf zigbuild.tar.xz
+          curl -fsSL -o nfpm.tar.gz "https://github.com/goreleaser/nfpm/releases/download/v$NFPM_VERSION/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          echo "$NFPM_SHA256  nfpm.tar.gz" | sha256sum -c -
+          mkdir -p nfpm
+          tar -xzf nfpm.tar.gz -C nfpm
           echo "$tools/zig-x86_64-linux-$ZIG_VERSION" >> "$GITHUB_PATH"
           echo "$tools/cargo-zigbuild-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+          echo "$tools/nfpm" >> "$GITHUB_PATH"
 
       - name: Download LiveKit
         run: |
@@ -119,8 +127,16 @@ jobs:
           # loader, no libc.
           ./dist/armada-$VERSION-linux-x86_64 --version
           file dist/* || true
-          (cd dist && sha256sum armada-* > SHA256SUMS)
-          cat dist/SHA256SUMS
+
+      - name: Build the packages
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -eu
+          for arch in x86_64 aarch64; do
+            deploy/package/build.sh "$VERSION" "$arch" "dist/armada-$VERSION-linux-$arch" dist
+          done
+          ls -lh dist
 
       - uses: actions/upload-artifact@v4
         with:

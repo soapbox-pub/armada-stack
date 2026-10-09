@@ -1,0 +1,16 @@
+# armada's configuration, as the package installs it. Set public_url to this
+# server's domain, which must already point here, then start armada:
+#
+#   sudo systemctl enable --now armada
+#
+# Every other setting is optional. armada.example.toml, in the source, lists
+# them all with their defaults.
+storage_dir = "/var/lib/armada"
+# public_url = "https://armada.example.com"
+
+# HTTPS with a Let's Encrypt certificate for public_url's domain, on ports
+# 443 and 80. Behind a reverse proxy, set acme = false.
+[tls]
+acme = true
+# Given to Let's Encrypt, to write to about the certificate.
+# email = "you@example.com"

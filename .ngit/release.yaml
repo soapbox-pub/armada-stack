@@ -30,5 +30,12 @@ assets:
     platforms: [linux-x86_64]
   - file: dist/armada-{version}-linux-aarch64
     platforms: [linux-aarch64]
-  - file: dist/SHA256SUMS
-    platform_agnostic: true
+  # The same binaries, packaged; told apart from them by their MIME types.
+  - file: dist/armada-{version}-linux-x86_64.deb
+    platforms: [linux-x86_64]
+  - file: dist/armada-{version}-linux-aarch64.deb
+    platforms: [linux-aarch64]
+  - file: dist/armada-{version}-linux-x86_64.rpm
+    platforms: [linux-x86_64]
+  - file: dist/armada-{version}-linux-aarch64.rpm
+    platforms: [linux-aarch64]

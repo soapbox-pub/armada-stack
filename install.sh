@@ -26,6 +26,8 @@ set -eu
 BIN=/usr/local/bin/armada
 CONFIG=/etc/armada/armada.toml
 UNIT=/etc/systemd/system/armada.service
+# Where the .deb and .rpm put the binary, which their package manager upgrades.
+PACKAGE_BIN=/usr/bin/armada
 
 say() { printf 'armada: %s\n' "$*" >&2; }
 die() { say "$*"; exit 1; }
@@ -102,6 +104,9 @@ RELAYS = [
 ]
 # Asked for the binary by its hash when the URL in its release fails.
 BLOSSOM = ["https://blossom.ditto.pub", "https://blossom.dreamith.to", "https://blossom.primal.net"]
+# The MIME types of the .deb and .rpm a release has beside each binary, for
+# the same platform.
+PACKAGE_TYPES = ["application/vnd.debian.binary-package", "application/x-rpm"]
 MAX_BINARY = 256 * 1024 * 1024
 MAX_MESSAGE = 8 * 1024 * 1024
 TIMEOUT = 10
@@ -452,7 +457,8 @@ def find_release(wanted):
 
 
 def find_asset(release, platform):
-    """The release's kind-3063 file event for `platform`."""
+    """The release's kind-3063 file event for the binary for `platform`, not
+    one of its packages."""
     version = tag(release, "version")
     ids = [t[1] for t in release["tags"] if len(t) > 1 and t[0] == "e"]
     application = "32267:{}:{}".format(PUBKEY, APP)
@@ -460,7 +466,12 @@ def find_asset(release, platform):
         # One the release names, not just any file event of Soapbox's.
         if event.get("kind") != 3063 or event["id"] not in ids:
             continue
-        if application in tags(event, "a") and platform in tags(event, "f") and tag(event, "version") == version:
+        if (
+            application in tags(event, "a")
+            and platform in tags(event, "f")
+            and tag(event, "version") == version
+            and tag(event, "m") not in PACKAGE_TYPES
+        ):
             return event
     fail("Release {} has no build for {}.".format(version, platform))
 
@@ -749,6 +760,8 @@ main() {
 	aarch64 | arm64) PLATFORM=linux-aarch64 ;;
 	*) die "There's no release for $(uname -m) yet; INSTALL.md says how to build from source." ;;
 	esac
+	[ ! -e "$PACKAGE_BIN" ] ||
+		die "$PACKAGE_BIN was installed from a package. Upgrade it the way it was installed, with apt or dnf."
 	[ "$(id -u)" -eq 0 ] || die "Run this as root, e.g. curl -fsSL https://armada.buzz/install.sh | sudo sh -s -- $DOMAIN"
 
 	if [ -e "$CONFIG" ]; then

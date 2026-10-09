@@ -193,6 +193,10 @@ current and running, it changes nothing. Your config is never rewritten.
 `armada upgrade --check` only says whether there's a newer release, and
 `--version 0.1.0` installs a particular release instead, to go back to one.
 
+An armada installed [from a package](#from-a-package) is upgraded by
+installing the next release's package; `armada upgrade` and the installer
+leave it alone.
+
 armada 0.1.0 has no `upgrade` command, so upgrade from it, or from anywhere,
 by running the installer again, with or without the domain:
 
@@ -272,6 +276,41 @@ The proxy must pass WebSocket upgrades through, for the relay and `/rtc`.
 It must not buffer or limit request bodies below the Blossom upload size,
 which is 100 MB by default.
 
+## From a package
+
+Each release also has the binaries as `.deb` and `.rpm` packages, for
+Debian, Ubuntu, Fedora, RHEL and their relatives. Find them with ngit, as in
+[Installing by hand](#installing-by-hand), and install the one for your
+architecture:
+
+```sh
+sudo apt install ./armada-X.Y.Z-linux-x86_64.deb    # or
+sudo dnf install ./armada-X.Y.Z-linux-x86_64.rpm
+```
+
+It does what `install.sh` does, with the binary at `/usr/bin/armada` rather
+than `/usr/local/bin`: the `armada` user, the unit, the UDP buffer limits, and
+an `/etc/armada/armada.toml` with `[tls] acme = true` and `public_url` unset.
+Set `public_url` there, then start it:
+
+```sh
+sudo $EDITOR /etc/armada/armada.toml
+sudo systemctl enable --now armada
+```
+
+The service is left stopped and disabled until then, since it refuses to
+start with `acme` on and no `public_url`. An upgrade keeps your config and
+restarts armada if it was running. Removing the package stops and disables it
+but keeps `/var/lib/armada` and the `armada` user; purging it also removes
+the config. To change the unit, use `sudo systemctl edit armada` rather than
+editing it, so the next upgrade doesn't undo it.
+
+Moving from `install.sh`, remove `/etc/systemd/system/armada.service` and
+`/usr/local/bin/armada` after installing the package: that unit overrides the
+package's and runs the old binary. If `/etc/armada/armada.toml` is already
+there, apt asks whether to replace it: keep yours, the default. dnf keeps it
+without asking and puts the package's beside it as `armada.toml.rpmnew`.
+
 ## Installing by hand
 
 Without systemd, or to see each step, install armada yourself.
@@ -290,7 +329,8 @@ ngit release view armada-stack@0.4.0 --repo "$REPO" --verify
 ```
 
 `view` prints each file's URL and sha256, and `--verify` downloads and checks
-them. For 0.4.0, on x86_64 (use the aarch64 URL on ARM64):
+them. Download the binary for your architecture by its URL and check it
+against that sha256. For 0.4.0:
 
 ```sh
 # x86_64
@@ -298,8 +338,7 @@ curl -fLo armada-0.4.0-linux-x86_64 https://blossom.ditto.pub/3dd21c68b9c3bd332f
 # aarch64
 curl -fLo armada-0.4.0-linux-aarch64 https://blossom.ditto.pub/c5d33e36cad3d7d81909f380ce72fbf87141f190a1e17027de11a8d162d928ee
 
-curl -fLo SHA256SUMS https://blossom.ditto.pub/d50f8fcc24e49acdc7f7e79043c893c3dcdab0cf7ae175ed11a39b880d948150
-sha256sum --check --ignore-missing SHA256SUMS
+echo "3dd21c68b9c3bd332fb4365977d7d6f13f5fc9e547d9a862efe84b3096f81a39  armada-0.4.0-linux-x86_64" | sha256sum --check
 install -m 755 armada-0.4.0-linux-x86_64 /usr/local/bin/armada
 ```
 

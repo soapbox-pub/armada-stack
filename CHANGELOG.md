@@ -3,6 +3,16 @@
 A release's notes are its section here, so tag `vX.Y.Z` only once
 `## X.Y.Z` exists: publishing fails without it.
 
+## Unreleased
+
+- Releases have `.deb` and `.rpm` packages beside the binaries, which
+  install armada at `/usr/bin/armada` with its user, unit and UDP buffer
+  limits, and a config to set `public_url` in. See "From a package" in
+  INSTALL.md. `armada upgrade` and `install.sh` leave a packaged armada to
+  its package manager, and pick the plain binary over the packages.
+- Releases no longer have a `SHA256SUMS`: the signed release gives each
+  file's sha256 already.
+
 ## 0.4.2
 
 - Behind Cloudflare's proxy (the orange cloud), each visitor is limited as
