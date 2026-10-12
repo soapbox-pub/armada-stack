@@ -1,7 +1,7 @@
 # The .deb and .rpm each release publishes, built by build.sh, which sets the
 # variables below and runs nfpm in a directory holding every file named here.
-# They install what install.sh does, in the places a package belongs: the
-# binary in /usr/bin rather than /usr/local/bin, and the unit with the
+# They install what INSTALL.md does by hand, in the places a package belongs:
+# the binary in /usr/bin rather than /usr/local/bin, and the unit with the
 # distribution's.
 
 # The project's name, which the binary, user and service aren't named after.

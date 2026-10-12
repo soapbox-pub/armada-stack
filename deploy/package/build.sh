@@ -30,9 +30,9 @@ esac
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 
-# deploy/armada.service is written for install.sh, which puts the binary in
+# deploy/armada.service is written for a binary installed by hand in
 # /usr/local/bin; the package puts it in /usr/bin. Its opening comment says
-# how to install it by hand, so it's left out, as install.sh leaves it.
+# how to install it by hand, so it's left out, as `armada upgrade` leaves it.
 sed -n -e '/^\[Unit\]$/,$p' deploy/armada.service | sed 's|/usr/local/bin/armada|/usr/bin/armada|g' > "$stage/armada.service"
 if ! grep -qx 'ExecStart=/usr/bin/armada --config /etc/armada/armada.toml' "$stage/armada.service"; then
     echo "deploy/armada.service changed shape; update $0 to match." >&2

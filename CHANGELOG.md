@@ -10,9 +10,10 @@ A release's notes are its section here, so tag `vX.Y.Z` only once
 - install.sh is a short shell script, with no Python. On Debian, Ubuntu,
   Fedora, RHEL and their relatives it adds the `armada-stack` repository at
   pkg.soapbox.pub and installs the package, so upgrades come with the
-  system's; rerun on a server it set up before, it moves it to the package.
-  Elsewhere it installs the binary from pkg.soapbox.pub as before. It no
-  longer takes `--version`: use `armada upgrade --version`.
+  system's. It no longer installs the binary anywhere else: without apt
+  2.3.10 or dnf, install armada by hand, as INSTALL.md says, and upgrade it
+  with `armada upgrade`. It no longer takes `--version`: use
+  `armada upgrade --version`.
 
 ## 0.5.1
 

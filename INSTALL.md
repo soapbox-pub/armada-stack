@@ -8,7 +8,9 @@ Encrypt. You won't need a reverse proxy.
 ## What you need
 
 - A Linux server with systemd and a public IP address, on x86_64 or aarch64
-  (ARM64). 2 CPUs and 4 GB of RAM is plenty to start.
+  (ARM64). 2 CPUs and 4 GB of RAM is plenty to start. The installer needs
+  Debian 12, Ubuntu 22.04, Fedora, RHEL 8 or later, or a relative of theirs;
+  on anything else, [install it by hand](#installing-by-hand).
 - A domain or subdomain you can point at it, such as `armada.example.com`.
 - Ports 80 and 443 open to the internet. Let's Encrypt checks port 80 when it
   issues the certificate. Calls also need 7881/tcp and 7882/udp.
@@ -82,28 +84,22 @@ answer blank and it installs only the package.
 
 The script:
 
-1. On Debian, Ubuntu, Fedora, RHEL and their relatives, adds the
-   `armada-stack` package repository at
+1. Adds the `armada-stack` package repository at
    [pkg.soapbox.pub](https://pkg.soapbox.pub/deb/soapbox.pub/armada-stack)
-   and installs the package from it ([From a package](#from-a-package) says
-   what it installs). pkg.soapbox.pub serves the releases Soapbox signs on
-   Nostr, with indexes signed by its own key.
-2. Anywhere else, downloads the latest release's binary from pkg.soapbox.pub,
-   checks it against the release's sha256, and installs it at
-   `/usr/local/bin/armada` with an `armada` user, the
-   [`deploy/armada.service`](deploy/armada.service) unit, and the kernel UDP
-   buffer limits calls need, in `/etc/sysctl.d/60-armada.conf`.
-3. Sets `public_url` in `/etc/armada/armada.toml` to your domain. A config
+   and installs the package from it with apt or dnf
+   ([From a package](#from-a-package) says what it installs).
+   pkg.soapbox.pub serves the releases Soapbox signs on Nostr, with indexes
+   signed by its own key.
+2. Sets `public_url` in `/etc/armada/armada.toml` to your domain. A config
    that already has one is left alone.
-4. Enables and starts the service, and waits until the site answers over
+3. Enables and starts the service, and waits until the site answers over
    HTTPS.
 
 It finishes in about a minute:
 
 ```
-armada: added the armada-stack repository, /etc/apt/sources.list.d/armada-stack.sources
 armada: installing armada-stack with apt
-armada: installed armada-stack 0.5.1
+armada: armada-stack 0.5.1 is installed
 armada: set public_url in /etc/armada/armada.toml to https://armada.example.com
 armada: armada is running; waiting for https://armada.example.com/
 armada: armada is running at https://armada.example.com/
@@ -189,7 +185,7 @@ sudo dnf upgrade
 
 The package restarts armada if it was running, and keeps your config.
 
-Anywhere else, run:
+Installed by hand, run:
 
 ```sh
 sudo armada upgrade
@@ -204,8 +200,7 @@ changes nothing. Your config is never rewritten.
 `armada upgrade --check` only says whether there's a newer release, and
 `--version 0.1.0` installs a particular release instead, to go back to one.
 
-Either way, running the installer again also upgrades, with or without the
-domain:
+Running the installer again also upgrades, with or without the domain:
 
 ```sh
 curl -fsSL https://armada.buzz/install.sh | sudo sh
@@ -213,11 +208,6 @@ curl -fsSL https://armada.buzz/install.sh | sudo sh
 
 It also waits for HTTPS to answer. A different domain from the config's is
 refused: to move domains, edit `public_url` and restart.
-
-Running it on a Debian or Fedora server set up by an earlier installer moves
-it to the package: it installs `armada-stack`, removes
-`/usr/local/bin/armada` and the `/etc/systemd/system/armada.service` that ran
-it, and restarts armada. The config and `/var/lib/armada` are kept.
 
 ## Backups
 
@@ -324,7 +314,8 @@ without asking and puts the package's beside it as `armada.toml.rpmnew`.
 
 ## Installing by hand
 
-Without systemd, or to see each step, install armada yourself.
+Without apt or dnf, without systemd, or to see each step, install armada
+yourself.
 
 **Get the binary.** Download it from the latest release:
 
@@ -374,6 +365,12 @@ public_url = "https://armada.example.com"
 acme = true
 # email = "you@example.com"
 ```
+
+**Let calls have their UDP buffers.** Every call's media shares one socket,
+and the kernel's default buffers drop packets under load. Copy
+[`deploy/package/sysctl.conf`](deploy/package/sysctl.conf) to
+`/etc/sysctl.d/60-armada.conf` and load it with
+`sysctl -p /etc/sysctl.d/60-armada.conf`.
 
 **Run it.** Under systemd, copy [`deploy/armada.service`](deploy/armada.service)
 to `/etc/systemd/system/`, then:

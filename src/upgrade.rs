@@ -1,11 +1,9 @@
 //! `armada upgrade`: replace this binary with the latest signed release, and
-//! restart the service if one is set up, as rerunning install.sh does.
+//! restart the service if one is set up.
 //!
 //! Releases are found on Nostr and trusted only if signed by Soapbox's key.
 //! The binary is checked against the sha256 in its signed release, and asked
-//! its version, before it's moved into place. install.sh, where there's no
-//! package manager, gets the same binary from pkg.soapbox.pub and installs it
-//! with the same unit; a test keeps them alike.
+//! its version, before it's moved into place.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -51,7 +49,8 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a restarted service is given before it's asked if it's running.
 const SETTLE_TIME: Duration = Duration::from_secs(3);
 
-/// Where install.sh puts the binary, and the unit that runs it from there.
+/// Where INSTALL.md puts the binary by hand, and the unit that runs it from
+/// there.
 const BIN: &str = "/usr/local/bin/armada";
 const UNIT: &str = "/etc/systemd/system/armada.service";
 const DEPLOY_UNIT: &str = include_str!("../deploy/armada.service");
@@ -322,7 +321,7 @@ fn service_installed() -> bool {
     Path::new("/run/systemd/system").is_dir() && Path::new(UNIT).exists()
 }
 
-/// The unit as install.sh writes it: deploy/armada.service from [Unit] on.
+/// deploy/armada.service from [Unit] on, without the comment on installing it.
 fn unit_text() -> &'static str {
     &DEPLOY_UNIT[DEPLOY_UNIT.find("[Unit]").unwrap_or(0)..]
 }
@@ -474,16 +473,5 @@ mod tests {
         assert!(check_directory(dir.path()).is_err());
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o775)).unwrap();
         assert!(check_directory(dir.path()).is_err());
-    }
-
-    /// install.sh installs the binary where this upgrades it, with the same
-    /// unit, so neither undoes the other.
-    #[test]
-    fn install_sh_agrees() {
-        let script = include_str!("../install.sh");
-        assert!(script.contains(&format!("BIN={BIN}\n")));
-        assert!(script.contains(&format!("UNIT={UNIT}\n")));
-        assert!(script.contains(&format!("PACKAGE_BIN={PACKAGE_BIN}\n")));
-        assert!(script.contains(&format!("cat <<'EOF'\n{}EOF\n", unit_text())), "install.sh's unit differs");
     }
 }

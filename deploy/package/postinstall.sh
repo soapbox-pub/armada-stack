@@ -13,7 +13,7 @@ esac
 
 systemd-sysusers armada.conf
 # The config can hold secrets, such as a LiveKit node's: readable by armada,
-# writable by root, as install.sh leaves it.
+# writable by root.
 chown root:armada /etc/armada /etc/armada/armada.toml
 chmod 750 /etc/armada
 chmod 640 /etc/armada/armada.toml
