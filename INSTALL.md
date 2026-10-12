@@ -78,31 +78,34 @@ curl -fsSL https://armada.buzz/install.sh | sudo sh -s -- armada.example.com
 From a copy of this repository, that's `sudo sh install.sh armada.example.com`.
 Add `--email you@example.com` to give Let's Encrypt an address to write to
 about the certificate. Leave the domain off and it asks for one; leave the
-answer blank and it installs only the binary.
+answer blank and it installs only the package.
 
 The script:
 
-1. Finds the latest release on Nostr relays and checks that it's signed by
-   Soapbox's key, `npub10qdp2fc9ta6vraczxrcs8prqnv69fru2k6s2dj48gqjcylulmtjsg9arpj`.
-2. Downloads the binary for the server's architecture and checks it against
-   the sha256 in that signed release.
-3. Installs it at `/usr/local/bin/armada`, creates an `armada` user, and
-   writes `/etc/armada/armada.toml`. An existing config is left alone.
-4. Installs the [`deploy/armada.service`](deploy/armada.service) unit, starts
-   it, and waits until the site answers over HTTPS.
-5. Raises the kernel's UDP buffer limits for calls, in
-   `/etc/sysctl.d/60-armada.conf`.
+1. On Debian, Ubuntu, Fedora, RHEL and their relatives, adds the
+   `armada-stack` package repository at
+   [pkg.soapbox.pub](https://pkg.soapbox.pub/deb/soapbox.pub/armada-stack)
+   and installs the package from it ([From a package](#from-a-package) says
+   what it installs). pkg.soapbox.pub serves the releases Soapbox signs on
+   Nostr, with indexes signed by its own key.
+2. Anywhere else, downloads the latest release's binary from pkg.soapbox.pub,
+   checks it against the release's sha256, and installs it at
+   `/usr/local/bin/armada` with an `armada` user, the
+   [`deploy/armada.service`](deploy/armada.service) unit, and the kernel UDP
+   buffer limits calls need, in `/etc/sysctl.d/60-armada.conf`.
+3. Sets `public_url` in `/etc/armada/armada.toml` to your domain. A config
+   that already has one is left alone.
+4. Enables and starts the service, and waits until the site answers over
+   HTTPS.
 
-It needs Python 3 to check the signature, and installs it if the server
-doesn't have it. It finishes in about a minute:
+It finishes in about a minute:
 
 ```
-armada: found armada-stack 0.4.0, released 2026-10-05, signed by Soapbox
-armada: downloaded https://blossom.ditto.pub/3dd2…1a39 and checked its sha256, 3dd2…1a39
-armada: installed armada 0.4.0 at /usr/local/bin/armada
-armada: created the armada user
-armada: wrote /etc/armada/armada.toml; every other setting has a default
-armada: started the armada service; waiting for https://armada.example.com/
+armada: added the armada-stack repository, /etc/apt/sources.list.d/armada-stack.sources
+armada: installing armada-stack with apt
+armada: installed armada-stack 0.5.1
+armada: set public_url in /etc/armada/armada.toml to https://armada.example.com
+armada: armada is running; waiting for https://armada.example.com/
 armada: armada is running at https://armada.example.com/
 armada: and over Tor at http://5h34fohc7jrfzdyzj2jadl3csmmqox5fsqknuzgi5bfbnlokgxakd6id.onion/
 ```
@@ -112,10 +115,6 @@ new versions of the web app and deploys them on its own.
 
 The config it writes is all armada needs; `armada.example.toml` lists and
 explains every other setting. After changing it, run `systemctl restart armada`.
-
-On RHEL, Rocky, AlmaLinux and CentOS Stream, sudo doesn't look in
-`/usr/local/bin`. There, where this guide says `sudo armada`, run
-`sudo /usr/local/bin/armada`.
 
 ## 4. Check it
 
@@ -180,32 +179,45 @@ Tor needs nothing from the firewall: it only makes outbound connections.
 
 ## Upgrading
 
+Installed from the package repository, armada upgrades with the rest of the
+system:
+
+```sh
+sudo apt update && sudo apt upgrade    # or
+sudo dnf upgrade
+```
+
+The package restarts armada if it was running, and keeps your config.
+
+Anywhere else, run:
+
 ```sh
 sudo armada upgrade
 ```
 
-It finds the latest release on Nostr the way the installer does, trusting
-only Soapbox's signature, and checks the binary against the sha256 in that
-release before moving it into place. Then it refreshes the systemd unit and
-restarts the service, starting it if it was stopped. If everything is already
-current and running, it changes nothing. Your config is never rewritten.
+It finds the latest release on Nostr, trusting only Soapbox's signature, and
+checks the binary against the sha256 in that release before moving it into
+place. Then it refreshes the systemd unit and restarts the service, starting
+it if it was stopped. If everything is already current and running, it
+changes nothing. Your config is never rewritten.
 
 `armada upgrade --check` only says whether there's a newer release, and
 `--version 0.1.0` installs a particular release instead, to go back to one.
 
-An armada installed [from a package](#from-a-package) is upgraded by
-installing the next release's package; `armada upgrade` and the installer
-leave it alone.
-
-armada 0.1.0 has no `upgrade` command, so upgrade from it, or from anywhere,
-by running the installer again, with or without the domain:
+Either way, running the installer again also upgrades, with or without the
+domain:
 
 ```sh
 curl -fsSL https://armada.buzz/install.sh | sudo sh
 ```
 
-It does the same, and also waits for HTTPS to answer. A different domain from
-the config's is refused: to move domains, edit `public_url` and restart.
+It also waits for HTTPS to answer. A different domain from the config's is
+refused: to move domains, edit `public_url` and restart.
+
+Running it on a Debian or Fedora server set up by an earlier installer moves
+it to the package: it installs `armada-stack`, removes
+`/usr/local/bin/armada` and the `/etc/systemd/system/armada.service` that ran
+it, and restarts armada. The config and `/var/lib/armada` are kept.
 
 ## Backups
 
@@ -279,19 +291,17 @@ which is 100 MB by default.
 ## From a package
 
 Each release also has the binaries as `.deb` and `.rpm` packages, for
-Debian, Ubuntu, Fedora, RHEL and their relatives. Find them with ngit, as in
-[Installing by hand](#installing-by-hand), and install the one for your
-architecture:
+Debian, Ubuntu, Fedora, RHEL and their relatives, served as package
+repositories at pkg.soapbox.pub. `install.sh` adds the repository and
+installs the package; to do it yourself, follow the steps for
+[apt](https://pkg.soapbox.pub/deb/soapbox.pub/armada-stack) or
+[dnf](https://pkg.soapbox.pub/rpm/soapbox.pub/armada-stack).
 
-```sh
-sudo apt install ./armada-stack-X.Y.Z-linux-x86_64.deb    # or
-sudo dnf install ./armada-stack-X.Y.Z-linux-x86_64.rpm
-```
-
-The package is named `armada-stack`. It does what `install.sh` does, with the
-binary at `/usr/bin/armada` rather than `/usr/local/bin`: the `armada` user,
-the unit, the UDP buffer limits, and an `/etc/armada/armada.toml` with `[tls]
-acme = true` and `public_url` unset. Set `public_url` there, then start it:
+The package is named `armada-stack`. It puts the binary at `/usr/bin/armada`
+rather than `/usr/local/bin`, and installs the `armada` user, the unit, the
+UDP buffer limits, and an `/etc/armada/armada.toml` with `[tls] acme = true`
+and `public_url` unset. `install.sh` sets `public_url` and starts it; without
+it, set `public_url` yourself, then start it:
 
 ```sh
 sudo $EDITOR /etc/armada/armada.toml
@@ -305,9 +315,10 @@ but keeps `/var/lib/armada` and the `armada` user; purging it also removes
 the config. To change the unit, use `sudo systemctl edit armada` rather than
 editing it, so the next upgrade doesn't undo it.
 
-Moving from `install.sh`, remove `/etc/systemd/system/armada.service` and
-`/usr/local/bin/armada` after installing the package: that unit overrides the
-package's and runs the old binary. If `/etc/armada/armada.toml` is already
+Moving by hand from a binary install, remove
+`/etc/systemd/system/armada.service` and `/usr/local/bin/armada` after
+installing the package: that unit overrides the package's and runs the old
+binary. If `/etc/armada/armada.toml` is already
 there, apt asks whether to replace it: keep yours, the default. dnf keeps it
 without asking and puts the package's beside it as `armada.toml.rpmnew`.
 
@@ -315,8 +326,14 @@ without asking and puts the package's beside it as `armada.toml.rpmnew`.
 
 Without systemd, or to see each step, install armada yourself.
 
-**Get the binary.** Running `install.sh` with no domain installs the latest
-release's binary and nothing else. Or download a release directly. Release
+**Get the binary.** Download it from the latest release:
+
+```sh
+curl -fLO https://pkg.soapbox.pub/releases/soapbox.pub/armada-stack/latest/download/armada-X.Y.Z-linux-x86_64
+```
+
+`https://pkg.soapbox.pub/releases/soapbox.pub/armada-stack/latest` lists its
+files with their sha256s. Or find a release on Nostr yourself. Release
 binaries are statically linked, so they run on any distribution. They're
 listed by [ngit](https://ngit.dev/install), which has to run inside a git
 repository:

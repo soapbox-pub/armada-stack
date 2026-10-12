@@ -25,9 +25,10 @@ at it and ports 80, 443 and 7881/tcp and 7882/udp open:
 curl -fsSL https://armada.buzz/install.sh | sudo sh -s -- armada.example.com
 ```
 
-It installs the latest release, checked against Soapbox's signature, sets up
-the service, and gets the certificate, in about a minute. Then open
-`https://armada.example.com`. To upgrade later, run `sudo armada upgrade`.
+It installs the latest release, from a package repository on Debian, Ubuntu,
+Fedora and RHEL, sets up the service, and gets the certificate, in about a
+minute. Then open `https://armada.example.com`. To upgrade later, run the
+installer again, or let `apt upgrade` or `dnf upgrade` do it.
 
 [INSTALL.md](INSTALL.md) goes through it step by step, and covers Tor,
 backups, calls, running behind a reverse proxy, installing by hand and

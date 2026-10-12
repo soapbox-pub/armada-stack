@@ -3,8 +3,9 @@
 //!
 //! Releases are found on Nostr and trusted only if signed by Soapbox's key.
 //! The binary is checked against the sha256 in its signed release, and asked
-//! its version, before it's moved into place. install.sh does the same in
-//! Python, with the same key, relays, and servers; a test keeps them alike.
+//! its version, before it's moved into place. install.sh, where there's no
+//! package manager, gets the same binary from pkg.soapbox.pub and installs it
+//! with the same unit; a test keeps them alike.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -475,21 +476,14 @@ mod tests {
         assert!(check_directory(dir.path()).is_err());
     }
 
-    /// install.sh finds releases the same way, so it must look in the same
-    /// places for the same signer.
+    /// install.sh installs the binary where this upgrades it, with the same
+    /// unit, so neither undoes the other.
     #[test]
     fn install_sh_agrees() {
         let script = include_str!("../install.sh");
-        assert!(script.contains(&format!("PUBKEY = \"{PUBKEY}\"\n")));
-        assert!(script.contains(&format!("APP = \"{APP}\"\n")));
-        let relays: String = RELAYS.iter().map(|relay| format!("    \"{relay}\",\n")).collect();
-        assert!(script.contains(&format!("RELAYS = [\n{relays}]\n")), "install.sh's RELAYS differ");
-        let servers: Vec<String> = BLOSSOM.iter().map(|server| format!("\"{server}\"")).collect();
-        assert!(script.contains(&format!("BLOSSOM = [{}]\n", servers.join(", "))), "install.sh's BLOSSOM differs");
         assert!(script.contains(&format!("BIN={BIN}\n")));
         assert!(script.contains(&format!("UNIT={UNIT}\n")));
         assert!(script.contains(&format!("PACKAGE_BIN={PACKAGE_BIN}\n")));
-        let types: Vec<String> = PACKAGE_TYPES.iter().map(|m| format!("\"{m}\"")).collect();
-        assert!(script.contains(&format!("PACKAGE_TYPES = [{}]\n", types.join(", "))), "install.sh's PACKAGE_TYPES differ");
+        assert!(script.contains(&format!("cat <<'EOF'\n{}EOF\n", unit_text())), "install.sh's unit differs");
     }
 }

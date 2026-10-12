@@ -7,6 +7,12 @@ A release's notes are its section here, so tag `vX.Y.Z` only once
 
 - The `.deb` and `.rpm` files are named `armada-stack-X.Y.Z-linux-ARCH`,
   after the package, rather than `armada-X.Y.Z-linux-ARCH`.
+- install.sh is a short shell script, with no Python. On Debian, Ubuntu,
+  Fedora, RHEL and their relatives it adds the `armada-stack` repository at
+  pkg.soapbox.pub and installs the package, so upgrades come with the
+  system's; rerun on a server it set up before, it moves it to the package.
+  Elsewhere it installs the binary from pkg.soapbox.pub as before. It no
+  longer takes `--version`: use `armada upgrade --version`.
 
 ## 0.5.1
 
