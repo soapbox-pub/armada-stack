@@ -3,8 +3,14 @@
 A release's notes are its section here, so tag `vX.Y.Z` only once
 `## X.Y.Z` exists: publishing fails without it.
 
-## Unreleased
+## 0.6.0
 
+- The onion address stays reachable. Arti, the Tor built into armada, now
+  comes from Soapbox's fork with two fixes: choosing relays no longer costs
+  ~0.4 s of CPU each, which starved Tor's other work until its circuits
+  timed out, and a descriptor upload waits long enough for slow directory
+  relays instead of giving up on them every time, which left the address
+  unpublished for many clients.
 - The `.deb` and `.rpm` files are named `armada-stack-X.Y.Z-linux-ARCH`,
   after the package, rather than `armada-X.Y.Z-linux-ARCH`.
 - install.sh is a short shell script, with no Python. On Debian, Ubuntu,
