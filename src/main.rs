@@ -7,6 +7,7 @@ mod av;
 mod blobs;
 mod blossom;
 mod cloudflare;
+mod concord;
 mod config;
 mod hash;
 mod mime;
