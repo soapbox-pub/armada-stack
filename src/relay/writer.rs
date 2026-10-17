@@ -106,6 +106,7 @@ fn write(store: &Store, hub: &Hub, batch: Vec<Submission>) {
             Ok(Outcome::Duplicate) => (true, "duplicate: already have this event"),
             Ok(Outcome::Replaced) => (false, "duplicate: already have a newer version of this event"),
             Ok(Outcome::Deleted) => (false, "blocked: this event has been deleted"),
+            Ok(Outcome::Banned) => (false, "blocked: banned by this relay's operator"),
             Err(error) => {
                 tracing::error!(%error, %id, "could not store an event");
                 (false, "error: could not store the event")

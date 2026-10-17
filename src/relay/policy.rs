@@ -20,7 +20,7 @@ pub const DELETION: u16 = 5;
 pub const VANISH: u16 = 62;
 pub const GIFT_WRAP: u16 = 1059;
 /// A Concord Community listed on Discover, by an invite link anyone may use.
-const ANNOUNCEMENT: u16 = 3314;
+pub const ANNOUNCEMENT: u16 = 3314;
 pub const EPHEMERAL_GIFT_WRAP: u16 = 21059;
 pub const NIP46: u16 = 24133;
 /// A request to a push service or its answer, in nostr-push2's protocol;

@@ -23,6 +23,7 @@
 //! | `deleted_addrs` | address                      | created_at (u32 BE)    |
 //! | `vanished`      | pubkey                       | created_at (u32 BE)    |
 //! | `vanishing`     | pubkey                       | [`Vanishing`]          |
+//! | `banned`        | pubkey                       | community id ‖ time    |
 //! | `expirations`   | expiration (u32 BE) ‖ seq    | —                      |
 //! | `meta`          | name                         | value                  |
 //!
@@ -44,6 +45,11 @@
 //! than one transaction should do. So it's queued in `vanishing`, and
 //! carried out [`SWEEP_BATCH`] index entries at a time, resuming where the
 //! last step left off, by [`Store::sweep`] alongside expired events.
+//!
+//! The operator bans pubkeys with `armada ban`, a Concord Community's
+//! addresses and invite links (see [`crate::ban`]). Nothing a banned pubkey
+//! signs is taken, gift wraps included, nor any Discover announcement of a
+//! banned invite link.
 
 use std::path::Path;
 
@@ -51,8 +57,8 @@ use anyhow::{Context, bail};
 use sha2::{Digest, Sha256};
 
 use super::lmdb::{Db, DbFlags, Env, Result, RoTxn, RwTxn, Txn};
-use super::policy::{self, DELETION, NIP46, VANISH};
-use super::record::{self, Element, EventView};
+use super::policy::{self, ANNOUNCEMENT, DELETION, NIP46, VANISH};
+use super::record::{self, Content, Element, EventView};
 
 /// Bumped when the layout changes incompatibly.
 const VERSION: u32 = 2;
@@ -110,6 +116,8 @@ pub enum Outcome {
     Deleted,
     /// A request to vanish, carried out. Never stored.
     Vanished,
+    /// Signed by a banned pubkey, or announcing a banned invite link.
+    Banned,
 }
 
 #[derive(Clone, Copy)]
@@ -126,6 +134,7 @@ pub struct Tables {
     pub deleted_addrs: Db,
     pub vanished: Db,
     pub vanishing: Db,
+    pub banned: Db,
     pub expirations: Db,
     pub meta: Db,
 }
@@ -151,6 +160,7 @@ impl Store {
             deleted_addrs: env.create_db("deleted_addrs", DbFlags::PLAIN)?,
             vanished: env.create_db("vanished", DbFlags::PLAIN)?,
             vanishing: env.create_db("vanishing", DbFlags::PLAIN)?,
+            banned: env.create_db("banned", DbFlags::PLAIN)?,
             expirations: env.create_db("expirations", DbFlags::PLAIN)?,
             meta: env.create_db("meta", DbFlags::PLAIN)?,
         };
@@ -220,6 +230,9 @@ impl Store {
         let t = self.tables;
         let (id, kind, created_at) = (view.id(), view.kind(), view.created_at());
 
+        if self.is_banned(txn, &view)? {
+            return Ok(Outcome::Banned);
+        }
         if kind == VANISH {
             self.vanish(txn, &view)?;
             return Ok(Outcome::Vanished);
@@ -277,6 +290,104 @@ impl Store {
             self.remove(txn, old)?;
         }
         Ok(Outcome::Stored(seq))
+    }
+
+    /// Whether an event is one a ban keeps out: signed by a banned pubkey,
+    /// or announcing an invite link whose bundle's signer is banned.
+    fn is_banned(&self, txn: &Txn, view: &EventView) -> Result<bool> {
+        if self.ban_of(txn, view.pubkey())?.is_some() {
+            return Ok(true);
+        }
+        if view.kind() == ANNOUNCEMENT
+            && let Content::Text(content) = view.content()
+            && let Some(signer) = crate::concord::link_signer(content).and_then(|signer| crate::concord::bytes32(&signer))
+        {
+            return Ok(self.ban_of(txn, &signer)?.is_some());
+        }
+        Ok(false)
+    }
+
+    /// The Community a pubkey was banned with, and when, if it was.
+    pub fn ban_of(&self, txn: &Txn, pubkey: &[u8; 32]) -> Result<Option<Ban>> {
+        Ok(txn.get(self.tables.banned, pubkey)?.and_then(|value| Ban::decode(*pubkey, value)))
+    }
+
+    /// Ban a pubkey. Its events already stored stay until
+    /// [`Store::remove_authored`] removes them.
+    pub fn ban(&self, txn: &mut RwTxn, ban: &Ban) -> Result<()> {
+        txn.put(self.tables.banned, &ban.pubkey, &ban.encode())?;
+        Ok(())
+    }
+
+    /// Lift a ban. Whether there was one.
+    pub fn unban(&self, txn: &mut RwTxn, pubkey: &[u8; 32]) -> Result<bool> {
+        txn.del(self.tables.banned, pubkey, None)
+    }
+
+    /// Every ban.
+    pub fn bans(&self, txn: &Txn) -> Result<Vec<Ban>> {
+        let mut bans = Vec::new();
+        let mut cursor = txn.cursor(self.tables.banned)?;
+        let mut entry = cursor.first()?;
+        while let Some((key, value)) = entry {
+            if let Some(ban) = key.try_into().ok().and_then(|pubkey| Ban::decode(pubkey, value)) {
+                bans.push(ban);
+            }
+            entry = cursor.next()?;
+        }
+        Ok(bans)
+    }
+
+    /// The sequence numbers of an author's stored events, oldest first.
+    pub fn authored(&self, txn: &Txn, author: &[u8; 32]) -> Result<Vec<u64>> {
+        let mut seqs = Vec::new();
+        let mut cursor = txn.cursor(self.tables.authors)?;
+        let mut entry = cursor.set(author)?;
+        while let Some((_, stamp)) = entry {
+            seqs.push(stamp_seq(stamp));
+            entry = cursor.next_dup()?;
+        }
+        Ok(seqs)
+    }
+
+    /// Remove up to `budget` of an author's events, whoever they belong to.
+    /// Returns how many went: fewer than `budget` once there are no more.
+    pub fn remove_authored(&self, txn: &mut RwTxn, author: &[u8; 32], budget: usize) -> Result<usize> {
+        let mut doomed = Vec::new();
+        {
+            let mut cursor = txn.cursor(self.tables.authors)?;
+            let mut entry = cursor.set(author)?;
+            while let Some((_, stamp)) = entry {
+                if doomed.len() == budget {
+                    break;
+                }
+                doomed.push(stamp_seq(stamp));
+                entry = cursor.next_dup()?;
+            }
+        }
+        for &seq in &doomed {
+            self.remove(txn, seq)?;
+        }
+        Ok(doomed.len())
+    }
+
+    /// The sequence numbers of stored Discover announcements of invite
+    /// links whose bundles' signers are `signers`.
+    pub fn announcements_of(&self, txn: &Txn, signers: &[[u8; 32]]) -> Result<Vec<u64>> {
+        let mut seqs = Vec::new();
+        let mut cursor = txn.cursor(self.tables.kinds)?;
+        let mut entry = cursor.set(&ANNOUNCEMENT.to_be_bytes())?;
+        while let Some((_, stamp)) = entry {
+            let seq = stamp_seq(stamp);
+            if let Some(view) = self.load(txn, seq)?
+                && let Content::Text(content) = view.content()
+                && crate::concord::link_signer(content).and_then(|signer| crate::concord::bytes32(&signer)).is_some_and(|signer| signers.contains(&signer))
+            {
+                seqs.push(seq);
+            }
+            entry = cursor.next_dup()?;
+        }
+        Ok(seqs)
     }
 
     /// Whether the event's owner has already asked for it to be deleted.
@@ -521,6 +632,25 @@ impl Store {
             self.remove(txn, seq)?;
         }
         Ok(expired.len())
+    }
+}
+
+/// A banned pubkey, and the Community it was banned with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ban {
+    pub pubkey: [u8; 32],
+    pub community: [u8; 32],
+    pub at: u32,
+}
+
+impl Ban {
+    fn encode(&self) -> Vec<u8> {
+        [&self.community[..], &self.at.to_be_bytes()].concat()
+    }
+
+    fn decode(pubkey: [u8; 32], value: &[u8]) -> Option<Ban> {
+        let (community, at) = value.split_first_chunk::<32>()?;
+        Some(Ban { pubkey, community: *community, at: u32::from_be_bytes(at.try_into().ok()?) })
     }
 }
 
@@ -874,6 +1004,49 @@ pub mod tests {
         assert_eq!(theirs(&store), 0);
         assert_eq!(store.len(&store.read().unwrap()).unwrap(), SWEEP_BATCH * 2 + 5);
         assert_eq!(store.read().unwrap().len(store.tables.vanishing).unwrap(), 0);
+    }
+
+    #[test]
+    fn bans_authors_and_their_links() {
+        let (_dir, store) = open();
+        let (alice, bob) = (public_key(ALICE), public_key(BOB));
+        let alice_key: [u8; 32] = hex::decode(&alice).unwrap().try_into().unwrap();
+        // Alice stands for a stream's address: its wraps are hers to ban,
+        // though they belong to their recipients.
+        let wrap = Event::sign(ALICE, 100, policy::GIFT_WRAP.into(), tags(&[&["p", &bob]]), "sealed");
+        let bundle = Event::sign(ALICE, 100, 33301, tags(&[&["d", ""], &["vsk", "9"]]), "");
+        let link = format!("https://armada.example/invite/{}#BAGZmZmZmZmZmZmZmZmZmZmZ", crate::nostr::nip19::naddr_encode(&alice, 33301, "", &[]));
+        let announcement = Event::sign(BOB, 100, ANNOUNCEMENT.into(), vec![], &link);
+        let other = Event::sign(BOB, 100, ANNOUNCEMENT.into(), vec![], "https://armada.example/invite/naddr1other#x");
+        for event in [&wrap, &bundle, &announcement, &other] {
+            assert!(matches!(put(&store, event), Outcome::Stored(_)));
+        }
+        {
+            let txn = store.read().unwrap();
+            assert_eq!(store.authored(&txn, &alice_key).unwrap().len(), 2);
+            assert_eq!(store.announcements_of(&txn, &[alice_key]).unwrap().len(), 1);
+        }
+
+        let ban = Ban { pubkey: alice_key, community: [7; 32], at: 50 };
+        let mut txn = store.write().unwrap();
+        store.ban(&mut txn, &ban).unwrap();
+        assert_eq!(store.remove_authored(&mut txn, &alice_key, 1).unwrap(), 1);
+        assert_eq!(store.remove_authored(&mut txn, &alice_key, 1).unwrap(), 1);
+        assert_eq!(store.remove_authored(&mut txn, &alice_key, 1).unwrap(), 0);
+        txn.commit().unwrap();
+        assert!(!has(&store, &wrap) && !has(&store, &bundle));
+        assert_eq!(store.bans(&store.read().unwrap()).unwrap(), [ban]);
+
+        // Nothing of hers comes back, nor any new announcement of her link.
+        assert_eq!(put(&store, &wrap), Outcome::Banned);
+        assert_eq!(put(&store, &Event::sign(ALICE, 200, 0, vec![], "{}")), Outcome::Banned);
+        assert_eq!(put(&store, &Event::sign(BOB, 200, ANNOUNCEMENT.into(), vec![], &link)), Outcome::Banned);
+        assert!(matches!(put(&store, &Event::sign(BOB, 200, 0, vec![], "{}")), Outcome::Stored(_)));
+
+        let mut txn = store.write().unwrap();
+        assert!(store.unban(&mut txn, &alice_key).unwrap());
+        txn.commit().unwrap();
+        assert!(matches!(put(&store, &wrap), Outcome::Stored(_)));
     }
 
     #[test]

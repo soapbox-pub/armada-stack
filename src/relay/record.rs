@@ -203,7 +203,6 @@ impl<'a> EventView<'a> {
         self.expiration.is_some_and(|expiration| i64::from(expiration) <= now)
     }
 
-    #[cfg(test)]
     pub fn content(&self) -> Content<'a> {
         self.content
     }
