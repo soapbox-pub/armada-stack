@@ -20,7 +20,9 @@
 //!   them to [`monitors`]: threads that each keep a reverse index of their
 //!   share of the live subscriptions.
 //! - [`conn`] speaks the protocol to each client.
+//! - [`bans`] is the store as `armada ban` reaches it, from another process.
 
+pub mod bans;
 mod clients;
 mod conn;
 mod filter;

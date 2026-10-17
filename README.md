@@ -31,7 +31,7 @@ minute. Then open `https://armada.example.com`. To upgrade later, run the
 installer again, or let `apt upgrade` or `dnf upgrade` do it.
 
 [INSTALL.md](INSTALL.md) goes through it step by step, and covers Tor,
-backups, calls, running behind a reverse proxy, installing by hand and
+taking a community down by its invite link, backups, calls, running behind a reverse proxy, installing by hand and
 building from source. [`armada.example.toml`](armada.example.toml) lists
 every setting, and [CHANGELOG.md](CHANGELOG.md) what each release changed.
 

@@ -117,6 +117,25 @@ pub struct Blossom {
     server: Arc<Server>,
 }
 
+/// See [`Blossom::open_for_removal`].
+pub struct Removals {
+    db: BlossomDb,
+    blobs: BlobStore,
+}
+
+impl Removals {
+    /// Whether this server holds a blob `pubkey` uploaded.
+    pub fn uploaded_by(&self, sha256: BlobHash, pubkey: &str) -> Result<bool> {
+        self.db.owns(sha256, pubkey)
+    }
+
+    /// Remove a blob, whoever uploaded it.
+    pub fn remove(&self, sha256: BlobHash) -> Result<()> {
+        self.db.remove_blob(sha256)?;
+        self.blobs.remove(sha256)
+    }
+}
+
 struct Server {
     db: BlossomDb,
     blobs: BlobStore,
@@ -165,6 +184,13 @@ impl Blossom {
                 cancel: cancel.child_token(),
             }),
         })
+    }
+
+    /// The index and store alone, for `armada ban` to remove blobs from in a
+    /// process of its own. A running server stops serving a blob as soon as
+    /// its record goes.
+    pub fn open_for_removal(storage: &Storage) -> Result<Removals> {
+        Ok(Removals { db: BlossomDb::open(storage)?, blobs: storage.blob_store("blossom/blobs") })
     }
 
     #[cfg(test)]

@@ -3,6 +3,16 @@
 A release's notes are its section here, so tag `vX.Y.Z` only once
 `## X.Y.Z` exists: publishing fails without it.
 
+## Unreleased
+
+- `armada ban <invite link>` takes a Concord community off the server. The
+  link's keys give the community's addresses: its control plane, guestbook,
+  channels, and other invite links. armada bans those keys, deletes what they
+  published, and deletes Discover posts sharing the community's links and the
+  Blossom blobs its icon, banner and messages point at. `--dry-run` shows what
+  it would do, `armada ban --list` what's banned, and `armada unban` lifts a
+  ban. See "Taking a community down" in INSTALL.md.
+
 ## 0.6.0
 
 - The onion address stays reachable. Arti, the Tor built into armada, now

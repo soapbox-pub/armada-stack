@@ -4,6 +4,7 @@
 //! as an onion over Tor too.
 
 mod av;
+mod ban;
 mod blobs;
 mod blossom;
 mod cloudflare;
@@ -67,6 +68,28 @@ enum Command {
     },
     /// Print the onion address armada is served at over Tor
     Onion,
+    /// Take a Concord Community off this server by one of its invite links:
+    /// ban its keys and invite links, and delete what they published, the
+    /// Discover announcements of its links, and the blobs it points at
+    #[command(arg_required_else_help = true)]
+    Ban {
+        /// The invite link, `https://…/invite/<naddr>#<fragment>`
+        #[arg(required_unless_present = "list", conflicts_with = "list")]
+        link: Option<String>,
+        /// Say what would be banned and deleted, and change nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// List what's banned
+        #[arg(long)]
+        list: bool,
+    },
+    /// Lift a ban: by invite link or community id, every pubkey banned with
+    /// the Community; by pubkey, just that one. What was deleted stays
+    /// deleted
+    Unban {
+        /// An invite link, community id, or pubkey (hex or npub)
+        target: String,
+    },
 }
 
 #[tokio::main]
@@ -80,6 +103,9 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(Command::Upgrade { version, check }) => return upgrade::run(upgrade::Options { version, check }).await,
         Some(Command::Onion) => return print_onion(cli.config.as_deref()),
+        Some(Command::Ban { list: true, .. }) => return ban::list(cli.config.as_deref()),
+        Some(Command::Ban { link, dry_run, .. }) => return ban::ban(cli.config.as_deref(), &link.unwrap_or_default(), dry_run).await,
+        Some(Command::Unban { target }) => return ban::unban(cli.config.as_deref(), &target),
         None => {}
     }
     init_logging();

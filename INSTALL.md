@@ -209,6 +209,33 @@ curl -fsSL https://armada.buzz/install.sh | sudo sh
 It also waits for HTTPS to answer. A different domain from the config's is
 refused: to move domains, edit `public_url` and restart.
 
+## Taking a community down
+
+Communities are end-to-end encrypted, so the relay can't see what they hold.
+But if you're shown a community's invite link and don't want to host it,
+give the link to `armada ban`:
+
+```sh
+sudo armada ban --dry-run 'https://armada.buzz/invite/naddr1…#…'
+sudo armada ban 'https://armada.buzz/invite/naddr1…#…'
+```
+
+The link's keys give every address the community publishes at: its control
+plane, guestbook and channels, plus its other invite links. armada bans
+those keys, so it takes nothing more signed by them, and deletes what they
+published. It also deletes Discover posts that share the community's invite
+links, and the Blossom blobs its icon, banner and messages point at, if
+their authors uploaded them here. `--dry-run` shows all of that without
+changing anything. The service can keep running; the ban applies at once.
+
+Only the community's current keys can be reached. Anything it published
+before it last changed its keys stays, since nothing in the link derives the
+old ones. Its members' own accounts aren't banned.
+
+`sudo armada ban --list` shows what's banned. `sudo armada unban` takes the
+same link, or a community id, to lift a community's bans, or a single
+pubkey. What was deleted stays deleted.
+
 ## Backups
 
 Everything armada keeps is in `storage_dir` (`/var/lib/armada`): the relay's

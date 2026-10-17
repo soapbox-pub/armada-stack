@@ -125,6 +125,26 @@ impl BlossomDb {
         Ok(removal)
     }
 
+    /// Whether `pubkey` owns a blob.
+    pub fn owns(&self, sha256: BlobHash, pubkey: &str) -> Result<bool> {
+        let Ok(owner) = owner_key(sha256, pubkey) else { return Ok(false) };
+        let txn = self.env.read_txn()?;
+        Ok(self.owners.get(&txn, &owner)?.is_some())
+    }
+
+    /// Remove a blob's record and every owner's claim on it, whoever they
+    /// are. Whether there was one.
+    pub fn remove_blob(&self, sha256: BlobHash) -> Result<bool> {
+        let mut txn = self.env.write_txn()?;
+        let owners: Vec<Vec<u8>> = self.owners.prefix_iter(&txn, sha256.as_bytes())?.map(|entry| entry.map(|(key, _)| key.to_vec())).collect::<Result<_, _>>()?;
+        for owner in &owners {
+            self.remove(&mut txn, owner)?;
+        }
+        let existed = self.blobs.delete(&mut txn, sha256.as_bytes())? || !owners.is_empty();
+        txn.commit()?;
+        Ok(existed)
+    }
+
     /// Remove up to `limit` owners whose claims expired by `now`, and the
     /// records of the blobs they were the last owners of. Returns those
     /// blobs, whose bytes should go, and whether there may be more to do.
@@ -311,6 +331,23 @@ mod tests {
         let (gone, more) = db.sweep(DAY * 10, 2).unwrap();
         assert_eq!((gone, more), (shas[2..4].to_vec(), true));
         assert_eq!(db.sweep(DAY * 10, 2).unwrap(), (shas[4..].to_vec(), false));
+    }
+
+    #[test]
+    fn removes_a_blob_from_every_owner() {
+        let (_dir, db) = open();
+        let (sha, other) = (BlobHash::of(b"one"), BlobHash::of(b"two"));
+        db.add(sha, 10, ALICE, None, 0).unwrap();
+        db.add(sha, 10, BOB, Some(DAY), 0).unwrap();
+        db.add(other, 10, BOB, Some(DAY), 0).unwrap();
+        assert!(db.owns(sha, ALICE).unwrap() && !db.owns(other, ALICE).unwrap());
+
+        assert!(db.remove_blob(sha).unwrap());
+        assert!(!db.remove_blob(sha).unwrap());
+        assert_eq!(db.get(sha).unwrap(), None);
+        assert!(!db.owns(sha, BOB).unwrap());
+        // Bob's claim on it no longer expires anything.
+        assert_eq!(db.sweep(DAY * 2, 100).unwrap(), (vec![other], false));
     }
 
     /// Owners recorded before claims could expire hold an empty value.
