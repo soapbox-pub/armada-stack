@@ -3,7 +3,7 @@
 A release's notes are its section here, so tag `vX.Y.Z` only once
 `## X.Y.Z` exists: publishing fails without it.
 
-## Unreleased
+## 0.7.0
 
 - `armada ban <invite link>` takes a Concord community off the server. The
   link's keys give the community's addresses: its control plane, guestbook,
