@@ -12,6 +12,9 @@
 //!
 //! Earlier epochs are out of reach: no key in the bundle derives them.
 //!
+//! The Community goes on this armada's blocklist too ([`moderation`]), so
+//! Armada won't open it here at all, and `armada unban` lifts it.
+//!
 //! The bundle and Control Plane are read from this relay, or from the
 //! link's relays and the Community's when it doesn't have them.
 
@@ -27,6 +30,7 @@ use crate::blossom::Blossom;
 use crate::concord::{self, BlobRef, Bytes32, bytes32};
 use crate::config::{self, Config, Environment};
 use crate::hash::BlobHash;
+use crate::moderation::{self, Status};
 use crate::nostr::Event;
 use crate::nostr::nip19::{self, Decoded};
 use crate::nostr::pool::{Filter, Pool, is_onion};
@@ -174,8 +178,12 @@ pub async fn ban(config: Option<&Path>, link: &str, dry_run: bool) -> Result<()>
         println!("  Not banning {line}.");
     }
     let announcements = relay.count_announcements(&link_signers)?;
+    let moderator = moderation::load(&storage)?;
     if dry_run {
         println!("Would delete {announcements} Discover announcements of its invite links, and {} blobs.", doomed.len());
+        if bundle.is_some() && moderator.is_some() {
+            println!("Would add it to this armada's blocklist.");
+        }
         return Ok(());
     }
 
@@ -189,6 +197,15 @@ pub async fn ban(config: Option<&Path>, link: &str, dry_run: bool) -> Result<()>
         removals.remove(*hash)?;
     }
     println!("Banned. Deleted {removed} events, {announcements} Discover announcements of its invite links, and {} blobs.", doomed.len());
+    if bundle.is_some() {
+        match &moderator {
+            Some(keys) => {
+                moderation::publish(&relay, keys, &community, Status::Blocked)?;
+                println!("Added it to this armada's blocklist, so Armada won't open it here.");
+            }
+            None => println!("armada hasn't started yet, so it has no moderation key to add the community to its blocklist with."),
+        }
+    }
     Ok(())
 }
 
@@ -217,16 +234,16 @@ pub fn list(config: Option<&Path>) -> Result<()> {
 }
 
 /// `armada unban <target>`: an invite link or community id lifts its
-/// Community's bans, a pubkey just its own.
+/// Community's bans and its blocklist entry, a pubkey just its own ban.
 pub fn unban(config: Option<&Path>, target: &str) -> Result<()> {
-    let Opened { relay, .. } = open(config)?;
+    let Opened { storage, relay } = open(config)?;
     let bans = relay.list()?;
     let of_community = |community: Bytes32| -> Vec<Bytes32> { bans.iter().filter(|ban| ban.community == community).map(|ban| ban.pubkey).collect() };
-    let pubkeys = if let Some(signer) = concord::link_signer(target) {
+    let (pubkeys, community) = if let Some(signer) = concord::link_signer(target) {
         let signer = bytes32(&signer).unwrap();
         match bans.iter().find(|ban| ban.pubkey == signer) {
-            Some(Ban { community, .. }) if *community != [0; 32] => of_community(*community),
-            _ => vec![signer],
+            Some(Ban { community, .. }) if *community != [0; 32] => (of_community(*community), Some(*community)),
+            _ => (vec![signer], None),
         }
     } else {
         let hex = match nip19::decode(target) {
@@ -235,12 +252,16 @@ pub fn unban(config: Option<&Path>, target: &str) -> Result<()> {
         };
         let Some(key) = bytes32(&hex) else { bail!("Not an invite link, community id, or pubkey: {target}") };
         match of_community(key) {
-            community if !community.is_empty() => community,
-            _ => vec![key],
+            community if !community.is_empty() => (community, Some(key)),
+            _ => (vec![key], None),
         }
     };
     let lifted = relay.unban(&pubkeys)?;
     println!("Lifted {lifted} bans. What was deleted stays deleted.");
+    if let (Some(community), Some(keys)) = (community, moderation::load(&storage)?) {
+        moderation::publish(&relay, &keys, &community, Status::Lifted)?;
+        println!("Lifted its entry on this armada's blocklist.");
+    }
     Ok(())
 }
 
@@ -288,6 +309,14 @@ mod tests {
         std::fs::write(&config, format!("storage_dir = {:?}\n", dir.path().join("data"))).unwrap();
         let url = v["invite"]["url"].as_str().unwrap();
 
+        let keys = moderation::load_or_create(&Storage::open(&dir.path().join("data")).unwrap()).unwrap();
+        let moderator = bytes32(&keys.pubkey).unwrap();
+        let community = bytes32(v["keys"]["community_id"].as_str().unwrap()).unwrap();
+        let entry = |relay: &Bans| {
+            let entries = relay.events_by(&moderator).unwrap();
+            assert!(entries.len() <= 1, "an entry replaces the last");
+            entries.first().map(|event| (event.tag("d").unwrap().to_string(), event.tag("status").unwrap().to_string()))
+        };
         let unrelated = Event::sign(&"11".repeat(32), 100, 0, vec![], "{}");
         let announcement = Event::sign(&"22".repeat(32), 100, 3314, vec![], url);
         let control: Vec<Event> = v["control"]["wraps"].as_array().unwrap().iter().map(event).collect();
@@ -301,6 +330,7 @@ mod tests {
         ban(Some(&config), url, true).await.unwrap();
         let Opened { relay, .. } = open(Some(&config)).unwrap();
         assert!(relay.list().unwrap().is_empty(), "a dry run changes nothing");
+        assert_eq!(entry(&relay), None);
         drop(relay);
 
         ban(Some(&config), url, false).await.unwrap();
@@ -312,8 +342,8 @@ mod tests {
         assert_eq!(relay.count_announcements(&[signer]).unwrap(), 0);
         assert_eq!(relay.count_by(&bytes32(&unrelated.pubkey).unwrap()).unwrap(), 1);
         let bans = relay.list().unwrap();
-        let community = bytes32(v["keys"]["community_id"].as_str().unwrap()).unwrap();
         assert!(bans.iter().all(|ban| ban.community == community));
+        assert_eq!(entry(&relay), Some((moderation::hash(&community), "blocked".to_string())));
         // The link, Control Plane at both addresses, Guestbook, next
         // Refounding, dissolution, two public Channels, and the private one
         // and its next key.
@@ -324,5 +354,6 @@ mod tests {
         unban(Some(&config), url).unwrap();
         let Opened { relay, .. } = open(Some(&config)).unwrap();
         assert!(relay.list().unwrap().is_empty());
+        assert_eq!(entry(&relay), Some((moderation::hash(&community), "lifted".to_string())));
     }
 }

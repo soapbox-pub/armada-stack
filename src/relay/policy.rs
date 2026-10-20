@@ -28,6 +28,9 @@ pub const NIP46: u16 = 24133;
 pub const PUSH_RPC: u16 = 25742;
 pub const APP_DATA: u16 = 30078;
 const INVITE_BUNDLE: u16 = 33301;
+/// An entry on Armada's community blocklist, by this armada's moderation
+/// key alone; see [`crate::moderation`].
+pub const BLOCKLIST: u16 = 37307;
 
 /// Every kind the relay accepts, sorted.
 pub const KINDS: &[u16] = &[
@@ -57,6 +60,7 @@ pub const KINDS: &[u16] = &[
     INVITE_BUNDLE,
     33302,
     36767,
+    BLOCKLIST,
 ];
 
 /// Seconds ephemeral events are kept, so a client that reconnects within
@@ -170,9 +174,11 @@ pub fn scope(filter: &mut Filter) -> Result<(), String> {
 
 /// Check an event against its kind's rules. `relay` is each [`authority`]
 /// this relay goes by, one of which requests to vanish have to name, or none
-/// if it isn't known: then only those for `ALL_RELAYS` are taken. Errors are
-/// the `OK` message to refuse with.
-pub fn validate(event: &Event, now: i64, relay: &[impl AsRef<str>]) -> Result<(), String> {
+/// if it isn't known: then only those for `ALL_RELAYS` are taken.
+/// `moderator` is the pubkey of this armada's moderation key, the only one
+/// whose blocklist entries are taken. Errors are the `OK` message to refuse
+/// with.
+pub fn validate(event: &Event, now: i64, relay: &[impl AsRef<str>], moderator: Option<&str>) -> Result<(), String> {
     let kind = u16::try_from(event.kind).map_err(|_| "invalid: kind must be between 0 and 65535".to_string())?;
     if !is_accepted(kind) {
         return Err(format!("blocked: kind {kind} is not accepted by this relay"));
@@ -217,6 +223,17 @@ pub fn validate(event: &Event, now: i64, relay: &[impl AsRef<str>]) -> Result<()
         }
         13303 | APP_DATA | 33302 => content(event, Content::Nip44),
         16767 | 36767 => content(event, Content::Empty),
+        BLOCKLIST if moderator != Some(event.pubkey.as_str()) => Err("blocked: only this armada's moderation key may publish blocklist entries".into()),
+        BLOCKLIST => {
+            let ok = event.tag("d").is_some_and(is_hex64)
+                && event.tag("scope") == Some("community")
+                && matches!(event.tag("status"), Some("blocked" | "lifted"))
+                && event.tag("v") == Some("1");
+            if !ok {
+                return Err("invalid: a blocklist entry needs a hashed d tag, scope community, status blocked or lifted, and v 1".into());
+            }
+            content(event, Content::Empty)
+        }
         ANNOUNCEMENT if is_invite_link(&event.content) => Ok(()),
         ANNOUNCEMENT => Err("invalid: an announcement's content must be one invite link".into()),
         30030 => each(event, "emoji", |tag| tag.len() >= 3 && is_shortcode(&tag[1]) && is_http_url(&tag[2])),
@@ -431,7 +448,7 @@ mod tests {
     const RELAY: &str = "armada.example.com";
 
     fn check(kind: u16, event_tags: &[&[&str]], content: &str) -> Result<(), String> {
-        validate(&Event::sign(ALICE, NOW, kind.into(), tags(event_tags), content), NOW, &[RELAY])
+        validate(&Event::sign(ALICE, NOW, kind.into(), tags(event_tags), content), NOW, &[RELAY], Some(&public_key(ALICE)))
     }
 
     fn ok(kind: u16, event_tags: &[&[&str]], content: &str) {
@@ -486,7 +503,7 @@ mod tests {
     #[test]
     fn checks_timestamps() {
         let p = public_key(BOB);
-        let wrap = |kind: u16, at| validate(&Event::sign(ALICE, at, kind.into(), tags(&[&["p", &p]]), &payload(10)), NOW, &[RELAY]);
+        let wrap = |kind: u16, at| validate(&Event::sign(ALICE, at, kind.into(), tags(&[&["p", &p]]), &payload(10)), NOW, &[RELAY], None);
         // Gift wraps are backdated on purpose.
         assert!(wrap(GIFT_WRAP, NOW - 2 * 86400).is_ok());
         assert!(wrap(EPHEMERAL_GIFT_WRAP, NOW - 30).is_ok());
@@ -616,6 +633,25 @@ mod tests {
     }
 
     #[test]
+    fn takes_blocklist_entries_from_the_moderation_key_alone() {
+        let hash = "cd".repeat(32);
+        let blocked: &[&[&str]] = &[&["d", &hash], &["scope", "community"], &["status", "blocked"], &["v", "1"]];
+        ok(BLOCKLIST, blocked, "");
+        ok(BLOCKLIST, &[&["d", &hash], &["scope", "community"], &["status", "lifted"], &["v", "1"]], "");
+        refused(BLOCKLIST, blocked, "a reason");
+        refused(BLOCKLIST, &[&["d", &hash], &["scope", "community"], &["status", "muted"], &["v", "1"]], "");
+        refused(BLOCKLIST, &[&["d", "not a hash"], &["scope", "community"], &["status", "blocked"], &["v", "1"]], "");
+        refused(BLOCKLIST, &[&["d", &hash], &["scope", "media"], &["status", "blocked"], &["v", "1"]], "");
+        refused(BLOCKLIST, &[&["d", &hash], &["scope", "community"], &["status", "blocked"]], "");
+
+        let by = |secret: &str, moderator: Option<&str>| validate(&Event::sign(secret, NOW, BLOCKLIST.into(), tags(blocked), ""), NOW, &[RELAY], moderator);
+        let alice = public_key(ALICE);
+        assert!(by(ALICE, Some(&alice)).is_ok());
+        assert!(by(BOB, Some(&alice)).unwrap_err().starts_with("blocked:"));
+        assert!(by(ALICE, None).unwrap_err().starts_with("blocked:"));
+    }
+
+    #[test]
     fn checks_deletion_and_vanish() {
         let id = "ab".repeat(32);
         ok(DELETION, &[&["e", &id], &["k", "3314"]], "");
@@ -631,14 +667,14 @@ mod tests {
         refused(VANISH, &[], "");
 
         // A relay that doesn't know its name takes only ALL_RELAYS.
-        let unnamed = |relay: &str| validate(&Event::sign(ALICE, NOW, VANISH.into(), tags(&[&["relay", relay]]), ""), NOW, &[] as &[&str]);
+        let unnamed = |relay: &str| validate(&Event::sign(ALICE, NOW, VANISH.into(), tags(&[&["relay", relay]]), ""), NOW, &[] as &[&str], None);
         assert!(unnamed("ALL_RELAYS").is_ok());
         assert!(unnamed("wss://armada.example.com").is_err());
         assert!(unnamed("wss://").is_err());
 
         // One reached by its onion too answers to either name.
         let onion = "dl6nglbofs66w2ctcqp3hdgw7lgql7b5xc3dqtj3oqjrcihztrqrkjyd.onion";
-        let both = |relay: &str| validate(&Event::sign(ALICE, NOW, VANISH.into(), tags(&[&["relay", relay]]), ""), NOW, &[RELAY, onion]);
+        let both = |relay: &str| validate(&Event::sign(ALICE, NOW, VANISH.into(), tags(&[&["relay", relay]]), ""), NOW, &[RELAY, onion], None);
         assert!(both("wss://armada.example.com").is_ok());
         assert!(both(&format!("ws://{onion}")).is_ok());
         assert!(both("ws://other.onion").is_err());

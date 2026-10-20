@@ -228,13 +228,21 @@ links, and the Blossom blobs its icon, banner and messages point at, if
 their authors uploaded them here. `--dry-run` shows all of that without
 changing anything. The service can keep running; the ban applies at once.
 
+The community also goes on this server's blocklist, so the app served here
+won't open or join it, even from its other relays, and drops it from the
+sidebars of members who already have it. The entry is signed with a
+moderation key armada makes the first time it starts, in `moderation/` in
+the storage directory, and published on this relay, which takes blocklist
+entries from that key alone. The app here honours entries from that key and
+from Soapbox's; set `BLOCKLIST_AUTHORS` under `[web.env]` to change that.
+
 Only the community's current keys can be reached. Anything it published
 before it last changed its keys stays, since nothing in the link derives the
 old ones. Its members' own accounts aren't banned.
 
 `sudo armada ban --list` shows what's banned. `sudo armada unban` takes the
-same link, or a community id, to lift a community's bans, or a single
-pubkey. What was deleted stays deleted.
+same link, or a community id, to lift a community's bans and its blocklist
+entry, or a single pubkey. What was deleted stays deleted.
 
 ## Backups
 

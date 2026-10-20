@@ -3,7 +3,8 @@
 //! protected events either.
 //!
 //! It takes the kinds Armada uses and nothing else, each checked against
-//! rules of its own ([`policy`]). Anyone may publish them, within the
+//! rules of its own ([`policy`]). Anyone may publish them, short of
+//! blocklist entries, which only this armada's moderation key may, within the
 //! limits in [`RelayConfig`] — per connection, and per client address
 //! ([`clients`]) — and read them, but gift wraps, NIP-46 messages, and
 //! push requests are only found by filters that name their author or
@@ -30,7 +31,7 @@ mod lmdb;
 mod monitors;
 pub mod nip44;
 mod policy;
-pub use policy::authority;
+pub use policy::{BLOCKLIST, authority};
 mod query;
 mod record;
 mod store;
@@ -77,6 +78,9 @@ struct Shared {
     /// neither, it doesn't know its own name, so takes only requests to
     /// vanish from `ALL_RELAYS`.
     authorities: Arc<[String]>,
+    /// The pubkey of this armada's moderation key, whose blocklist entries
+    /// are the only ones taken.
+    moderator: Option<String>,
     /// Where NIP-11's icon and banner are, when it's set.
     names: Names,
     /// Whose word on a client's address to take; see [`crate::config::Config::trust`].
@@ -97,7 +101,8 @@ struct Shared {
 impl Relay {
     /// Open the relay's store. Every connection closes once `cancel` fires.
     /// `names` are where clients reach it, as requests to vanish name it.
-    pub fn open(config: &RelayConfig, names: Names, trust: Trust, storage: &Storage, cancel: &CancellationToken) -> Result<Relay> {
+    /// `moderator` is the pubkey of this armada's moderation key.
+    pub fn open(config: &RelayConfig, names: Names, trust: Trust, moderator: Option<String>, storage: &Storage, cancel: &CancellationToken) -> Result<Relay> {
         let store = Arc::new(Store::open(&storage.service_dir("relay")?, config.map_size as usize)?);
         let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
         let hub = Hub::spawn((cores / 2).clamp(1, 8));
@@ -106,6 +111,7 @@ impl Relay {
             shared: Arc::new(Shared {
                 config: config.clone(),
                 authorities: names.authorities().into(),
+                moderator,
                 names,
                 trust,
                 clients: Clients::new(config),
@@ -221,7 +227,7 @@ impl Internal {
         let now = crate::util::now();
         let valid = conn::well_formed(event)
             && (0..=i64::from(u32::MAX)).contains(&event.created_at)
-            && policy::validate(event, now, &[] as &[&str]).is_ok()
+            && policy::validate(event, now, &[] as &[&str], self.shared.moderator.as_deref()).is_ok()
             && event.verify();
         if !valid {
             tracing::error!(id = %event.id, kind = event.kind, "an event of armada's own isn't valid; not publishing it");

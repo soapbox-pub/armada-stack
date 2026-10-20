@@ -41,6 +41,9 @@ const ARMADA_RELAYS: &[&str] = &["wss://relay.ditto.pub", "wss://relay.dreamith.
 /// The first of `BLOSSOM_SERVERS` is preferred for uploads, so armada's own
 /// goes first.
 const ARMADA_BLOSSOM_SERVERS: &[&str] = &["https://blossom.ditto.pub/", "https://blossom.dreamith.to/", "https://blossom.primal.net/"];
+/// Soapbox's moderation key, from `src/lib/blocklist.ts`, which this armada's
+/// own joins on `BLOCKLIST_AUTHORS`.
+const ARMADA_BLOCKLIST_AUTHORS: &[&str] = &["0ddf6c35f61eb040316d01f68ded4d38b579c17423d26715fd489105a981910a"];
 
 #[derive(Default)]
 pub struct ClientEnv {
@@ -49,13 +52,21 @@ pub struct ClientEnv {
     av: bool,
     /// The [push service](crate::push)'s pubkey, if it runs.
     push: Option<String>,
+    /// The [moderation key](crate::moderation)'s pubkey.
+    moderator: Option<String>,
     /// `[web.env]`.
     overrides: BTreeMap<String, String>,
 }
 
 impl ClientEnv {
     pub fn new(config: &Config) -> anyhow::Result<ClientEnv> {
-        Ok(ClientEnv { names: config.public_url()?.into(), av: !config.av.nodes.is_empty(), push: None, overrides: config.web.env.clone() })
+        Ok(ClientEnv { names: config.public_url()?.into(), av: !config.av.nodes.is_empty(), push: None, moderator: None, overrides: config.web.env.clone() })
+    }
+
+    /// Have the web app take blocklist entries by the moderation key with
+    /// this pubkey, as well as Soapbox's.
+    pub fn with_moderator(self, pubkey: &str) -> ClientEnv {
+        ClientEnv { moderator: Some(pubkey.to_string()), ..self }
     }
 
     /// Point the web app at the push service with this pubkey, on this
@@ -99,6 +110,11 @@ impl ClientEnv {
         if let Some(pubkey) = &self.push {
             values.insert("NOSTR_PUSH2_PUBKEY".to_string(), pubkey.clone());
             values.insert("NOSTR_PUSH2_RELAYS".to_string(), origin.websocket());
+        }
+        // Its entries are on this relay, which `RELAYS` names, so Armada
+        // finds them there.
+        if let Some(pubkey) = &self.moderator {
+            values.insert("BLOCKLIST_AUTHORS".to_string(), join(pubkey.clone(), ARMADA_BLOCKLIST_AUTHORS));
         }
         values
     }
@@ -160,6 +176,15 @@ mod tests {
         config.web.env = BTreeMap::from([("NOSTR_PUSH2_PUBKEY".into(), "".into())]);
         let values = ClientEnv::new(&config).unwrap().with_push("ab").values(&host("armada.example.com"));
         assert_eq!(values["NOSTR_PUSH2_PUBKEY"], "");
+    }
+
+    #[test]
+    fn adds_its_moderation_key_to_soapboxs() {
+        let values = ClientEnv::new(&Config::default()).unwrap().values(&host("armada.example.com"));
+        assert!(!values.contains_key("BLOCKLIST_AUTHORS"));
+        let env = ClientEnv::new(&Config::default()).unwrap().with_moderator("ab");
+        let values = env.values(&host("armada.example.com"));
+        assert_eq!(values["BLOCKLIST_AUTHORS"], "ab,0ddf6c35f61eb040316d01f68ded4d38b579c17423d26715fd489105a981910a");
     }
 
     #[test]

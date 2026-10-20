@@ -3,6 +3,14 @@
 A release's notes are its section here, so tag `vX.Y.Z` only once
 `## X.Y.Z` exists: publishing fails without it.
 
+## Unreleased
+
+- `armada ban` puts the community on this server's blocklist, so the app
+  served here won't open or join it, and `armada unban` lifts it. Entries
+  are signed with a moderation key armada makes on first start; the relay
+  takes them from that key alone, and the app is pointed at it through
+  `BLOCKLIST_AUTHORS`, beside Soapbox's.
+
 ## 0.7.0
 
 - `armada ban <invite link>` takes a Concord community off the server. The

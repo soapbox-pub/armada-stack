@@ -283,7 +283,7 @@ impl Session {
         }
         // Never the request's `Host`: anyone can send any, and with it
         // replay a request to vanish meant for another relay.
-        policy::validate(event, now, &self.shared.authorities)?;
+        policy::validate(event, now, &self.shared.authorities, self.shared.moderator.as_deref())?;
         if record::expiration(event).is_some_and(|expiration| i64::from(expiration) <= now) {
             return Err("invalid: event has expired".into());
         }

@@ -8,7 +8,6 @@
 use anyhow::Result;
 
 use super::store::{SWEEP_BATCH, Store};
-#[cfg(test)]
 pub use super::store::Outcome;
 use crate::config::RelayConfig;
 use crate::nostr::Event;
@@ -27,10 +26,17 @@ impl Bans {
 
     #[cfg(test)]
     pub fn insert(&self, event: &Event) -> Outcome {
-        let mut txn = self.store.write().unwrap();
-        let outcome = self.store.insert(&mut txn, &super::record::encode(event)).unwrap();
-        txn.commit().unwrap();
-        outcome
+        self.publish(event).unwrap()
+    }
+
+    /// Store an event of armada's own, such as a blocklist entry. Clients
+    /// find it when they next ask; those subscribed to the running relay
+    /// aren't told of it.
+    pub fn publish(&self, event: &Event) -> Result<Outcome> {
+        let mut txn = self.store.write()?;
+        let outcome = self.store.insert(&mut txn, &super::record::encode_expiring(event, super::record::expiration(event)))?;
+        txn.commit()?;
+        Ok(outcome)
     }
 
     /// Every event `pubkey` signed that's stored here.

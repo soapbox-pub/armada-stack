@@ -100,7 +100,7 @@ mod tests {
             env: Default::default(),
             progress: Default::default(),
         });
-        let relay = Relay::open(&config.relay, Default::default(), Default::default(), &storage, &cancel).unwrap();
+        let relay = Relay::open(&config.relay, Default::default(), Default::default(), None, &storage, &cancel).unwrap();
         let blossom = Blossom::open(&config.blossom, Default::default(), Default::default(), &storage, &cancel).unwrap();
         let router = router(Services { web, relay, blossom, av: None });
         Harness { _dir: dir, router, _cancel: cancel.drop_guard() }

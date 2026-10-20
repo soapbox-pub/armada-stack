@@ -12,6 +12,7 @@ mod concord;
 mod config;
 mod hash;
 mod mime;
+mod moderation;
 mod net;
 mod nostr;
 mod nsite;
@@ -158,14 +159,15 @@ async fn main() -> Result<()> {
     let cancel = CancellationToken::new();
     let nostr = Arc::new(NostrService::new(config.web.relay_urls(), tor.clone()));
     let push = if config.push.enabled { Some(push::Push::open(&storage)?) } else { None };
-    let mut client_env = web::env::ClientEnv::new(&config)?.with_onion(names.onion.clone());
+    let moderator = moderation::load_or_create(&storage)?.pubkey;
+    let mut client_env = web::env::ClientEnv::new(&config)?.with_onion(names.onion.clone()).with_moderator(&moderator);
     if let Some(push) = &push {
         client_env = client_env.with_push(push.pubkey());
     }
     let web = web::Web::open(&config.web, client_env, &storage, nostr).await?;
     let blossom = blossom::Blossom::open(&config.blossom, names.clone(), config.trust(), &storage, &cancel)?;
     blossom.start();
-    let relay = relay::Relay::open(&config.relay, names.clone(), config.trust(), &storage, &cancel)?;
+    let relay = relay::Relay::open(&config.relay, names.clone(), config.trust(), Some(moderator), &storage, &cancel)?;
     if let Some(push) = push {
         let relay_url = config.public_url()?.and_then(|url| origin::public_origin(&Some(url).into(), &http::HeaderMap::new())).map(|origin| origin.websocket());
         let options = push::Options { relay_url, subject: config.push_subject()?, public_only: true };

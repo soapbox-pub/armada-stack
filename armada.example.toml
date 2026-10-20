@@ -45,8 +45,11 @@ keep_versions = 60
 # names Armada reads. Unset, armada's own relay and Blossom server (preferred
 # for uploads) join Armada's public ones as RELAYS and BLOSSOM_SERVERS, and
 # its AV broker is CONCORD_AV_SERVERS alone, once public_url or a public Host
-# says where armada is reached. A name set here replaces that; "" brings back Armada's
-# own default, except for CONCORD_AV_SERVERS, which "" turns off.
+# says where armada is reached. Its moderation key joins Soapbox's as
+# BLOCKLIST_AUTHORS, whose entries say which communities the app won't open
+# (see `armada ban`). A name set here replaces that; "" brings back Armada's
+# own default, except for CONCORD_AV_SERVERS and BLOCKLIST_AUTHORS, which ""
+# turns off.
 #
 # RELAYS is every relay the app uses by default: account data, search, new
 # communities, and the backups of each user's community and invite lists.

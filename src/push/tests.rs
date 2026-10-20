@@ -45,7 +45,7 @@ impl Harness {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::allowing_private(dir.path());
         let cancel = CancellationToken::new();
-        let relay = Relay::open(&RelayConfig::default(), Default::default(), Default::default(), &storage, &cancel).unwrap();
+        let relay = Relay::open(&RelayConfig::default(), Default::default(), Default::default(), None, &storage, &cancel).unwrap();
         let push = Push::open(&storage).unwrap();
         let service = push.pubkey().to_string();
         let options = Options { relay_url: Some(RELAY_URL.into()), subject: "https://armada.example.com".into(), public_only: false };
