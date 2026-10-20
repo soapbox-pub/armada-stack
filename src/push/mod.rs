@@ -5,7 +5,7 @@
 //! requests to its pubkey, in NIP-46's shape, answered the same way, with
 //! `create`, `set`, `get`, `delete` and `ping`. Only Web Push connections
 //! are taken. Each client brings its own VAPID key, so the only key here is
-//! the service's Nostr key, made on first start ([`key`]); the web app is
+//! the service's Nostr key, made on first start ([`Keys`]); the web app is
 //! pointed at it through `NOSTR_PUSH2_PUBKEY` and `NOSTR_PUSH2_RELAYS`
 //! (see [`crate::web::env`]).
 //!
@@ -32,7 +32,6 @@
 
 mod connection;
 mod db;
-mod key;
 mod subscriptions;
 mod webpush;
 
@@ -47,6 +46,7 @@ use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::nostr::key::Keys;
 use crate::nostr::{Event, nip44};
 use crate::ratelimit::{RateLimiter, TokenBucket};
 use crate::relay::{ConnId, Internal, Outbound};
@@ -54,7 +54,6 @@ use crate::storage::Storage;
 use crate::util::now;
 use connection::Connection;
 use db::{Client, PushDb};
-use key::Keys;
 use webpush::{Outcome, Sender};
 
 /// Requests and their answers.
