@@ -1,6 +1,7 @@
 //! Just enough Concord to find a Community's events from one of its invite
 //! links, for [`crate::ban`]: open the link's bundle, derive the addresses
-//! the Community publishes at, and read its Control and Chat Planes.
+//! the Community publishes at, and read its Control and Chat Planes and its
+//! Guestbook.
 //!
 //! The specs are the CORD documents (github.com/soapbox-pub/concord). The
 //! derivations here are frozen wire format, checked against vectors Armada
@@ -10,7 +11,7 @@
 //! needs to know what was published at the Community's addresses, which only
 //! its members can write to.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -31,9 +32,13 @@ const WRAP: i64 = 1059;
 const SEAL_ENCRYPTED: i64 = 20013;
 const SEAL_PLAINTEXT: i64 = 20014;
 const CONTROL: u16 = 3308;
+const JOIN_LEAVE: u16 = 3306;
+const KICK: u16 = 3309;
+const SNAPSHOT: u16 = 3312;
 
 const VSK_METADATA: &str = "0";
 const VSK_CHANNEL: &str = "2";
+const VSK_BANLIST: &str = "4";
 const VSK_INVITE_REGISTRY: &str = "8";
 const VSK_INVITE_LIVE: &str = "6";
 const VSK_INVITE_REVOKED: &str = "9";
@@ -279,6 +284,8 @@ pub fn open_bundle(event: &Event, link: &InviteLink) -> Result<Option<Bundle>, S
 pub struct Rumor {
     pub pubkey: String,
     pub kind: u16,
+    #[serde(default)]
+    pub created_at: i64,
     pub tags: Vec<Vec<String>>,
     pub content: String,
 }
@@ -326,12 +333,21 @@ pub struct Control {
     pub link_signers: Vec<String>,
     /// The icon and banner.
     pub blobs: Vec<BlobRef>,
+    /// Everyone any Banlist edition named, hex.
+    pub banned: BTreeSet<String>,
+    /// Who published here, and when they last did.
+    pub authors: BTreeMap<String, i64>,
 }
 
 pub fn read_control(wraps: &[Event], conv_key: &Bytes32) -> Control {
     let mut control = Control::default();
-    for rumor in wraps.iter().filter_map(|wrap| open_wrap(wrap, conv_key)).filter(|rumor| rumor.kind == CONTROL) {
+    for rumor in wraps.iter().filter_map(|wrap| open_wrap(wrap, conv_key)) {
+        observe(&mut control.authors, &rumor);
+        if rumor.kind != CONTROL {
+            continue;
+        }
         let content: Value = serde_json::from_str(&rumor.content).unwrap_or_default();
+        let hexes = || content.as_array().into_iter().flatten().filter_map(Value::as_str).filter(|s| bytes32(s).is_some()).map(str::to_lowercase);
         match rumor.tag("vsk") {
             Some(VSK_METADATA) => {
                 if let Some(name) = content["name"].as_str() {
@@ -354,10 +370,8 @@ pub fn read_control(wraps: &[Event], conv_key: &Bytes32) -> Control {
                     }
                 }
             }
-            Some(VSK_INVITE_REGISTRY) => {
-                let signers = content.as_array().into_iter().flatten().filter_map(Value::as_str);
-                control.link_signers.extend(signers.filter(|s| bytes32(s).is_some()).map(str::to_lowercase));
-            }
+            Some(VSK_BANLIST) => control.banned.extend(hexes()),
+            Some(VSK_INVITE_REGISTRY) => control.link_signers.extend(hexes()),
             _ => {}
         }
     }
@@ -385,6 +399,85 @@ pub fn attachments(wraps: &[Event], conv_key: &Bytes32) -> Vec<BlobRef> {
     blobs.sort_by(|a, b| (&a.sha256, &a.author).cmp(&(&b.sha256, &b.author)));
     blobs.dedup();
     blobs
+}
+
+/// Who published on a plane, and when they last did.
+pub fn authors(wraps: &[Event], conv_key: &Bytes32) -> BTreeMap<String, i64> {
+    let mut authors = BTreeMap::new();
+    for rumor in wraps.iter().filter_map(|wrap| open_wrap(wrap, conv_key)) {
+        observe(&mut authors, &rumor);
+    }
+    authors
+}
+
+fn observe(authors: &mut BTreeMap<String, i64>, rumor: &Rumor) {
+    if bytes32(&rumor.pubkey).is_some() {
+        let last = authors.entry(rumor.pubkey.to_lowercase()).or_insert(i64::MIN);
+        *last = (*last).max(rumor.created_at);
+    }
+}
+
+/// The Guestbook coalesced flat (CORD-02 §5): each npub's latest Join,
+/// Leave, Kick, or snapshot, as whether it left them in, and when.
+pub fn read_guestbook(wraps: &[Event], conv_key: &Bytes32) -> BTreeMap<String, (i64, bool)> {
+    let mut rumors: Vec<Rumor> = wraps.iter().filter_map(|wrap| open_wrap(wrap, conv_key)).collect();
+    rumors.sort_by_key(|rumor| rumor.created_at);
+    let mut states: BTreeMap<String, (i64, bool)> = BTreeMap::new();
+    let mut set = |pubkey: &str, at: i64, present: bool, seed: bool| {
+        if bytes32(pubkey).is_none() {
+            return;
+        }
+        match states.entry(pubkey.to_lowercase()) {
+            // A snapshot only seeds: anything as new or newer wins over it.
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                if !seed || entry.get().0 < at {
+                    entry.insert((at, present));
+                }
+            }
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert((at, present));
+            }
+        }
+    };
+    for rumor in &rumors {
+        match rumor.kind {
+            JOIN_LEAVE => match rumor.content.as_str() {
+                "join" => set(&rumor.pubkey, rumor.created_at, true, false),
+                "leave" => set(&rumor.pubkey, rumor.created_at, false, false),
+                _ => {}
+            },
+            KICK => {
+                if let Some(target) = rumor.tag("p") {
+                    set(target, rumor.created_at, false, false);
+                }
+            }
+            SNAPSHOT => {
+                let members: Vec<String> = serde_json::from_str(&rumor.content).unwrap_or_default();
+                for member in &members {
+                    set(member, rumor.created_at, true, true);
+                }
+            }
+            _ => {}
+        }
+    }
+    states
+}
+
+/// The Complete Memberlist (CORD-02 §5), as near as an outsider holding the
+/// current keys can make it: the coalesced Guestbook, with everyone seen
+/// publishing since they last left or were kicked, less the Banlist.
+pub fn members(guestbook: &BTreeMap<String, (i64, bool)>, authors: &BTreeMap<String, i64>, banned: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut members: BTreeSet<String> = guestbook.iter().filter(|(_, (_, present))| *present).map(|(pubkey, _)| pubkey.clone()).collect();
+    for (author, last) in authors {
+        match guestbook.get(author) {
+            Some((at, false)) if at >= last => {}
+            _ => {
+                members.insert(author.clone());
+            }
+        }
+    }
+    members.retain(|member| !banned.contains(member));
+    members
 }
 
 /// A blob's sha256: the value itself, or the last part of a Blossom URL's
@@ -479,6 +572,9 @@ mod tests {
         // which Channels exist matters.
         let want: Vec<Bytes32> = c["expect"]["channels"].as_object().unwrap().keys().map(|id| bytes32(id).unwrap()).collect();
         assert_eq!(control.channels.keys().copied().collect::<Vec<_>>(), want);
+        let banned: Vec<String> = serde_json::from_value(c["expect"]["banned"].clone()).unwrap();
+        assert_eq!(control.banned.iter().cloned().collect::<Vec<_>>(), banned);
+        assert!(control.authors.contains_key(k["owner"].as_str().unwrap()));
 
         // A key that isn't the plane's opens nothing.
         assert!(read_control(&wraps, &[1; 32]).channels.is_empty());
@@ -493,6 +589,27 @@ mod tests {
         let rumor = open_wrap(&wrap, &key.conv_key).unwrap();
         assert_eq!(rumor.kind, 9);
         assert_eq!(rumor.pubkey, k["alice"].as_str().unwrap());
+        assert_eq!(authors(&[wrap], &key.conv_key).into_keys().collect::<Vec<_>>(), [k["alice"].as_str().unwrap()]);
+    }
+
+    #[test]
+    fn opens_armada_guestbooks() {
+        let v = vectors();
+        let k = &v["keys"];
+        let wrap = event(&v["guestbook"]["wrap"]);
+        let key = guestbook_key(&h(&k["community_root"]), &h(&k["community_id"]), 0);
+        assert_eq!(wrap.pubkey, key.pk);
+        assert_eq!(read_guestbook(&[wrap], &key.conv_key).len(), 1);
+    }
+
+    #[test]
+    fn coalesces_membership() {
+        let [a, b, c, d, e] = ["aa", "bb", "cc", "dd", "ee"].map(|byte| byte.repeat(32));
+        let guestbook = BTreeMap::from([(a.clone(), (10, true)), (b.clone(), (10, false)), (c.clone(), (10, false)), (d.clone(), (10, true))]);
+        // b spoke before leaving, c after; e never joined but spoke.
+        let authors = BTreeMap::from([(b.clone(), 5), (c.clone(), 20), (e.clone(), 1)]);
+        let banned = BTreeSet::from([d.clone()]);
+        assert_eq!(members(&guestbook, &authors, &banned), BTreeSet::from([a, c, e]));
     }
 
     #[test]

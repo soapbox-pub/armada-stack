@@ -13,7 +13,7 @@ use crate::config::RelayConfig;
 use crate::nostr::Event;
 use crate::storage::Storage;
 
-pub use super::store::Ban;
+pub use super::store::{Ban, Role};
 
 pub struct Bans {
     store: Store,
@@ -75,11 +75,11 @@ impl Bans {
     }
 
     /// Ban `pubkeys` together, as `community`'s.
-    pub fn ban(&self, pubkeys: &[[u8; 32]], community: &[u8; 32]) -> Result<()> {
+    pub fn ban(&self, pubkeys: &[([u8; 32], Role)], community: &[u8; 32]) -> Result<()> {
         let at = u32::try_from(crate::util::now()).unwrap_or(u32::MAX);
         let mut txn = self.store.write()?;
-        for &pubkey in pubkeys {
-            self.store.ban(&mut txn, &Ban { pubkey, community: *community, at })?;
+        for &(pubkey, role) in pubkeys {
+            self.store.ban(&mut txn, &Ban { pubkey, community: *community, at, role })?;
         }
         txn.commit()?;
         Ok(())

@@ -36,7 +36,7 @@ pub mod auth;
 mod db;
 pub mod sniff;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -133,6 +133,27 @@ impl Removals {
     pub fn remove(&self, sha256: BlobHash) -> Result<()> {
         self.db.remove_blob(sha256)?;
         self.blobs.remove(sha256)
+    }
+
+    /// Record that `pubkey` uploaded a blob, without its bytes.
+    #[cfg(test)]
+    pub fn record_upload(&self, sha256: BlobHash, pubkey: &str) {
+        self.db.add(sha256, 1, pubkey, None, 0).unwrap();
+    }
+
+    /// Every blob any of `pubkeys` uploaded here, with who did.
+    pub fn uploads_by(&self, pubkeys: &BTreeSet<[u8; 32]>) -> Result<Vec<(BlobHash, [u8; 32])>> {
+        self.db.uploads_by(pubkeys)
+    }
+
+    /// Take back `pubkey`'s upload of a blob, and the blob with it unless
+    /// someone else uploaded it too. Whether the blob went.
+    pub fn disown(&self, sha256: BlobHash, pubkey: &[u8; 32]) -> Result<bool> {
+        if self.db.remove_owner(sha256, &hex::encode(pubkey))? != db::Removal::Gone {
+            return Ok(false);
+        }
+        self.blobs.remove(sha256)?;
+        Ok(true)
     }
 }
 

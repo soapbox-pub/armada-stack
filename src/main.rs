@@ -77,6 +77,15 @@ enum Command {
         /// The invite link, `https://…/invite/<naddr>#<fragment>`
         #[arg(required_unless_present = "list", conflicts_with = "list")]
         link: Option<String>,
+        /// Ban everyone in the Community too, by their own keys, from
+        /// posting anything here, and delete what they published and
+        /// uploaded here
+        #[arg(long, conflicts_with = "list")]
+        members: bool,
+        /// Another relay to read the Community from, besides the link's and
+        /// its own. Repeatable
+        #[arg(long = "relay", value_name = "URL", conflicts_with = "list")]
+        relays: Vec<String>,
         /// Say what would be banned and deleted, and change nothing
         #[arg(long)]
         dry_run: bool,
@@ -105,7 +114,9 @@ async fn main() -> Result<()> {
         Some(Command::Upgrade { version, check }) => return upgrade::run(upgrade::Options { version, check }).await,
         Some(Command::Onion) => return print_onion(cli.config.as_deref()),
         Some(Command::Ban { list: true, .. }) => return ban::list(cli.config.as_deref()),
-        Some(Command::Ban { link, dry_run, .. }) => return ban::ban(cli.config.as_deref(), &link.unwrap_or_default(), dry_run).await,
+        Some(Command::Ban { link, members, relays, dry_run, .. }) => {
+            return ban::ban(cli.config.as_deref(), &link.unwrap_or_default(), &ban::Options { members, relays, dry_run }).await;
+        }
         Some(Command::Unban { target }) => return ban::unban(cli.config.as_deref(), &target),
         None => {}
     }

@@ -10,15 +10,23 @@
 //! of the links, and the blobs the Community's icon, banner, and messages
 //! point at that their authors uploaded here.
 //!
+//! With `--members`, so is everyone in the Community, by their own keys:
+//! the Guestbook coalesced, with everyone seen publishing on its planes,
+//! less anyone its own Banlist names. That bans them from posting anything
+//! here, not only to the Community, and deletes everything they published
+//! here and their uploads, short of blobs someone else uploaded too.
+//!
 //! Earlier epochs are out of reach: no key in the bundle derives them.
 //!
 //! The Community goes on this armada's blocklist too ([`moderation`]), so
 //! Armada won't open it here at all, and `armada unban` lifts it.
 //!
 //! The bundle and Control Plane are read from this relay, or from the
-//! link's relays and the Community's when it doesn't have them.
+//! link's relays, the Community's, and any given with `--relay` when it
+//! doesn't have them. Its Chat Planes and Guestbook are read from this relay,
+//! and with `--members` from those relays too, to find everyone in it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,16 +42,17 @@ use crate::moderation::{self, Status};
 use crate::nostr::Event;
 use crate::nostr::nip19::{self, Decoded};
 use crate::nostr::pool::{Filter, Pool, is_onion};
-use crate::relay::bans::{Ban, Bans};
+use crate::relay::bans::{Ban, Bans, Role};
 use crate::storage::Storage;
 
 /// How long the link's relays get to answer.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// A pubkey to ban, and what it is to the Community.
+/// A pubkey to ban, what it is to the Community, and in what words.
 struct Target {
     pubkey: Bytes32,
-    role: String,
+    role: Role,
+    what: String,
 }
 
 struct Opened {
@@ -58,15 +67,32 @@ fn open(config: Option<&Path>) -> Result<Opened> {
     Ok(Opened { storage, relay })
 }
 
+/// What `armada ban <link>` is asked to do.
+#[derive(Default)]
+pub struct Options {
+    /// Ban everyone in the Community too.
+    pub members: bool,
+    /// Relays to read the Community from, besides the link's and its own.
+    pub relays: Vec<String>,
+    /// Say what would happen, and change nothing.
+    pub dry_run: bool,
+}
+
 /// `armada ban <link>`.
-pub async fn ban(config: Option<&Path>, link: &str, dry_run: bool) -> Result<()> {
+pub async fn ban(config: Option<&Path>, link: &str, options: &Options) -> Result<()> {
+    let pool = Pool::new(Arc::new(|_: &str| false), None);
+    let cancel = CancellationToken::new();
+    ban_with(config, link, options, async |filter, relays| fetch(&pool, filter, relays, &cancel).await).await
+}
+
+/// [`ban`], reading from relays with `query`.
+async fn ban_with(config: Option<&Path>, link: &str, options: &Options, query: impl AsyncFn(Filter, &[String]) -> Vec<Event>) -> Result<()> {
     let Opened { storage, relay, .. } = open(config)?;
     let link = concord::parse_link(link).map_err(anyhow::Error::msg)?;
     let signer = bytes32(&link.link_signer).context("the link's signer")?;
-    let pool = Pool::new(Arc::new(|_: &str| false), None);
-    let cancel = CancellationToken::new();
+    let mut relays: Vec<String> = link.relays.iter().chain(&options.relays).cloned().collect();
 
-    let mut targets = vec![Target { pubkey: signer, role: "this invite link".into() }];
+    let mut targets = vec![Target { pubkey: signer, role: Role::Community, what: "this invite link".into() }];
     let mut skipped = Vec::new();
     let mut blobs = Vec::new();
     let mut community = [0; 32];
@@ -76,7 +102,7 @@ pub async fn ban(config: Option<&Path>, link: &str, dry_run: bool) -> Result<()>
         Some(event) => Some(event),
         None => {
             let filter = Filter { kinds: vec![concord::INVITE_BUNDLE.into()], authors: vec![link.link_signer.clone()], d: vec![String::new()], ..Default::default() };
-            fetch(&pool, filter, &link.relays, &cancel).await.into_iter().filter(is_bundle).max_by_key(|event| event.created_at)
+            query(filter, &relays).await.into_iter().filter(is_bundle).max_by_key(|event| event.created_at)
         }
     };
     let bundle = match found {
@@ -96,6 +122,7 @@ pub async fn ban(config: Option<&Path>, link: &str, dry_run: bool) -> Result<()>
     if let Some(bundle) = &bundle {
         let (id, root, epoch) = (bundle.id(), bundle.root(), bundle.root_epoch);
         community = id;
+        relays.extend(bundle.relays.iter().cloned());
 
         let read = concord::control_key(&root, &id, epoch);
         let mut control_plane = vec![read.pk.clone()];
@@ -105,9 +132,7 @@ pub async fn ban(config: Option<&Path>, link: &str, dry_run: bool) -> Result<()>
             wraps.extend(relay.events_by(&bytes32(pk).unwrap())?);
         }
         if wraps.is_empty() {
-            let relays: Vec<String> = link.relays.iter().chain(&bundle.relays).cloned().collect();
-            let filter = Filter { kinds: vec![1059], authors: control_plane.clone(), ..Default::default() };
-            wraps = fetch(&pool, filter, &relays, &cancel).await;
+            wraps = query(wraps_by(control_plane.clone()), &relays).await;
         }
         let control = concord::read_control(&wraps, &read.conv_key);
         let name = control.name.as_deref().unwrap_or(&bundle.name);
@@ -120,23 +145,43 @@ pub async fn ban(config: Option<&Path>, link: &str, dry_run: bool) -> Result<()>
             targets.extend(target(pk, "Control Plane"));
         }
         targets.extend(target(&read.pk, "Control Plane, at its pre-split address"));
-        targets.extend(target(&concord::guestbook_key(&root, &id, epoch).pk, "Guestbook"));
+        let guestbook = concord::guestbook_key(&root, &id, epoch);
+        targets.extend(target(&guestbook.pk, "Guestbook"));
         targets.extend(target(&concord::base_rekey_key(&root, &id, epoch + 1).pk, "its next Refounding"));
         targets.extend(target(&concord::dissolved_key(&id).pk, "its dissolution"));
         blobs.extend(control.blobs);
 
+        // Each Chat Plane's address, and the key that opens it.
+        let mut chats = Vec::new();
         for (channel, channel_name) in &control.channels {
             let key = concord::channel_key(&root, channel, epoch);
-            blobs.extend(concord::attachments(&relay.events_by(&bytes32(&key.pk).unwrap())?, &key.conv_key));
             targets.extend(target(&key.pk, &format!("#{}", display_name(channel_name, channel))));
+            chats.push(key);
         }
         for channel in &bundle.channels {
             let (Some(channel_id), Some(key)) = (bytes32(&channel.id), bytes32(&channel.key)) else { continue };
             let name = display_name(control.channels.get(&channel_id).filter(|name| !name.is_empty()).unwrap_or(&channel.name), &channel_id);
             let key = concord::channel_key(&key, &channel_id, channel.epoch);
-            blobs.extend(concord::attachments(&relay.events_by(&bytes32(&key.pk).unwrap())?, &key.conv_key));
             targets.extend(target(&key.pk, &format!("#{name}, private")));
             targets.extend(target(&concord::channel_rekey_key(&root, &channel_id, channel.epoch + 1).pk, &format!("#{name}'s next key")));
+            chats.push(key);
+        }
+
+        let mut planes: BTreeMap<String, Vec<Event>> = BTreeMap::new();
+        for pk in chats.iter().map(|key| &key.pk).chain(options.members.then_some(&guestbook.pk)) {
+            planes.insert(pk.clone(), relay.events_by(&bytes32(pk).unwrap())?);
+        }
+        if options.members {
+            let mut held: HashSet<String> = planes.values().flatten().map(|event| event.id.clone()).collect();
+            for wrap in query(wraps_by(planes.keys().cloned().collect()), &relays).await {
+                if held.insert(wrap.id.clone()) {
+                    planes.entry(wrap.pubkey.clone()).or_default().push(wrap);
+                }
+            }
+        }
+        let wraps_at = |pk: &str| planes.get(pk).map_or(&[][..], Vec::as_slice);
+        for key in &chats {
+            blobs.extend(concord::attachments(wraps_at(&key.pk), &key.conv_key));
         }
 
         // A Registry is a member's word for which pubkeys are invite links,
@@ -148,17 +193,41 @@ pub async fn ban(config: Option<&Path>, link: &str, dry_run: bool) -> Result<()>
             if kinds.is_empty() {
                 skipped.push(format!("{other}  another of its invite links, by its Registry, but nothing of it is here"));
             } else if kinds.iter().all(|kind| *kind == concord::INVITE_BUNDLE) {
-                targets.push(Target { pubkey, role: "another of its invite links".into() });
+                targets.push(Target { pubkey, role: Role::Community, what: "another of its invite links".into() });
             } else {
                 skipped.push(format!("{other}  another of its invite links, by its Registry, but it has signed other kinds of events here"));
             }
         }
+
+        if options.members {
+            let mut authors = control.authors.clone();
+            for key in &chats {
+                for (author, last) in concord::authors(wraps_at(&key.pk), &key.conv_key) {
+                    let seen = authors.entry(author).or_insert(i64::MIN);
+                    *seen = (*seen).max(last);
+                }
+            }
+            // The owner is in it, whether or not they've been seen.
+            let owner = bundle.owner.to_lowercase();
+            authors.entry(owner.clone()).or_insert(i64::MIN);
+            let book = concord::read_guestbook(wraps_at(&guestbook.pk), &guestbook.conv_key);
+            if !control.banned.is_empty() {
+                skipped.push(format!("the {} people its own Banlist names", control.banned.len()));
+            }
+            for member in concord::members(&book, &authors, &control.banned) {
+                let what = if member == owner { "its owner" } else { "a member" };
+                targets.extend(bytes32(&member).map(|pubkey| Target { pubkey, role: Role::Member, what: what.into() }));
+            }
+        }
+    } else if options.members {
+        println!("Without its bundle, there's no telling who's in it, so no members are banned.");
     }
 
     let mut seen = BTreeSet::new();
     targets.retain(|target| seen.insert(target.pubkey));
-    let pubkeys: Vec<Bytes32> = targets.iter().map(|target| target.pubkey).collect();
-    let link_signers: Vec<Bytes32> = targets.iter().filter(|target| target.role.contains("invite link")).map(|target| target.pubkey).collect();
+    let pubkeys: Vec<(Bytes32, Role)> = targets.iter().map(|target| (target.pubkey, target.role)).collect();
+    let link_signers: Vec<Bytes32> = targets.iter().filter(|target| target.what.contains("invite link")).map(|target| target.pubkey).collect();
+    let members: BTreeSet<Bytes32> = targets.iter().filter(|target| target.role == Role::Member).map(|target| target.pubkey).collect();
 
     let removals = Blossom::open_for_removal(&storage)?;
     let mut doomed = BTreeSet::new();
@@ -169,18 +238,22 @@ pub async fn ban(config: Option<&Path>, link: &str, dry_run: bool) -> Result<()>
             doomed.insert(hash);
         }
     }
+    let uploads = if members.is_empty() { Vec::new() } else { removals.uploads_by(&members)? };
 
-    println!("{} {} pubkeys:", if dry_run { "Would ban" } else { "Banning" }, targets.len());
+    println!("{} {} pubkeys:", if options.dry_run { "Would ban" } else { "Banning" }, targets.len());
     for target in &targets {
-        println!("  {}  {}, {} events here", hex::encode(target.pubkey), target.role, relay.count_by(&target.pubkey)?);
+        println!("  {}  {}, {} events here", hex::encode(target.pubkey), target.what, relay.count_by(&target.pubkey)?);
     }
     for line in &skipped {
         println!("  Not banning {line}.");
     }
     let announcements = relay.count_announcements(&link_signers)?;
     let moderator = moderation::load(&storage)?;
-    if dry_run {
+    if options.dry_run {
         println!("Would delete {announcements} Discover announcements of its invite links, and {} blobs.", doomed.len());
+        if !members.is_empty() {
+            println!("Would take back its members' {} uploads here, deleting each blob no one else uploaded too.", uploads.len());
+        }
         if bundle.is_some() && moderator.is_some() {
             println!("Would add it to this armada's blocklist.");
         }
@@ -189,7 +262,7 @@ pub async fn ban(config: Option<&Path>, link: &str, dry_run: bool) -> Result<()>
 
     relay.ban(&pubkeys, &community)?;
     let mut removed = 0;
-    for pubkey in &pubkeys {
+    for (pubkey, _) in &pubkeys {
         removed += relay.remove_by(pubkey)?;
     }
     let announcements = relay.remove_announcements(&link_signers)?;
@@ -197,6 +270,13 @@ pub async fn ban(config: Option<&Path>, link: &str, dry_run: bool) -> Result<()>
         removals.remove(*hash)?;
     }
     println!("Banned. Deleted {removed} events, {announcements} Discover announcements of its invite links, and {} blobs.", doomed.len());
+    if !members.is_empty() {
+        let mut gone = 0;
+        for (hash, pubkey) in &uploads {
+            gone += usize::from(removals.disown(*hash, pubkey)?);
+        }
+        println!("Took back its members' {} uploads here, and deleted the {gone} blobs no one else had uploaded.", uploads.len());
+    }
     if bundle.is_some() {
         match &moderator {
             Some(keys) => {
@@ -217,7 +297,7 @@ pub fn list(config: Option<&Path>) -> Result<()> {
         println!("Nothing is banned.");
         return Ok(());
     }
-    bans.sort_by_key(|ban| (ban.community, ban.at, ban.pubkey));
+    bans.sort_by_key(|ban| (ban.community, ban.role, ban.at, ban.pubkey));
     let mut community = None;
     for ban in bans {
         if community != Some(ban.community) {
@@ -228,13 +308,15 @@ pub fn list(config: Option<&Path>) -> Result<()> {
                 println!("Community {}:", hex::encode(ban.community));
             }
         }
-        println!("  {}  banned {}", hex::encode(ban.pubkey), httpdate::fmt_http_date(std::time::UNIX_EPOCH + Duration::from_secs(ban.at.into())));
+        let role = if ban.role == Role::Member { "  member" } else { "" };
+        println!("  {}  banned {}{role}", hex::encode(ban.pubkey), httpdate::fmt_http_date(std::time::UNIX_EPOCH + Duration::from_secs(ban.at.into())));
     }
     Ok(())
 }
 
 /// `armada unban <target>`: an invite link or community id lifts its
-/// Community's bans and its blocklist entry, a pubkey just its own ban.
+/// Community's bans, its members' included, and its blocklist entry; a
+/// pubkey just its own ban.
 pub fn unban(config: Option<&Path>, target: &str) -> Result<()> {
     let Opened { storage, relay } = open(config)?;
     let bans = relay.list()?;
@@ -269,8 +351,13 @@ fn is_bundle(event: &Event) -> bool {
     event.kind == i64::from(concord::INVITE_BUNDLE) && event.tag("d").unwrap_or_default().is_empty()
 }
 
-fn target(pubkey: &str, role: &str) -> Option<Target> {
-    Some(Target { pubkey: bytes32(pubkey)?, role: role.to_string() })
+/// One of the Community's own addresses.
+fn target(pubkey: &str, what: &str) -> Option<Target> {
+    Some(Target { pubkey: bytes32(pubkey)?, role: Role::Community, what: what.to_string() })
+}
+
+fn wraps_by(authors: Vec<String>) -> Filter {
+    Filter { kinds: vec![1059], authors, ..Default::default() }
 }
 
 fn display_name(name: &str, id: &Bytes32) -> String {
@@ -301,6 +388,64 @@ mod tests {
         serde_json::from_value(value.clone()).unwrap()
     }
 
+    async fn offline(_: Filter, _: &[String]) -> Vec<Event> {
+        Vec::new()
+    }
+
+    #[tokio::test]
+    async fn bans_its_members_too() {
+        let v = vectors();
+        let k = &v["keys"];
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("armada.toml");
+        std::fs::write(&config, format!("storage_dir = {:?}\n", dir.path().join("data"))).unwrap();
+        let url = v["invite"]["url"].as_str().unwrap();
+        let key = |name: &str| bytes32(k[name].as_str().unwrap()).unwrap();
+        let profile = |name: &str| Event::sign(k[&format!("{name}_sk")].as_str().unwrap(), 100, 0, vec![], "{}");
+        let (alices, bobs) = (profile("alice"), profile("bob"));
+        let (own, shared) = (BlobHash::of(b"alice's"), BlobHash::of(b"shared"));
+        {
+            let Opened { storage, relay } = open(Some(&config)).unwrap();
+            let control = v["control"]["wraps"].as_array().unwrap().iter().map(event);
+            for event in control.chain([event(&v["invite"]["bundle_event"]), event(&v["chat_wrap"]["wrap"]), alices.clone(), bobs.clone()]) {
+                assert!(matches!(relay.insert(&event), Outcome::Stored(_)), "{}", event.id);
+            }
+            let removals = Blossom::open_for_removal(&storage).unwrap();
+            removals.record_upload(own, &alices.pubkey);
+            removals.record_upload(shared, &alices.pubkey);
+            removals.record_upload(shared, &"33".repeat(32));
+        }
+
+        // The Guestbook is only on the Community's relays.
+        let guestbook = event(&v["guestbook"]["wrap"]);
+        let remote = async |filter: Filter, _: &[String]| -> Vec<Event> {
+            [&guestbook].into_iter().filter(|wrap| filter.authors.contains(&wrap.pubkey) && filter.kinds.contains(&wrap.kind)).cloned().collect()
+        };
+        let options = Options { members: true, ..Default::default() };
+        ban_with(Some(&config), url, &options, remote).await.unwrap();
+
+        let Opened { storage, relay } = open(Some(&config)).unwrap();
+        let members: BTreeSet<Bytes32> = relay.list().unwrap().iter().filter(|ban| ban.role == Role::Member).map(|ban| ban.pubkey).collect();
+        // The owner, and Alice, who wrote in a Channel; not Bob, whom the
+        // Community itself banned.
+        assert!(members.contains(&key("owner")) && members.contains(&key("alice")));
+        assert!(!members.contains(&key("bob")));
+        assert_eq!(relay.count_by(&key("alice")).unwrap(), 0);
+        assert_eq!(relay.count_by(&key("bob")).unwrap(), 1);
+        assert!(matches!(relay.insert(&alices), Outcome::Banned));
+        // Her own upload goes; one someone else made too stays theirs.
+        let removals = Blossom::open_for_removal(&storage).unwrap();
+        assert!(!removals.uploaded_by(own, &alices.pubkey).unwrap());
+        assert!(!removals.uploaded_by(shared, &alices.pubkey).unwrap());
+        assert!(removals.uploaded_by(shared, &"33".repeat(32)).unwrap());
+        drop((relay, removals));
+
+        // The link lifts the whole Community, members and all.
+        unban(Some(&config), url).unwrap();
+        let Opened { relay, .. } = open(Some(&config)).unwrap();
+        assert!(relay.list().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn bans_a_community_by_its_invite_link() {
         let v = vectors();
@@ -327,13 +472,14 @@ mod tests {
             }
         }
 
-        ban(Some(&config), url, true).await.unwrap();
+        let dry_run = Options { dry_run: true, ..Default::default() };
+        ban_with(Some(&config), url, &dry_run, offline).await.unwrap();
         let Opened { relay, .. } = open(Some(&config)).unwrap();
         assert!(relay.list().unwrap().is_empty(), "a dry run changes nothing");
         assert_eq!(entry(&relay), None);
         drop(relay);
 
-        ban(Some(&config), url, false).await.unwrap();
+        ban_with(Some(&config), url, &Options::default(), offline).await.unwrap();
         let Opened { relay, .. } = open(Some(&config)).unwrap();
         let control_pk = bytes32(v["control"]["control_pk"].as_str().unwrap()).unwrap();
         let signer = bytes32(v["invite"]["link_signer"].as_str().unwrap()).unwrap();

@@ -238,11 +238,24 @@ from Soapbox's; set `BLOCKLIST_AUTHORS` under `[web.env]` to change that.
 
 Only the community's current keys can be reached. Anything it published
 before it last changed its keys stays, since nothing in the link derives the
-old ones. Its members' own accounts aren't banned.
+old ones.
+
+Its members' own accounts aren't banned unless you add `--members`. Then
+everyone in the community is banned by their own key, from posting anything
+on this server, not just to the community. Everything they published here
+and every blob they uploaded here is deleted, except blobs someone else also
+uploaded. Members are found from the community's guestbook and from who has
+posted in its channels, read from this relay and the community's relays.
+People the community banned itself are left alone. Try `--dry-run` first:
+it lists every member it would ban.
+
+The community is read from the link's relays and its own. Add more with
+`--relay wss://…`, as many times as needed.
 
 `sudo armada ban --list` shows what's banned. `sudo armada unban` takes the
-same link, or a community id, to lift a community's bans and its blocklist
-entry, or a single pubkey. What was deleted stays deleted.
+same link, or a community id, to lift a community's bans (its members'
+included) and its blocklist entry, or a single pubkey. What was deleted
+stays deleted.
 
 ## Backups
 

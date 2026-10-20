@@ -10,6 +10,8 @@
 //! claim is for good. So one owner's disappearing attachment can't take the
 //! same bytes from another who keeps them as an avatar.
 
+use std::collections::BTreeSet;
+
 use anyhow::Result;
 use heed::types::{Bytes, SerdeJson, Unit};
 use heed::{Database, Env, RwTxn, WithoutTls};
@@ -130,6 +132,22 @@ impl BlossomDb {
         let Ok(owner) = owner_key(sha256, pubkey) else { return Ok(false) };
         let txn = self.env.read_txn()?;
         Ok(self.owners.get(&txn, &owner)?.is_some())
+    }
+
+    /// Every blob any of `pubkeys` uploaded, with who did. Owners aren't
+    /// indexed by pubkey, so this reads them all.
+    pub fn uploads_by(&self, pubkeys: &BTreeSet<[u8; 32]>) -> Result<Vec<(BlobHash, [u8; 32])>> {
+        let txn = self.env.read_txn()?;
+        let mut uploads = Vec::new();
+        for entry in self.owners.iter(&txn)? {
+            let (owner, _) = entry?;
+            if let Some(pubkey) = owner.get(32..).and_then(|pubkey| <[u8; 32]>::try_from(pubkey).ok())
+                && pubkeys.contains(&pubkey)
+            {
+                uploads.push((blob_of(owner), pubkey));
+            }
+        }
+        Ok(uploads)
     }
 
     /// Remove a blob's record and every owner's claim on it, whoever they
@@ -274,6 +292,23 @@ mod tests {
         assert_eq!(db.get(sha).unwrap(), None);
         // The neighbor is untouched.
         assert!(db.get(other).unwrap().is_some());
+    }
+
+    #[test]
+    fn finds_uploads_by_pubkey() {
+        let (_dir, db) = open();
+        let (one, two, three) = (BlobHash::of(b"one"), BlobHash::of(b"two"), BlobHash::of(b"three"));
+        db.add(one, 1, ALICE, None, 0).unwrap();
+        db.add(two, 1, ALICE, None, 0).unwrap();
+        db.add(two, 1, BOB, None, 0).unwrap();
+        db.add(three, 1, BOB, None, 0).unwrap();
+        let key = |pubkey: &str| <[u8; 32]>::try_from(hex::decode(pubkey).unwrap()).unwrap();
+        let mut found = db.uploads_by(&BTreeSet::from([key(ALICE)])).unwrap();
+        found.sort();
+        let mut want = vec![(one, key(ALICE)), (two, key(ALICE))];
+        want.sort();
+        assert_eq!(found, want);
+        assert!(db.uploads_by(&BTreeSet::new()).unwrap().is_empty());
     }
 
     #[test]

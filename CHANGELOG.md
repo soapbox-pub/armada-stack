@@ -10,6 +10,12 @@ A release's notes are its section here, so tag `vX.Y.Z` only once
   are signed with a moderation key armada makes on first start; the relay
   takes them from that key alone, and the app is pointed at it through
   `BLOCKLIST_AUTHORS`, beside Soapbox's.
+- `armada ban --members` bans everyone in the community too, by their own
+  keys, and deletes what they published and uploaded here. Members come from
+  the community's guestbook and whoever posted in its channels, less those
+  the community banned itself. `armada unban` with the link lifts them too.
+- `armada ban --relay <url>` reads the community from another relay as well
+  as the link's and its own.
 
 ## 0.7.0
 

@@ -23,7 +23,7 @@
 //! | `deleted_addrs` | address                      | created_at (u32 BE)    |
 //! | `vanished`      | pubkey                       | created_at (u32 BE)    |
 //! | `vanishing`     | pubkey                       | [`Vanishing`]          |
-//! | `banned`        | pubkey                       | community id ‖ time    |
+//! | `banned`        | pubkey                       | community id ‖ time ‖ [`Role`] |
 //! | `expirations`   | expiration (u32 BE) ‖ seq    | —                      |
 //! | `meta`          | name                         | value                  |
 //!
@@ -47,7 +47,8 @@
 //! last step left off, by [`Store::sweep`] alongside expired events.
 //!
 //! The operator bans pubkeys with `armada ban`, a Concord Community's
-//! addresses and invite links (see [`crate::ban`]). Nothing a banned pubkey
+//! addresses and invite links, and with `--members` its members' own keys
+//! (see [`crate::ban`]). Nothing a banned pubkey
 //! signs is taken, gift wraps included, nor any Discover announcement of a
 //! banned invite link.
 
@@ -635,22 +636,36 @@ impl Store {
     }
 }
 
+/// What a banned pubkey was to its Community.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Role {
+    /// An address the Community publishes at, or one of its invite links.
+    Community = 0,
+    /// A person in it, banned with `--members`: their own key, for
+    /// everything they post.
+    Member = 1,
+}
+
 /// A banned pubkey, and the Community it was banned with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ban {
     pub pubkey: [u8; 32],
     pub community: [u8; 32],
     pub at: u32,
+    pub role: Role,
 }
 
 impl Ban {
     fn encode(&self) -> Vec<u8> {
-        [&self.community[..], &self.at.to_be_bytes()].concat()
+        [&self.community[..], &self.at.to_be_bytes(), &[self.role as u8]].concat()
     }
 
+    /// Bans from before roles have none, and were all the Community's.
     fn decode(pubkey: [u8; 32], value: &[u8]) -> Option<Ban> {
-        let (community, at) = value.split_first_chunk::<32>()?;
-        Some(Ban { pubkey, community: *community, at: u32::from_be_bytes(at.try_into().ok()?) })
+        let (community, rest) = value.split_first_chunk::<32>()?;
+        let (at, rest) = rest.split_first_chunk::<4>()?;
+        let role = if rest == [1] { Role::Member } else { Role::Community };
+        Some(Ban { pubkey, community: *community, at: u32::from_be_bytes(*at), role })
     }
 }
 
@@ -1027,7 +1042,7 @@ pub mod tests {
             assert_eq!(store.announcements_of(&txn, &[alice_key]).unwrap().len(), 1);
         }
 
-        let ban = Ban { pubkey: alice_key, community: [7; 32], at: 50 };
+        let ban = Ban { pubkey: alice_key, community: [7; 32], at: 50, role: Role::Community };
         let mut txn = store.write().unwrap();
         store.ban(&mut txn, &ban).unwrap();
         assert_eq!(store.remove_authored(&mut txn, &alice_key, 1).unwrap(), 1);
@@ -1036,6 +1051,10 @@ pub mod tests {
         txn.commit().unwrap();
         assert!(!has(&store, &wrap) && !has(&store, &bundle));
         assert_eq!(store.bans(&store.read().unwrap()).unwrap(), [ban]);
+        // One from before roles was the Community's.
+        assert_eq!(Ban::decode(alice_key, &[&[7; 32][..], &50u32.to_be_bytes()].concat()), Some(ban));
+        let member = Ban { role: Role::Member, ..ban };
+        assert_eq!(Ban::decode(alice_key, &member.encode()), Some(member));
 
         // Nothing of hers comes back, nor any new announcement of her link.
         assert_eq!(put(&store, &wrap), Outcome::Banned);
