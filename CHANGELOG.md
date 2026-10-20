@@ -3,7 +3,7 @@
 A release's notes are its section here, so tag `vX.Y.Z` only once
 `## X.Y.Z` exists: publishing fails without it.
 
-## Unreleased
+## 0.8.0
 
 - `armada ban` puts the community on this server's blocklist, so the app
   served here won't open or join it, and `armada unban` lifts it. Entries
