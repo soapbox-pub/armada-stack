@@ -300,25 +300,31 @@ fn known_tags(event: &Event) -> Result<(), String> {
 }
 
 /// An encrypted envelope's tags: exactly one `p`, then optionally one `k`
-/// (where `allow_k`) and an `expiration`. No relay hints, and
-/// nothing else to say more about who's talking than the `p` must.
+/// (where `allow_k`), an `expiration`, and a NIP-13 `nonce`. No relay
+/// hints, and nothing else to say more about who's talking than the `p`
+/// must.
 fn envelope_tags(event: &Event, allow_k: bool) -> Result<(), String> {
-    let (mut p, mut k) = (0, 0);
+    let (mut p, mut k, mut nonce) = (0, 0, 0);
     for tag in &event.tags {
         let len = match tag[0].as_str() {
             "p" => {
                 p += 1;
-                2
+                2..=2
             }
             "k" if allow_k => {
                 k += 1;
-                2
+                2..=2
             }
-            "expiration" => 2,
+            "expiration" => 2..=2,
+            // The target difficulty is optional.
+            "nonce" => {
+                nonce += 1;
+                2..=3
+            }
             other => return Err(format!("invalid: {other:?} tags aren't allowed on kind {}", event.kind)),
         };
-        if tag.len() != len {
-            return Err(format!("invalid: {:?} tag has extra fields", tag[0]));
+        if !len.contains(&tag.len()) {
+            return Err(format!("invalid: {:?} tag has the wrong number of fields", tag[0]));
         }
     }
     if p != 1 {
@@ -326,6 +332,9 @@ fn envelope_tags(event: &Event, allow_k: bool) -> Result<(), String> {
     }
     if k > 1 {
         return Err("invalid: more than one k tag".into());
+    }
+    if nonce > 1 {
+        return Err("invalid: more than one nonce tag".into());
     }
     Ok(())
 }
@@ -484,6 +493,12 @@ mod tests {
         for kind in [GIFT_WRAP, EPHEMERAL_GIFT_WRAP, NIP46, PUSH_RPC] {
             ok(kind, &[&["p", &p]], &wrap);
             ok(kind, &[&["p", &p], &["expiration", "1800000000"]], &wrap);
+            // NIP-13 proof of work.
+            ok(kind, &[&["p", &p], &["nonce", "776797", "20"]], &wrap);
+            ok(kind, &[&["p", &p], &["nonce", "776797"]], &wrap);
+            refused(kind, &[&["p", &p], &["nonce"]], &wrap);
+            refused(kind, &[&["p", &p], &["nonce", "1", "20", "x"]], &wrap);
+            refused(kind, &[&["p", &p], &["nonce", "1", "20"], &["nonce", "2", "20"]], &wrap);
             refused(kind, &[], &wrap);
             refused(kind, &[&["p", &p], &["p", &p]], &wrap);
             refused(kind, &[&["p", &p, "wss://relay.example.com"]], &wrap);
@@ -542,7 +557,7 @@ mod tests {
         assert!(refused(GIFT_WRAP, &[&["p", &alice], &["-"]], &payload(10)).starts_with("blocked:"));
         refused(3, &[&["t", &"x".repeat(MAX_TAG_VALUE + 1)]], "");
         // Tags it knows nothing of are fine.
-        ok(3, &[&["client", "Armada"], &["published_at", "1700000000"]], "");
+        ok(3, &[&["client", "Armada"], &["published_at", "1700000000"], &["nonce", "776797", "20"]], "");
     }
 
     #[test]
