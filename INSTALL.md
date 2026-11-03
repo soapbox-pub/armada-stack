@@ -257,6 +257,26 @@ same link, or a community id, to lift a community's bans (its members'
 included) and its blocklist entry, or a single pubkey. What was deleted
 stays deleted.
 
+## Banning a user
+
+To ban one person rather than a community, give their npub to
+`armada ban --user`:
+
+```sh
+sudo armada ban --dry-run --user npub1…
+sudo armada ban --user npub1…
+```
+
+armada takes nothing more signed by them, deletes everything they published
+here, and every blob they uploaded here that no one else also uploaded. They
+go on this server's blocklist as a user, so the app served here purges what
+it has cached of theirs, their messages and media included, shows a tombstone
+in their place, and won't open their profile.
+
+The ban is their own: lifting the ban on a community they were in leaves it,
+and so does banning one. `sudo armada unban npub1…` lifts it and their
+blocklist entry.
+
 ## Backups
 
 Everything armada keeps is in `storage_dir` (`/var/lib/armada`): the relay's

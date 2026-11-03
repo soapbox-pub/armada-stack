@@ -5,6 +5,8 @@
 //! events from the moment the ban commits. What was stored before goes a
 //! batch per transaction, so the relay's writer never waits long behind it.
 
+use std::collections::HashSet;
+
 use anyhow::Result;
 
 use super::store::{SWEEP_BATCH, Store};
@@ -74,11 +76,16 @@ impl Bans {
         Ok(self.store.announcements_of(&txn, signers)?.len())
     }
 
-    /// Ban `pubkeys` together, as `community`'s.
+    /// Ban `pubkeys` together, as `community`'s. A person already banned on
+    /// their own stays so.
     pub fn ban(&self, pubkeys: &[([u8; 32], Role)], community: &[u8; 32]) -> Result<()> {
         let at = u32::try_from(crate::util::now()).unwrap_or(u32::MAX);
+        let own: HashSet<[u8; 32]> = self.list()?.into_iter().filter(|ban| ban.role == Role::Person).map(|ban| ban.pubkey).collect();
         let mut txn = self.store.write()?;
         for &(pubkey, role) in pubkeys {
+            if role != Role::Person && own.contains(&pubkey) {
+                continue;
+            }
             self.store.ban(&mut txn, &Ban { pubkey, community: *community, at, role })?;
         }
         txn.commit()?;

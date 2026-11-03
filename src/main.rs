@@ -71,12 +71,18 @@ enum Command {
     Onion,
     /// Take a Concord Community off this server by one of its invite links:
     /// ban its keys and invite links, and delete what they published, the
-    /// Discover announcements of its links, and the blobs it points at
+    /// Discover announcements of its links, and the blobs it points at. Or,
+    /// with --user, a user
     #[command(arg_required_else_help = true)]
     Ban {
         /// The invite link, `https://…/invite/<naddr>#<fragment>`
-        #[arg(required_unless_present = "list", conflicts_with = "list")]
+        #[arg(required_unless_present_any = ["list", "user"], conflicts_with = "list")]
         link: Option<String>,
+        /// Ban a user instead, by their pubkey (hex or npub), from posting
+        /// anything here, delete what they published and uploaded here, and
+        /// put them on this armada's blocklist
+        #[arg(long, value_name = "KEY", conflicts_with_all = ["link", "members", "relays", "list"])]
+        user: Option<String>,
         /// Ban everyone in the Community too, by their own keys, from
         /// posting anything here, and delete what they published and
         /// uploaded here
@@ -114,6 +120,7 @@ async fn main() -> Result<()> {
         Some(Command::Upgrade { version, check }) => return upgrade::run(upgrade::Options { version, check }).await,
         Some(Command::Onion) => return print_onion(cli.config.as_deref()),
         Some(Command::Ban { list: true, .. }) => return ban::list(cli.config.as_deref()),
+        Some(Command::Ban { user: Some(user), dry_run, .. }) => return ban::ban_user(cli.config.as_deref(), &user, dry_run),
         Some(Command::Ban { link, members, relays, dry_run, .. }) => {
             return ban::ban(cli.config.as_deref(), &link.unwrap_or_default(), &ban::Options { members, relays, dry_run }).await;
         }

@@ -644,6 +644,9 @@ pub enum Role {
     /// A person in it, banned with `--members`: their own key, for
     /// everything they post.
     Member = 1,
+    /// A person banned on their own, with `armada ban --user`: by no
+    /// Community, so lifting one's bans leaves theirs.
+    Person = 2,
 }
 
 /// A banned pubkey, and the Community it was banned with.
@@ -664,7 +667,11 @@ impl Ban {
     fn decode(pubkey: [u8; 32], value: &[u8]) -> Option<Ban> {
         let (community, rest) = value.split_first_chunk::<32>()?;
         let (at, rest) = rest.split_first_chunk::<4>()?;
-        let role = if rest == [1] { Role::Member } else { Role::Community };
+        let role = match rest {
+            [1] => Role::Member,
+            [2] => Role::Person,
+            _ => Role::Community,
+        };
         Some(Ban { pubkey, community: *community, at: u32::from_be_bytes(*at), role })
     }
 }

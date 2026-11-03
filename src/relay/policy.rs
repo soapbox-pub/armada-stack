@@ -28,7 +28,7 @@ pub const NIP46: u16 = 24133;
 pub const PUSH_RPC: u16 = 25742;
 pub const APP_DATA: u16 = 30078;
 const INVITE_BUNDLE: u16 = 33301;
-/// An entry on Armada's community blocklist, by this armada's moderation
+/// An entry on Armada's blocklist, by this armada's moderation
 /// key alone; see [`crate::moderation`].
 pub const BLOCKLIST: u16 = 37307;
 
@@ -226,11 +226,11 @@ pub fn validate(event: &Event, now: i64, relay: &[impl AsRef<str>], moderator: O
         BLOCKLIST if moderator != Some(event.pubkey.as_str()) => Err("blocked: only this armada's moderation key may publish blocklist entries".into()),
         BLOCKLIST => {
             let ok = event.tag("d").is_some_and(is_hex64)
-                && event.tag("scope") == Some("community")
+                && matches!(event.tag("scope"), Some("community" | "user"))
                 && matches!(event.tag("status"), Some("blocked" | "lifted"))
                 && event.tag("v") == Some("1");
             if !ok {
-                return Err("invalid: a blocklist entry needs a hashed d tag, scope community, status blocked or lifted, and v 1".into());
+                return Err("invalid: a blocklist entry needs a hashed d tag, scope community or user, status blocked or lifted, and v 1".into());
             }
             content(event, Content::Empty)
         }
@@ -653,6 +653,7 @@ mod tests {
         let blocked: &[&[&str]] = &[&["d", &hash], &["scope", "community"], &["status", "blocked"], &["v", "1"]];
         ok(BLOCKLIST, blocked, "");
         ok(BLOCKLIST, &[&["d", &hash], &["scope", "community"], &["status", "lifted"], &["v", "1"]], "");
+        ok(BLOCKLIST, &[&["d", &hash], &["scope", "user"], &["status", "blocked"], &["v", "1"]], "");
         refused(BLOCKLIST, blocked, "a reason");
         refused(BLOCKLIST, &[&["d", &hash], &["scope", "community"], &["status", "muted"], &["v", "1"]], "");
         refused(BLOCKLIST, &[&["d", "not a hash"], &["scope", "community"], &["status", "blocked"], &["v", "1"]], "");

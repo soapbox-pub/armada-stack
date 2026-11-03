@@ -1,5 +1,6 @@
 //! `armada ban`, `armada ban --list`, and `armada unban`: take a Concord
-//! Community off this server, given one of its invite links.
+//! Community off this server, given one of its invite links, or a user,
+//! given their pubkey.
 //!
 //! The link opens the Community's bundle, whose keys give every address the
 //! Community publishes at in its current epoch: its Control Plane, its
@@ -21,6 +22,12 @@
 //! The Community goes on this armada's blocklist too ([`moderation`]), so
 //! Armada won't open it here at all, and `armada unban` lifts it.
 //!
+//! `armada ban --user <npub>` bans a user on their own, by no Community, and
+//! deletes everything they published and uploaded here, short of blobs
+//! someone else uploaded too. They go on the blocklist as a user, so Armada
+//! purges what it holds of theirs and shows tombstones in its place.
+//! Lifting a Community's bans leaves theirs, as does banning one they're in.
+//!
 //! The bundle and Control Plane are read from this relay, or from the
 //! link's relays, the Community's, and any given with `--relay` when it
 //! doesn't have them. Its Chat Planes and Guestbook are read from this relay,
@@ -38,7 +45,7 @@ use crate::blossom::Blossom;
 use crate::concord::{self, BlobRef, Bytes32, bytes32};
 use crate::config::{self, Config, Environment};
 use crate::hash::BlobHash;
-use crate::moderation::{self, Status};
+use crate::moderation::{self, Scope, Status};
 use crate::nostr::Event;
 use crate::nostr::nip19::{self, Decoded};
 use crate::nostr::pool::{Filter, Pool, is_onion};
@@ -280,7 +287,7 @@ async fn ban_with(config: Option<&Path>, link: &str, options: &Options, query: i
     if bundle.is_some() {
         match &moderator {
             Some(keys) => {
-                moderation::publish(&relay, keys, &community, Status::Blocked)?;
+                moderation::publish(&relay, keys, Scope::Community, &community, Status::Blocked)?;
                 println!("Added it to this armada's blocklist, so Armada won't open it here.");
             }
             None => println!("armada hasn't started yet, so it has no moderation key to add the community to its blocklist with."),
@@ -289,13 +296,69 @@ async fn ban_with(config: Option<&Path>, link: &str, options: &Options, query: i
     Ok(())
 }
 
+/// `armada ban --user <key>`.
+pub fn ban_user(config: Option<&Path>, key: &str, dry_run: bool) -> Result<()> {
+    let Opened { storage, relay } = open(config)?;
+    let Some(pubkey) = pubkey(key) else { bail!("Not a pubkey or npub: {key}") };
+    let removals = Blossom::open_for_removal(&storage)?;
+    let uploads = removals.uploads_by(&BTreeSet::from([pubkey]))?;
+    let was = match relay.list()?.into_iter().find(|ban| ban.pubkey == pubkey) {
+        Some(Ban { role: Role::Person, .. }) => ", already banned on their own",
+        Some(Ban { role: Role::Member, .. }) => ", already banned as a community's member",
+        Some(_) => ", already banned as a community's address",
+        None => "",
+    };
+    println!("{} {}: {} events and {} uploads here{was}.", if dry_run { "Would ban" } else { "Banning" }, hex::encode(pubkey), relay.count_by(&pubkey)?, uploads.len());
+    let moderator = moderation::load(&storage)?;
+    if dry_run {
+        println!("Would delete their events, and each upload no one else made too.");
+        if moderator.is_some() {
+            println!("Would add them to this armada's blocklist.");
+        }
+        return Ok(());
+    }
+    relay.ban(&[(pubkey, Role::Person)], &[0; 32])?;
+    let removed = relay.remove_by(&pubkey)?;
+    let mut gone = 0;
+    for (hash, owner) in &uploads {
+        gone += usize::from(removals.disown(*hash, owner)?);
+    }
+    println!("Banned. Deleted {removed} events, took back {} uploads, and deleted the {gone} blobs no one else had uploaded.", uploads.len());
+    match &moderator {
+        Some(keys) => {
+            moderation::publish(&relay, keys, Scope::User, &pubkey, Status::Blocked)?;
+            println!("Added them to this armada's blocklist, so Armada purges what it holds of theirs here.");
+        }
+        None => println!("armada hasn't started yet, so it has no moderation key to add them to its blocklist with."),
+    }
+    Ok(())
+}
+
+/// A hex pubkey or an npub.
+fn pubkey(key: &str) -> Option<Bytes32> {
+    let hex = match nip19::decode(key.trim()) {
+        Ok(Decoded::Npub(pubkey)) => pubkey,
+        _ => key.trim().to_lowercase(),
+    };
+    bytes32(&hex)
+}
+
 /// `armada ban --list`.
 pub fn list(config: Option<&Path>) -> Result<()> {
     let Opened { relay, .. } = open(config)?;
-    let mut bans = relay.list()?;
+    let bans = relay.list()?;
     if bans.is_empty() {
         println!("Nothing is banned.");
         return Ok(());
+    }
+    let when = |at: u32| httpdate::fmt_http_date(std::time::UNIX_EPOCH + Duration::from_secs(at.into()));
+    let (mut people, mut bans): (Vec<Ban>, Vec<Ban>) = bans.into_iter().partition(|ban| ban.role == Role::Person);
+    people.sort_by_key(|ban| (ban.at, ban.pubkey));
+    if !people.is_empty() {
+        println!("Users:");
+    }
+    for ban in people {
+        println!("  {}  banned {}", hex::encode(ban.pubkey), when(ban.at));
     }
     bans.sort_by_key(|ban| (ban.community, ban.role, ban.at, ban.pubkey));
     let mut community = None;
@@ -309,18 +372,19 @@ pub fn list(config: Option<&Path>) -> Result<()> {
             }
         }
         let role = if ban.role == Role::Member { "  member" } else { "" };
-        println!("  {}  banned {}{role}", hex::encode(ban.pubkey), httpdate::fmt_http_date(std::time::UNIX_EPOCH + Duration::from_secs(ban.at.into())));
+        println!("  {}  banned {}{role}", hex::encode(ban.pubkey), when(ban.at));
     }
     Ok(())
 }
 
 /// `armada unban <target>`: an invite link or community id lifts its
-/// Community's bans, its members' included, and its blocklist entry; a
-/// pubkey just its own ban.
+/// Community's bans, its members' included but not users banned on their
+/// own, and its blocklist entry; a pubkey just its own ban, and its entry
+/// if it was banned as a user.
 pub fn unban(config: Option<&Path>, target: &str) -> Result<()> {
     let Opened { storage, relay } = open(config)?;
     let bans = relay.list()?;
-    let of_community = |community: Bytes32| -> Vec<Bytes32> { bans.iter().filter(|ban| ban.community == community).map(|ban| ban.pubkey).collect() };
+    let of_community = |community: Bytes32| -> Vec<Bytes32> { bans.iter().filter(|ban| community != [0; 32] && ban.community == community).map(|ban| ban.pubkey).collect() };
     let (pubkeys, community) = if let Some(signer) = concord::link_signer(target) {
         let signer = bytes32(&signer).unwrap();
         match bans.iter().find(|ban| ban.pubkey == signer) {
@@ -328,21 +392,26 @@ pub fn unban(config: Option<&Path>, target: &str) -> Result<()> {
             _ => (vec![signer], None),
         }
     } else {
-        let hex = match nip19::decode(target) {
-            Ok(Decoded::Npub(pubkey)) => pubkey,
-            _ => target.trim().to_lowercase(),
-        };
-        let Some(key) = bytes32(&hex) else { bail!("Not an invite link, community id, or pubkey: {target}") };
+        let Some(key) = pubkey(target) else { bail!("Not an invite link, community id, or pubkey: {target}") };
         match of_community(key) {
             community if !community.is_empty() => (community, Some(key)),
             _ => (vec![key], None),
         }
     };
+    let user = match pubkeys.as_slice() {
+        [one] if community.is_none() => bans.iter().find(|ban| ban.pubkey == *one && ban.role == Role::Person).map(|ban| ban.pubkey),
+        _ => None,
+    };
     let lifted = relay.unban(&pubkeys)?;
     println!("Lifted {lifted} bans. What was deleted stays deleted.");
-    if let (Some(community), Some(keys)) = (community, moderation::load(&storage)?) {
-        moderation::publish(&relay, &keys, &community, Status::Lifted)?;
+    let keys = moderation::load(&storage)?;
+    if let (Some(community), Some(keys)) = (community, &keys) {
+        moderation::publish(&relay, keys, Scope::Community, &community, Status::Lifted)?;
         println!("Lifted its entry on this armada's blocklist.");
+    }
+    if let (Some(user), Some(keys)) = (user, &keys) {
+        moderation::publish(&relay, keys, Scope::User, &user, Status::Lifted)?;
+        println!("Lifted their entry on this armada's blocklist.");
     }
     Ok(())
 }
@@ -489,7 +558,7 @@ mod tests {
         assert_eq!(relay.count_by(&bytes32(&unrelated.pubkey).unwrap()).unwrap(), 1);
         let bans = relay.list().unwrap();
         assert!(bans.iter().all(|ban| ban.community == community));
-        assert_eq!(entry(&relay), Some((moderation::hash(&community), "blocked".to_string())));
+        assert_eq!(entry(&relay), Some((moderation::hash(Scope::Community, &community), "blocked".to_string())));
         // The link, Control Plane at both addresses, Guestbook, next
         // Refounding, dissolution, two public Channels, and the private one
         // and its next key.
@@ -500,6 +569,72 @@ mod tests {
         unban(Some(&config), url).unwrap();
         let Opened { relay, .. } = open(Some(&config)).unwrap();
         assert!(relay.list().unwrap().is_empty());
-        assert_eq!(entry(&relay), Some((moderation::hash(&community), "lifted".to_string())));
+        assert_eq!(entry(&relay), Some((moderation::hash(Scope::Community, &community), "lifted".to_string())));
+    }
+
+    #[tokio::test]
+    async fn bans_a_user_on_their_own() {
+        let v = vectors();
+        let k = &v["keys"];
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("armada.toml");
+        std::fs::write(&config, format!("storage_dir = {:?}\n", dir.path().join("data"))).unwrap();
+        let url = v["invite"]["url"].as_str().unwrap();
+        let alice = bytes32(k["alice"].as_str().unwrap()).unwrap();
+        let alices = Event::sign(k["alice_sk"].as_str().unwrap(), 100, 0, vec![], "{}");
+        let (own, shared) = (BlobHash::of(b"alice's"), BlobHash::of(b"shared"));
+        let keys = moderation::load_or_create(&Storage::open(&dir.path().join("data")).unwrap()).unwrap();
+        let moderator = bytes32(&keys.pubkey).unwrap();
+        {
+            let Opened { storage, relay } = open(Some(&config)).unwrap();
+            let control = v["control"]["wraps"].as_array().unwrap().iter().map(event);
+            for event in control.chain([event(&v["invite"]["bundle_event"]), event(&v["chat_wrap"]["wrap"]), alices.clone()]) {
+                assert!(matches!(relay.insert(&event), Outcome::Stored(_)), "{}", event.id);
+            }
+            let removals = Blossom::open_for_removal(&storage).unwrap();
+            removals.record_upload(own, &alices.pubkey);
+            removals.record_upload(shared, &alices.pubkey);
+            removals.record_upload(shared, &"33".repeat(32));
+        }
+
+        assert!(ban_user(Some(&config), "nonsense", false).is_err());
+        ban_user(Some(&config), k["alice"].as_str().unwrap(), true).unwrap();
+        let Opened { relay, .. } = open(Some(&config)).unwrap();
+        assert!(relay.list().unwrap().is_empty(), "a dry run changes nothing");
+        drop(relay);
+
+        ban_user(Some(&config), &k["alice"].as_str().unwrap().to_uppercase(), false).unwrap();
+        let Opened { storage, relay } = open(Some(&config)).unwrap();
+        let bans = relay.list().unwrap();
+        assert_eq!(bans.len(), 1);
+        assert_eq!((bans[0].pubkey, bans[0].role), (alice, Role::Person));
+        assert_eq!(relay.count_by(&alice).unwrap(), 0);
+        assert!(matches!(relay.insert(&alices), Outcome::Banned));
+        let removals = Blossom::open_for_removal(&storage).unwrap();
+        assert!(!removals.uploaded_by(own, &alices.pubkey).unwrap());
+        assert!(removals.uploaded_by(shared, &"33".repeat(32)).unwrap());
+        let entry = |relay: &Bans| {
+            let entries = relay.events_by(&moderator).unwrap();
+            assert_eq!(entries.len(), 1, "an entry replaces the last");
+            let e = &entries[0];
+            (e.tag("d").unwrap().to_string(), e.tag("scope").unwrap().to_string(), e.tag("status").unwrap().to_string())
+        };
+        assert_eq!(entry(&relay), (moderation::hash(Scope::User, &alice), "user".into(), "blocked".into()));
+        drop((relay, removals));
+
+        // Banning, then lifting, a Community she's in leaves her own ban.
+        ban_with(Some(&config), url, &Options { members: true, ..Default::default() }, offline).await.unwrap();
+        unban(Some(&config), url).unwrap();
+        let Opened { relay, .. } = open(Some(&config)).unwrap();
+        let bans = relay.list().unwrap();
+        assert_eq!(bans.len(), 1);
+        assert_eq!(bans[0].role, Role::Person);
+        drop(relay);
+
+        unban(Some(&config), k["alice"].as_str().unwrap()).unwrap();
+        let Opened { relay, .. } = open(Some(&config)).unwrap();
+        assert!(relay.list().unwrap().is_empty());
+        let user_entry = relay.events_by(&moderator).unwrap().into_iter().find(|e| e.tag("scope") == Some("user")).unwrap();
+        assert_eq!(user_entry.tag("status"), Some("lifted"));
     }
 }
