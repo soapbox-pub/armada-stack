@@ -36,7 +36,7 @@ write_files:
       # the stack's canonical nostr repo, over its grasp server's plain HTTPS
       # endpoint — so no ngit is needed to clone it. A nostr:// URL also works
       # (ngit is installed for it).
-      STACK_REPO=https://relay.ngit.dev/npub1scvyzz02ayma34hesz62pdrd5nhsmxp74hjq8msmfs9khh3r3drsnw68d8/armada-stack.git
+      STACK_REPO=https://relay.ngit.dev/npub1scvyzz02ayma34hesz62pdrd5nhsmxp74hjq8msmfs9khh3r3drsnw68d8/armada-docker.git
       #STACK_REF=<tag or branch>
 
       # Optional: build the client from a different repo/ref than the stack's

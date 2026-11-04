@@ -1,4 +1,4 @@
-# armada-stack
+# armada-docker
 
 A turnkey, self-hosted [Armada](https://gitworkshop.dev/chad@chadwick.site/relay.ngit.dev/armada)
 deployment: the client, voice, a relay, push notifications and media, in one
@@ -49,8 +49,8 @@ For a DigitalOcean Marketplace-style image with all of that pre-baked, see
 ## Deploy by hand
 
 ```sh
-git clone https://relay.ngit.dev/npub1scvyzz02ayma34hesz62pdrd5nhsmxp74hjq8msmfs9khh3r3drsnw68d8/armada-stack.git
-cd armada-stack
+git clone https://relay.ngit.dev/npub1scvyzz02ayma34hesz62pdrd5nhsmxp74hjq8msmfs9khh3r3drsnw68d8/armada-docker.git
+cd armada-docker
 
 ./scripts/bootstrap.sh --domain example.com --email you@example.com
 docker compose up -d --build

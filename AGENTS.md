@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Guidance for agents working on **armada-stack** — the turnkey Docker deployment
+Guidance for agents working on **armada-docker** — the turnkey Docker deployment
 of the Armada client, the Concord AV broker, a Nostr relay, a push gateway and
 a media server.
 
@@ -75,9 +75,13 @@ Docker and nothing else.
   here (`docker pull <ref>:latest` then `docker image inspect --format
   '{{json .RepoDigests}}'`).
 - **The stack's own home** is the nostr repo
-  `nostr://npub1scvyzz02ayma34hesz62pdrd5nhsmxp74hjq8msmfs9khh3r3drsnw68d8/relay.ngit.dev/armada-stack`,
+  `nostr://npub1scvyzz02ayma34hesz62pdrd5nhsmxp74hjq8msmfs9khh3r3drsnw68d8/relay.ngit.dev/armada-docker`,
   cloned by servers over its grasp HTTPS endpoint (no ngit needed). That URL is
   the default `STACK_REPO` in `cloud-init.yml` and `update.sh`.
+- **It was published as `armada-stack` until that name passed to Soapbox's
+  single-binary successor.** Servers set up before the move carry the old
+  address in `/etc/armada/deploy.env` and in `origin`; `update.sh` rewrites
+  both. Keep that remap until no server can still be on the old name.
 
 ### Server provisioning (`deploy/`)
 

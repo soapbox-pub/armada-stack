@@ -18,10 +18,32 @@ cd "$STACK_DIR"
 
 # Where the glue comes from when this checkout has no .git — which is how the
 # DigitalOcean image ships, since the bake strips it. deploy.env can override.
-STACK_REPO="${STACK_REPO:-https://relay.ngit.dev/npub1scvyzz02ayma34hesz62pdrd5nhsmxp74hjq8msmfs9khh3r3drsnw68d8/armada-stack.git}"
+STACK_REPO_DEFAULT=https://relay.ngit.dev/npub1scvyzz02ayma34hesz62pdrd5nhsmxp74hjq8msmfs9khh3r3drsnw68d8/armada-docker.git
+STACK_REPO="${STACK_REPO:-$STACK_REPO_DEFAULT}"
 STACK_REF="${STACK_REF:-}"
 # shellcheck disable=SC1091
 [ -r /etc/armada/deploy.env ] && . /etc/armada/deploy.env
+
+# The stack was published as armada-stack until that name passed to Soapbox's
+# single-binary successor, whose history this checkout cannot fast-forward
+# onto. cloud-init wrote the old address into deploy.env and into origin, so
+# move both to the new one, or the next fetch would follow the name.
+is_old_repo() {
+  case "$1" in
+    */npub1scvyzz02ayma34hesz62pdrd5nhsmxp74hjq8msmfs9khh3r3drsnw68d8/armada-stack.git) return 0 ;;
+    */npub1scvyzz02ayma34hesz62pdrd5nhsmxp74hjq8msmfs9khh3r3drsnw68d8/relay.ngit.dev/armada-stack) return 0 ;;
+  esac
+  return 1
+}
+if is_old_repo "$STACK_REPO"; then
+  STACK_REPO="$STACK_REPO_DEFAULT"
+  [ -w /etc/armada/deploy.env ] \
+    && sed -i "s|^STACK_REPO=.*|STACK_REPO=$STACK_REPO|" /etc/armada/deploy.env
+fi
+if [ -d .git ] && is_old_repo "$(git remote get-url origin 2>/dev/null)"; then
+  echo "The stack repo moved; following it to $STACK_REPO"
+  git remote set-url origin "$STACK_REPO"
+fi
 
 ./scripts/backup.sh --quick
 echo
