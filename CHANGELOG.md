@@ -3,6 +3,19 @@
 A release's notes are its section here, so tag `vX.Y.Z` only once
 `## X.Y.Z` exists: publishing fails without it.
 
+## 0.9.0
+
+- `armada ban --user <npub>` bans one person on their own: armada takes
+  nothing more signed by them, deletes what they published and uploaded
+  here, and puts them on this server's blocklist as a user, so the app
+  served here hides what it has of theirs behind tombstones and won't open
+  their profile. `armada unban <npub>` lifts it.
+- The app served here names this armada in the NIP-89 `client` tag on what
+  it signs: `APP_NAME` from `[web.env]` if set, else the host, never the
+  onion. `CLIENT_TAG` under `[web.env]` replaces it, and `""` turns it off.
+- The relay takes NIP-13 `nonce` tags on gift wraps, NIP-46 and push
+  requests, so a mined envelope isn't refused.
+
 ## 0.8.0
 
 - `armada ban` puts the community on this server's blocklist, so the app
