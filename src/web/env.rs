@@ -18,6 +18,12 @@
 //! their other devices. That's intended. So is `PUBLIC_WEB_ORIGIN` being this
 //! armada's own URL: it's its own deployment, so a link to armada.buzz is a
 //! link elsewhere.
+//!
+//! What Armada signs carries a NIP-89 `client` tag naming this armada: its
+//! `APP_NAME` from `[web.env]`, else its host. Never its onion: the tag rides
+//! in every chat message, so it would tell recipients the sender used Tor and
+//! spread the address of an armada that's on Tor alone. Over the onion it
+//! names `public_url`'s host, or is left to Armada's default.
 
 use std::collections::BTreeMap;
 
@@ -112,9 +118,18 @@ impl ClientEnv {
             values.insert("NOSTR_PUSH2_RELAYS".to_string(), origin.websocket());
         }
         // Its entries are on this relay, which `RELAYS` names, so Armada
-        // finds them there.
+        // finds them there. A user's own list of moderation keys, a synced
+        // setting, wins over this; left unset it follows it.
         if let Some(pubkey) = &self.moderator {
             values.insert("BLOCKLIST_AUTHORS".to_string(), join(pubkey.clone(), ARMADA_BLOCKLIST_AUTHORS));
+        }
+        let name = match self.overrides.get("APP_NAME").map(|name| name.trim()).filter(|name| !name.is_empty()) {
+            Some(name) => Some(name.to_string()),
+            None if self.names.is_onion(origin) => self.names.url.as_ref().and_then(|url| url.host_str()).map(str::to_ascii_lowercase),
+            None => origin.host.clone(),
+        };
+        if let Some(name) = name {
+            values.insert("CLIENT_TAG".to_string(), serde_json::to_string(&["client", name.as_str()]).expect("strings serialize"));
         }
         values
     }
@@ -251,6 +266,38 @@ mod tests {
         assert_eq!(values["BLOSSOM_SERVERS"].split(',').next(), Some("https://armada.example.com/"));
         // And with no origin to go on, only what was set.
         assert_eq!(env.values(&HeaderMap::new()).len(), 3);
+    }
+
+    #[test]
+    fn the_client_tag_names_this_armada_but_never_its_onion() {
+        let env = ClientEnv::new(&Config::default()).unwrap();
+        assert_eq!(env.values(&host("Armada.Example.com"))["CLIENT_TAG"], r#"["client","armada.example.com"]"#);
+        assert!(env.values(&host("box.lan")).is_empty());
+
+        let onion = "dl6nglbofs66w2ctcqp3hdgw7lgql7b5xc3dqtj3oqjrcihztrqrkjyd.onion";
+        let tor_only = ClientEnv::new(&Config::default()).unwrap().with_onion(Some(onion.into()));
+        assert!(!tor_only.values(&host(onion)).contains_key("CLIENT_TAG"));
+
+        let config = Config { public_url: Some("https://armada.example.com".into()), ..Config::default() };
+        let both = ClientEnv::new(&config).unwrap().with_onion(Some(onion.into()));
+        assert_eq!(both.values(&host(onion))["CLIENT_TAG"], r#"["client","armada.example.com"]"#);
+        assert_eq!(both.values(&host("other.example.org"))["CLIENT_TAG"], r#"["client","armada.example.com"]"#);
+    }
+
+    #[test]
+    fn the_client_tag_takes_app_name_and_overrides() {
+        let mut config = Config::default();
+        config.web.env = BTreeMap::from([("APP_NAME".into(), "Acme \"Chat\"".into())]);
+        let onion = "dl6nglbofs66w2ctcqp3hdgw7lgql7b5xc3dqtj3oqjrcihztrqrkjyd.onion";
+        let env = ClientEnv::new(&config).unwrap().with_onion(Some(onion.into()));
+        assert_eq!(env.values(&host("armada.example.com"))["CLIENT_TAG"], r#"["client","Acme \"Chat\""]"#);
+        assert_eq!(env.values(&host(onion))["CLIENT_TAG"], r#"["client","Acme \"Chat\""]"#);
+
+        config.web.env = BTreeMap::from([("APP_NAME".into(), " ".into())]);
+        assert_eq!(ClientEnv::new(&config).unwrap().values(&host("armada.example.com"))["CLIENT_TAG"], r#"["client","armada.example.com"]"#);
+
+        config.web.env = BTreeMap::from([("CLIENT_TAG".into(), "".into())]);
+        assert_eq!(ClientEnv::new(&config).unwrap().values(&host("armada.example.com"))["CLIENT_TAG"], "");
     }
 
     #[test]

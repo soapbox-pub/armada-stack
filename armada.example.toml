@@ -47,9 +47,11 @@ keep_versions = 60
 # its AV broker is CONCORD_AV_SERVERS alone, once public_url or a public Host
 # says where armada is reached. Its moderation key joins Soapbox's as
 # BLOCKLIST_AUTHORS, whose entries say which communities the app won't open
-# (see `armada ban`). A name set here replaces that; "" brings back Armada's
-# own default, except for CONCORD_AV_SERVERS and BLOCKLIST_AUTHORS, which ""
-# turns off.
+# (see `armada ban`). CLIENT_TAG, the NIP-89 tag on what the app signs,
+# names this armada by APP_NAME if that's set here, else by its host (never
+# its onion). A name set here replaces that; "" brings back Armada's own
+# default, except for CONCORD_AV_SERVERS, BLOCKLIST_AUTHORS and CLIENT_TAG,
+# which "" turns off.
 #
 # RELAYS is every relay the app uses by default: account data, search, new
 # communities, and the backups of each user's community and invite lists.
