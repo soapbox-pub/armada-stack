@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
-use super::Web;
+use super::{Web, Worker};
 use super::db::Status;
 use crate::config::WebConfig;
 use crate::nostr::Event;
@@ -108,13 +108,14 @@ impl Harness {
         let (tx, rx) = mpsc::channel(8);
         let nostr = Arc::new(FakeNostr { manifests: Mutex::new(manifests), updates: Mutex::new(Some(rx)), server: self.server.clone() });
         let config = WebConfig { nsite: self.address.naddr(), auto_update, keep_versions, ..WebConfig::default() };
-        let mut web = Web::open(&config, env, &Storage::allowing_private(self.dir.path()), nostr).await.unwrap();
-        web.worker.settings.retry_backoff = Duration::from_millis(10);
-
+        let web = Web::open(&config, env, &Storage::allowing_private(self.dir.path()), nostr).await.unwrap();
         let router = web.router();
-        let db = web.worker.db.clone();
+        let Worker::Sync(mut worker) = web.worker else { panic!("not following the nsite") };
+        worker.settings.retry_backoff = Duration::from_millis(10);
+
+        let db = worker.db.clone();
         let cancel = CancellationToken::new();
-        let worker = tokio::spawn(web.worker.run(cancel.clone()));
+        let worker = tokio::spawn(worker.run(cancel.clone()));
         Running { router, db, updates: tx, cancel, worker }
     }
 }
@@ -345,5 +346,58 @@ async fn the_status_follows_the_site_from_nowhere_to_live() {
     web.updates.send(manifest).await.unwrap();
     eventually("the site going live", async || status().await == r#"{"state":"live"}"#).await;
     assert_eq!(web.get("/", &[("accept", "text/html")]).await.2, b"hello");
+    web.stop().await;
+}
+
+/// With web.dir set, its files are served in place of the nsite, which
+/// Nostr is never asked for, and changes to them go live.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_local_directory_is_served_and_followed() {
+    let harness = Harness::new().await;
+    let site = tempfile::tempdir().unwrap();
+    std::fs::create_dir(site.path().join("assets")).unwrap();
+    let page = format!("<!doctype html><html><head><title>local</title></head><body>{}</body></html>", "hello ".repeat(200));
+    std::fs::write(site.path().join("index.html"), &page).unwrap();
+    std::fs::write(site.path().join("assets/app.js"), "console.log(1);").unwrap();
+
+    // A Nostr that panics if asked anything.
+    struct NoNostr;
+    impl NostrSource for NoNostr {
+        fn fetch_manifest<'a>(&'a self, _: &'a NsiteAddress, _: &'a CancellationToken) -> BoxFuture<'a, Option<Event>> {
+            panic!("asked Nostr for the site")
+        }
+        fn blob_sources<'a>(&'a self, _: &'a Event, _: &'a CancellationToken) -> BoxFuture<'a, Vec<String>> {
+            panic!("asked Nostr for blob servers")
+        }
+        fn subscribe<'a>(&'a self, _: &'a NsiteAddress, _: CancellationToken) -> BoxFuture<'a, mpsc::Receiver<Event>> {
+            panic!("subscribed to the site")
+        }
+    }
+    let config = WebConfig { dir: Some(site.path().to_path_buf()), ..WebConfig::default() };
+    let web = Web::open(&config, Default::default(), &Storage::allowing_private(harness.dir.path()), Arc::new(NoNostr)).await.unwrap();
+    let router = web.router();
+    let Worker::Local(mut worker) = web.worker else { panic!("not serving web.dir") };
+    worker.poll = Duration::from_millis(20);
+    let (cancel, db) = (CancellationToken::new(), worker.db.clone());
+    let worker = tokio::spawn(worker.run(cancel.clone()));
+    let (updates, _) = mpsc::channel(1);
+    let web = Running { router, db, updates, cancel, worker };
+
+    eventually("the directory going live", async || web.get("/", &[]).await.0 == StatusCode::OK).await;
+    let served = page.replacen("<head>", r#"<head><script src="/_armada/env.js"></script>"#, 1);
+    let (_, headers, body) = web.get("/invite/x", &[]).await;
+    assert_eq!(body, served.as_bytes());
+    assert!(!headers.contains_key("x-nsite-addr"));
+    assert_eq!(web.get("/assets/app.js", &[]).await.2, b"console.log(1);");
+    // Compressed copies come just after.
+    eventually("the page being compressed", async || web.get("/", &[("accept-encoding", "br")]).await.1.get("content-encoding").is_some_and(|value| value == "br")).await;
+
+    // A rebuild: new names, the old ones gone.
+    std::fs::remove_file(site.path().join("assets/app.js")).unwrap();
+    std::fs::write(site.path().join("assets/app2.js"), "console.log(2);").unwrap();
+    std::fs::write(site.path().join("index.html"), "<!doctype html><title>two</title>").unwrap();
+    eventually("the rebuild going live", async || web.get("/assets/app2.js", &[]).await.2 == b"console.log(2);").await;
+    assert_eq!(web.get("/assets/app.js", &[]).await.0, StatusCode::NOT_FOUND);
+    assert!(String::from_utf8(web.get("/", &[]).await.2).unwrap().contains("two"));
     web.stop().await;
 }

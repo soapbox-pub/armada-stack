@@ -135,6 +135,10 @@ pub struct WebConfig {
     /// The nsite to serve: an `naddr` (kind 35128 or 15128), or an `npub` for
     /// that author's root site.
     pub nsite: String,
+    /// A directory on this machine to serve the web app from instead of
+    /// `nsite`, such as an Armada build's `dist`. Relative to the config
+    /// file's directory. With `auto_update` on, it's watched for changes.
+    pub dir: Option<PathBuf>,
     /// Follow the site as its author publishes new versions. Off, the first
     /// version deployed is served for good.
     pub auto_update: bool,
@@ -312,6 +316,7 @@ impl Default for WebConfig {
     fn default() -> Self {
         WebConfig {
             nsite: DEFAULT_NSITE.into(),
+            dir: None,
             auto_update: true,
             relays: vec!["wss://relay.ditto.pub".into(), "wss://relay.dreamith.to".into()],
             resync_interval: 600,
@@ -422,11 +427,15 @@ impl Config {
                 Err(error) => error.kind() == std::io::ErrorKind::PermissionDenied,
             }),
         };
-        let config = match &source {
+        let mut config = match &source {
             Some(path) => Self::read(path)?,
             None => Config::default(),
         };
         config.validate()?;
+        if let (Some(dir), Some(source)) = (&config.web.dir, &source) {
+            // Against the file, as `storage_dir` is.
+            config.web.dir = Some(source.parent().unwrap_or(Path::new("")).join(dir));
+        }
 
         let storage_dir = match (&config.storage_dir, &source) {
             // Against the file, so the setting means one place however the
@@ -514,6 +523,9 @@ impl Config {
         }
         if self.web.resync_interval == 0 {
             bail!("web.resync_interval has to be at least 1 second.");
+        }
+        if self.web.dir.as_ref().is_some_and(|dir| dir.as_os_str().is_empty()) {
+            bail!("web.dir can't be empty: leave it out to serve web.nsite.");
         }
         if self.web.keep_versions == 0 {
             bail!("web.keep_versions has to be at least 1: the version being served.");
@@ -769,6 +781,8 @@ mod tests {
         assert!(Config::parse("[blossom]\npublic_url = \"https://example.com\"").is_err());
         assert!(Config::parse("[web]\ntypo = 1").is_err());
         assert!(Config::parse("[web]\nkeep_versions = 0").is_err());
+        assert!(Config::parse("[web]\ndir = \"\"").is_err());
+        assert_eq!(Config::parse("[web]\ndir = \"/srv/armada/dist\"").unwrap().web.dir.as_deref(), Some(Path::new("/srv/armada/dist")));
         assert!(Config::parse("[web.env]\n\"APP-RELAYS\" = \"x\"").is_err());
         assert!(Config::parse("[web.env]\nRELAYS = 1").is_err());
         assert_eq!(Config::parse("[web.env]\nRELAYS = \"\"").unwrap().web.env["RELAYS"], "");

@@ -119,7 +119,7 @@ fn stack(dir: &std::path::Path, cancel: &CancellationToken) -> Router {
     let web = Arc::new(crate::web::serve::SiteServer {
         live: Default::default(),
         blobs: storage.blobs.clone(),
-        naddr: http::HeaderValue::from_static("naddr"),
+        naddr: Some(http::HeaderValue::from_static("naddr")),
         env: Default::default(),
         progress: Default::default(),
     });

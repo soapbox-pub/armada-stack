@@ -4,6 +4,9 @@
 //! followed on Nostr, its blobs downloaded into the shared store, and served
 //! from there. No dashboard, no API, no host routing: every request that
 //! isn't the relay's or the Blossom server's is for that one site.
+//!
+//! Or, with `web.dir` set, a directory on this machine stands in for the
+//! nsite (see [`local`]), and Nostr isn't asked for it at all.
 
 pub mod brand;
 mod csp;
@@ -13,6 +16,7 @@ mod e2e;
 pub mod env;
 mod inject;
 mod loading;
+mod local;
 pub mod progress;
 mod prune;
 pub mod serve;
@@ -32,6 +36,7 @@ use crate::config::WebConfig;
 use crate::nostr::service::NostrSource;
 use crate::storage::Storage;
 use db::WebDb;
+use local::{Limits, LocalWorker};
 use progress::Progress;
 use env::ClientEnv;
 use serve::SiteServer;
@@ -40,16 +45,26 @@ use sync::{SyncSettings, SyncWorker};
 
 pub struct Web {
     server: Arc<SiteServer>,
-    worker: SyncWorker,
+    worker: Worker,
+}
+
+/// What keeps the site live: one following the nsite, or one watching
+/// `web.dir`.
+enum Worker {
+    Sync(SyncWorker),
+    Local(LocalWorker),
 }
 
 impl Web {
     /// Open the web service's database and put the version it last served
     /// back on the air, before any relay has been asked anything.
     pub async fn open(config: &WebConfig, env: ClientEnv, storage: &Storage, nostr: Arc<dyn NostrSource>) -> Result<Web> {
-        let address = config.address()?;
         let db = WebDb::open(storage)?;
         let blobs = storage.blobs.clone();
+        if let Some(dir) = &config.dir {
+            return Ok(Web::local(config, dir, env, db, blobs));
+        }
+        let address = config.address()?;
 
         let (current, loader, keep) = (db.clone(), blobs.clone(), config.keep_versions);
         let live = tokio::task::spawn_blocking(move || -> Result<Option<Site>> {
@@ -74,11 +89,11 @@ impl Web {
         let server = Arc::new(SiteServer {
             live: live.clone(),
             blobs: blobs.clone(),
-            naddr: HeaderValue::from_str(&address.naddr()).expect("an naddr is a valid header"),
+            naddr: Some(HeaderValue::from_str(&address.naddr()).expect("an naddr is a valid header")),
             env,
             progress: progress.clone(),
         });
-        let worker = SyncWorker {
+        let worker = Worker::Sync(SyncWorker {
             address,
             db,
             blobs,
@@ -93,8 +108,28 @@ impl Web {
             },
             live,
             progress,
-        };
+        });
         Ok(Web { server, worker })
+    }
+
+    /// Serve `dir` in place of the nsite. Its files are read by the worker,
+    /// so armada answers, with the loading page, while it copies them in.
+    fn local(config: &WebConfig, dir: &std::path::Path, env: ClientEnv, db: WebDb, blobs: crate::blobs::BlobStore) -> Web {
+        tracing::info!(dir = %dir.display(), "serving the web app from web.dir rather than the nsite");
+        let live = Arc::new(ArcSwapOption::empty());
+        let progress = Arc::new(Progress::default());
+        let server = Arc::new(SiteServer { live: live.clone(), blobs: blobs.clone(), naddr: None, env, progress: progress.clone() });
+        let worker = Worker::Local(LocalWorker {
+            dir: dir.to_path_buf(),
+            watch: config.auto_update,
+            poll: local::POLL,
+            limits: Limits { max_file_size: config.max_file_size, max_site_size: config.max_site_size },
+            db,
+            blobs,
+            live,
+            progress,
+        });
+        Web { server, worker }
     }
 
     #[cfg(test)]
@@ -105,6 +140,10 @@ impl Web {
 
     /// Keep the site in sync until `cancel` fires, and hand back what serves it.
     pub fn start(self, cancel: CancellationToken) -> (Arc<SiteServer>, JoinHandle<()>) {
-        (self.server, tokio::spawn(self.worker.run(cancel)))
+        let task = match self.worker {
+            Worker::Sync(worker) => tokio::spawn(worker.run(cancel)),
+            Worker::Local(worker) => tokio::spawn(worker.run(cancel)),
+        };
+        (self.server, task)
     }
 }

@@ -3,6 +3,13 @@
 A release's notes are its section here, so tag `vX.Y.Z` only once
 `## X.Y.Z` exists: publishing fails without it.
 
+## Unreleased
+
+- `web.dir` serves the web app from a directory on this machine instead of
+  the nsite, such as a build of your own, and Nostr isn't asked for it.
+  With `auto_update` on, the directory is watched, and a change goes live
+  once it has held still for a couple of seconds.
+
 ## 0.9.0
 
 - `armada ban --user <npub>` bans one person on their own: armada takes

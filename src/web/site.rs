@@ -72,18 +72,24 @@ impl Site {
                 Err(missing) => tracing::warn!(event_id = event.id, sha256 = %missing, "an earlier version is missing blobs; its files aren't merged"),
             }
         }
+        Ok(Site::assemble(served.id.clone(), files, served.created_at, blobs))
+    }
+
+    /// The site of `files`, every one of them already stored, published at
+    /// `created_at`. `id` names it in the logs. Blocking.
+    pub fn assemble(id: String, mut files: HashMap<String, File>, created_at: i64, blobs: &BlobStore) -> Site {
         for (path, file) in &mut files {
             if matches!(&*lowercase_extname(path), ".html" | ".htm") {
                 *file = with_env(path, *file, blobs);
             }
         }
         let index = files.get("/index.html").map(|file| blobs.read_text(file.sha256, MAX_HTML_BYTES));
-        Ok(Site {
-            event_id: served.id.clone(),
+        Site {
+            event_id: id,
             files,
-            last_modified: HeaderValue::from_str(&http_date(served.created_at)).expect("an HTTP date is a valid header"),
+            last_modified: HeaderValue::from_str(&http_date(created_at)).expect("an HTTP date is a valid header"),
             csp: site_policy(index.as_deref()),
-        })
+        }
     }
 
     /// Resolve a request path: exact match, then a `.html` sibling, then

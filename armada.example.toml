@@ -32,6 +32,11 @@ http_listen = "[::]:80"
 [web]
 # The nsite to serve: an naddr, or an npub for that author's root site.
 nsite = "naddr1qvzqqqyf8qpzq7q6z5ns2hm5c8msyv83qwzxpxe52j8c4d4q5m92wsp9sflelkh9qqrxzundv9jxz0nw9gl"
+# Or serve the web app from a directory on this machine instead, such as a
+# build of Armada's own (its dist). Relative to this file. nsite and relays
+# are then left alone; with auto_update on, the directory is watched, and a
+# change goes live once it has held still for a couple of seconds.
+# dir = "/srv/armada/dist"
 auto_update = true
 relays = ["wss://relay.ditto.pub", "wss://relay.dreamith.to"]
 resync_interval = 600

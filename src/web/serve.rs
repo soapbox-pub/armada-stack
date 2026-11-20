@@ -38,8 +38,8 @@ const PREFLIGHT_MAX_AGE: &str = "86400";
 pub struct SiteServer {
     pub live: Arc<ArcSwapOption<Site>>,
     pub blobs: BlobStore,
-    /// The site's `X-Nsite-Addr`.
-    pub naddr: HeaderValue,
+    /// The site's `X-Nsite-Addr`, unless it's served from `web.dir`.
+    pub naddr: Option<HeaderValue>,
     /// What [`ENV_PATH`] says.
     pub env: ClientEnv,
     /// How far the sync worker has got, for [`loading::STATUS_PATH`].
@@ -148,8 +148,10 @@ impl SiteServer {
             .header(header::CACHE_CONTROL, cache_control(resolved.path))
             .header(header::ETAG, &etag)
             .header(header::LAST_MODIFIED, site.last_modified.clone())
-            .header(header::ACCEPT_RANGES, "bytes")
-            .header("x-nsite-addr", self.naddr.clone());
+            .header(header::ACCEPT_RANGES, "bytes");
+        if let Some(naddr) = &self.naddr {
+            builder = builder.header("x-nsite-addr", naddr.clone());
+        }
         if let Some(encoding) = encoding {
             builder = builder.header(header::CONTENT_ENCODING, encoding.as_str());
         }
