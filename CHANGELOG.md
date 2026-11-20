@@ -3,7 +3,7 @@
 A release's notes are its section here, so tag `vX.Y.Z` only once
 `## X.Y.Z` exists: publishing fails without it.
 
-## Unreleased
+## 0.10.0
 
 - `web.dir` serves the web app from a directory on this machine instead of
   the nsite, such as a build of your own, and Nostr isn't asked for it.
